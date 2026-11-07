@@ -360,3 +360,32 @@ TEST_CASE("A knockback is a fall on the packet's path", "[stock_movement][knockb
     // The landing stops it (FALL_LAND with the pending stop applied).
     CHECK((sm::landWithPendingKeys(f) & (sm::kForward | sm::kFalling | sm::kPendingStop)) == 0);
 }
+
+TEST_CASE("the pitch keys vote only swimming or flying and not while the mouse steers") {
+    // 0x5FB1A0 / 0x5FBBC0.
+    CHECK(sm::pitchVote(true, false, false, true) == 1);
+    CHECK(sm::pitchVote(false, true, false, true) == -1);
+    CHECK(sm::pitchVote(true, true, false, true) == 0);
+    CHECK(sm::pitchVote(true, false, true, true) == 0);   // right button steers
+    CHECK(sm::pitchVote(true, false, false, false) == 0); // on the ground
+}
+
+TEST_CASE("keyboard pitching runs at the pitch rate, three quarters while moving") {
+    // 0x9877D0, as 0x987770 for turning.
+    CHECK(sm::keyboardPitchRate(3.14159274f, 0) == Approx(3.14159274f));
+    CHECK(sm::keyboardPitchRate(3.14159274f, sm::kForward) == Approx(3.14159274f * 0.75f));
+    CHECK(sm::keyboardPitchRate(3.14159274f, sm::kForward, sm::kFlag2FullSpeedPitching) ==
+          Approx(3.14159274f));
+    CHECK(sm::stepPitch(0.0f, 1, 3.14159274f, 0.25f) == Approx(0.785398f));
+    CHECK(sm::stepPitch(1.5f, 1, 3.14159274f, 0.5f) == Approx(sm::kMaxPitch));
+    CHECK(sm::stepPitch(-1.5f, -1, 3.14159274f, 0.5f) == Approx(-sm::kMaxPitch));
+    CHECK(sm::stepPitch(0.3f, 0, 3.14159274f, 0.5f) == Approx(0.3f));
+}
+
+TEST_CASE("SET_PITCH goes out at 0.1 rad from the last packet's pitch, swimming or flying") {
+    // 0x71AE80 case 0xDB.
+    CHECK_FALSE(sm::pitchChangeWorthSending(0.0f, 0.09f, sm::kSwimming));
+    CHECK(sm::pitchChangeWorthSending(0.0f, 0.1f, sm::kSwimming));
+    CHECK(sm::pitchChangeWorthSending(0.2f, 0.05f, sm::kFlying));
+    CHECK_FALSE(sm::pitchChangeWorthSending(0.0f, 0.5f, 0));  // on foot: no pitch
+}

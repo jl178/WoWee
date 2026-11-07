@@ -89,4 +89,29 @@ inline LookDelta mouseLook(float dxPixels, float dyPixels, float aspect,
     return d;
 }
 
+// ---- Held view motion (MoveView*Start/Stop, 0x5FF000 -> 0x6000E0) ----
+
+/// One frame of the held MoveView motions (0x6000E0, ms since the last frame
+/// x 0.001): In/Out at cameraDistanceMoveSpeed x speed yd/s, Right/Left at
+/// cameraYawMoveSpeed x speed deg/s and Up/Down at cameraPitchMoveSpeed x
+/// speed. Right RAISES the stock yaw (+0x260), the way a mouse moved left
+/// turns it - the camera goes round to the character's right; Up RAISES the
+/// stock pitch (+0x230), which looks further down - the camera goes up.
+/// Returned in this client's sense: yaw as it adds to the camera yaw, pitch
+/// positive looking up.
+struct ViewMoveStep {
+    float zoomOut = 0.0f;   ///< yards, out positive
+    float yawDeg = 0.0f;
+    float pitchDeg = 0.0f;
+};
+inline ViewMoveStep viewMoveStep(float in, float out, float right, float left, float up,
+                                 float down, float distanceMoveSpeed, float yawMoveSpeed,
+                                 float pitchMoveSpeed, float dt) {
+    ViewMoveStep s;
+    s.zoomOut = (out - in) * distanceMoveSpeed * dt;
+    s.yawDeg = (right - left) * yawMoveSpeed * dt;
+    s.pitchDeg = (down - up) * pitchMoveSpeed * dt;
+    return s;
+}
+
 }  // namespace wowee::rendering::stock_camera

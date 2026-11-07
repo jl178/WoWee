@@ -156,6 +156,31 @@ FULL_SPEED_PITCHING (0x10). Turning in place is the full rate. The mouse
 sets the facing directly, at any rate. The player's pitch is clamped to
 +-pi/2 (0x9F1FF4 / 0x9E8D88) or a vehicle seat's limits (0x5FB3A0).
 
+**The player's pitch** (CMovement +0x24) is what a swimmer or a flier moves
+along (section 3); three things set it:
+
+- **Mouse steering** (input bits 0x2000001: the right button, or mouselook):
+  every mouse move 0x6023D0 hands the camera's pitch to 0x5FBE70, which sets
+  the player's to it negated (`-(+0x130 + +0x120)`, clamped to +-1.5533) via
+  0x5FB3A0 - an event 0x14, **MSG_MOVE_SET_PITCH**, at 0.1 rad from the pitch
+  the last packet carried (section 9). The facing goes the same way
+  (0x5FB260). Nothing else makes the camera steer: 0x5FA110 / 0x5FA6B0 test
+  only those bits, so a swimmer with the keys alone keeps its own facing and
+  pitch, and orbiting with the left button turns neither - in water as on
+  land.
+- **PitchUp / PitchDown** (CGInputControl bits 0x400 / 0x800, Lua
+  0x5FC8E0 / 0x5FC570 and 0x5FC920 / 0x5FC5C0): the re-vote 0x5FBBC0 runs
+  0x5FB1A0 only while swimming or flying (flags 0x2200000, or flags2 0x20),
+  and 0x5FB1A0 does nothing while the mouse steers (0x2000001). Up +1, down -1:
+  a positive vote starts **START_PITCH_UP** (0x72E900(t, 1) -> 0x6F1310, event
+  0xE), a negative one **START_PITCH_DOWN** (event 0xF), zero **STOP_PITCH**
+  (0x72E9B0 -> 0x6EECA0, event 0x10); input bit 0x80000 remembers that a
+  pitch is running. Leaving the water or the air with it running stops it
+  (0x5FBBC0's other branch). The physics then moves the pitch at the pitch
+  rate (+0xB0, pi rad/s), x0.75 while moving unless FULL_SPEED_PITCHING
+  (0x9877D0), to +-pi/2.
+- Otherwise it holds.
+
 **Drunk drift** (0x6DEB30, run for the active player from the WorldFrame
 event-6 handler 0x4F8730, inferred every frame; drunk from 0x4F7290, see
 world-lighting.md §8 "Drunk"):
@@ -425,6 +450,25 @@ mouseInvertYaw/Pitch 0. Not traced: what cameraDive and the
 surface/submerge pitches do to the view at the water line, and the
 first-person model fade.
 
+**Held view motion** (MoveView*Start / Stop, 0x5FF000 sets bit `1 << 2i`
+in CGCamera +0x160, the start time +0x164 + 4i and the speed argument
++0x1AC + 4i; Stop sets bit `2 << 2i` and the stop time). The per-frame
+consumer is **0x6000E0** (from the camera update 0x606F90 while +0x160 is
+nonzero), which advances each held motion by the milliseconds since it last
+ran, x 0.001 (0xA1E34C):
+
+| i | motion | change |
+|---|---|---|
+| 0 / 1 | In / Out | target distance +0x1E8 -/+ `ms x cameraDistanceMoveSpeed x speed`, held to the zoom limits |
+| 2 / 3 | Right / Left | yaw +0x260 +/- `ms x cameraYawMoveSpeed x speed x pi/180`, wrapped to 2 pi |
+| 4 / 5 | Up / Down | pitch +0x230 +/- `ms x cameraPitchMoveSpeed x speed x pi/180`, held to +-1.5533 |
+
+So the turn and tilt run at the **cameraYawMoveSpeed / cameraPitchMoveSpeed
+CVars** (180 / 90 deg/s by default, and whatever Mouse Look Speed sets).
+Right **raises** the yaw, which a mouse moved right lowers (0x6020B0
+subtracts): the camera goes round to the character's right. Up **raises** the
+stock pitch, which looks further down: the camera goes up.
+
 **Drunk** (world-lighting.md §8): the camera's FOV offset `+0x138` eases
 toward `drunk · 89°` at cameraFoVSmoothSpeed (0.5 °/s; 0x604940, 0x6030E0,
 0x603D30); FOV = `clamp(0x40 + 0x138, 0, 179°)` (0x5FF500). A drunk target
@@ -463,6 +507,9 @@ also skips the cameraDive surface/submerge pitch limits (0x6023D0,
 | 31 | A knockback (SMSG_MOVE_KNOCK_BACK, event 0x22 -> 0x6E9FF0) is a fall on the packet's direction at its speed, held to the landing like a jump's, FORWARD \| PENDING_STOP; the ack carries that fall; no JUMP (`unit-motion.md` section 6) | a horizontal push that decayed at 4.5/s, plus a MSG_MOVE_JUMP with a normal jump's fields before the ack | `stock_movement::knockBackFlags`, the ack's fall fields from the packet, the jump's latched path (`CameraController::applyKnockBack`) |
 | 32 | A server spline of the player's own (a charge, a leap) moves the player as any unit's; the controls and every movement packet wait; `CMSG_MOVE_SPLINE_DONE` at its end; the held keys start again (`unit-motion.md` section 6) | Charge was a dash of the client's own at 25 yd/s, ending elsewhere than the server's spline, with a heartbeat from there | followed from the spline (`MovementHandler::updateServerSpline`) |
 | 33 | Mouse look turns `dx / ddcW / 800 x cameraYawMoveSpeed` and tilts `dy / ddcH / 600 x cameraPitchMoveSpeed` degrees per cursor pixel, the cursor scaled by the Windows pointer speed mouseSpeed sets (section 4); two sliders, mouseSpeed 0.5..1.5 and cameraYawMoveSpeed 90..270 (pitch at half) | one "sensitivity" of 0.2 deg per pixel on both axes (0.15 from the renderer until settings loaded), which both stock sliders wrote, over ranges redefined to 0.05..1 | `stock_camera::mouseLook` in `turnByMouse`; settings `mousespeed` (mouseSpeed, default 1.0) and `mouselookspeed` (cameraYawMoveSpeed 180, pitch speed written at half, `mouselookpitchspeed` for cameraPitchMoveSpeed), bound to the three CVars at their stock ranges; the old `mouse_sensitivity` key is not read. The pad turns in degrees (`applyLookDegrees`) |
+| 34 | PitchUp / PitchDown, swimming or flying and not mouse-steering, move the player's pitch at the pitch rate (x0.75 moving) and send START_PITCH_UP / DOWN / STOP_PITCH (section 5) | the binding set a command nothing read | `stock_movement::pitchVote / keyboardPitchRate / stepPitch` in `CameraController::update`; the vote's changes send the three opcodes; the server's pitch rate reaches the camera |
+| 35 | The camera sets the player's pitch (and facing) only while the mouse steers (0x2000001); a swimmer moves along its own facing and pitch; a steered pitch change goes out as SET_PITCH at 0.1 rad | in water the camera steered facing and pitch whenever a key was held, autorun swam level; SET_PITCH was never sent (the pitch rode along on the next packet) | `movePitchDeg_` for swimming and flight alike: the camera's while steering, the keys' otherwise, held; `MovementHandler::pitchChangeWorthSending` |
+| 36 | MoveView turns at cameraYawMoveSpeed and tilts at cameraPitchMoveSpeed (0x6000E0); Right goes round to the character's right, Up goes up | 180 / 90 by name, Right and Up the other way round | `stock_camera::viewMoveStep` at the controller's look speeds |
 
 Still different (not changed here; each needs in-game checking):
 

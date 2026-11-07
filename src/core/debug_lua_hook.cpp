@@ -251,7 +251,7 @@ int luaDebugCameraState(lua_State* L) {
     lua_pushnumber(L, cc->getYaw());
     lua_pushnumber(L, cc->getPitch());
     lua_pushnumber(L, cc->getFacingYaw());
-    lua_pushnumber(L, glm::degrees(cc->getFlightPitchRad()));
+    lua_pushnumber(L, glm::degrees(cc->getMovePitchRad()));
     lua_pushnumber(L, cc->getViewDistance());
     return 5;
 }

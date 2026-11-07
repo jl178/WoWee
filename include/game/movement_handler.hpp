@@ -229,6 +229,9 @@ public:
     /// from the facing the last movement packet of any kind carried (0x71AE80).
     /// canonicalYaw is in the same space as movementInfo.orientation.
     [[nodiscard]] bool facingChangeWorthSending(float canonicalYaw) const;
+    /// MSG_MOVE_SET_PITCH due: swimming or flying, 0.1 rad from the pitch the
+    /// last movement packet carried (stock_movement::pitchChangeWorthSending).
+    [[nodiscard]] bool pitchChangeWorthSending(float pitchRad) const;
     [[nodiscard]] float getMoveHeartbeatInterval() const { return moveHeartbeatInterval_; }
     [[nodiscard]] bool isServerMovementAllowed() const { return serverMovementAllowed_; }
     /// Whether the player is in the air on a flying mount, as the movement
@@ -368,6 +371,7 @@ private:
     /// the stock client measures a facing change from (CGUnit +0xA50, written
     /// by 0x71F0C0). Unset until the first packet.
     float lastPacketOrientation_ = 0.0f;
+    float lastPacketPitch_ = 0.0f;
     bool hasLastPacketOrientation_ = false;
 
     // The active mover (0: the player) and the player's own movement and

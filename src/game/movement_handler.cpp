@@ -585,6 +585,11 @@ bool MovementHandler::inStockHeartbeatMotion() const {
     return (movementInfo.flags & stock_movement::kMovingMask) != 0;
 }
 
+bool MovementHandler::pitchChangeWorthSending(float pitchRad) const {
+    if (!hasLastPacketOrientation_) return false;
+    return stock_movement::pitchChangeWorthSending(lastPacketPitch_, pitchRad, movementInfo.flags);
+}
+
 bool MovementHandler::facingChangeWorthSending(float canonicalYaw) const {
     if (!hasLastPacketOrientation_) return true;
     return stock_movement::facingChangeWorthSending(lastPacketOrientation_, canonicalYaw);
@@ -1036,6 +1041,7 @@ void MovementHandler::sendMovement(Opcode opcode) {
     // 0x6E9B70) and is the reference a later facing change is measured from.
     timeSinceLastMoveHeartbeat_ = 0.0f;
     lastPacketOrientation_ = movementInfo.orientation;
+    lastPacketPitch_ = movementInfo.pitch;
     hasLastPacketOrientation_ = true;
     if (movementHeldReason_) {
         LOG_WARNING("Movement: sending again (was held while ", movementHeldReason_, ")");

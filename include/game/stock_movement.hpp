@@ -267,6 +267,45 @@ inline bool facingChangeWorthSending(float lastSentFacing, float facing) {
     return std::abs(d) >= kFacingResendRadians;
 }
 
+/// MSG_MOVE_SET_PITCH the same way (0x71AE80 case 0xDB): only swimming or
+/// flying, at kFacingResendRadians from the pitch the last packet carried
+/// (CGUnit +0xA54).
+inline bool pitchChangeWorthSending(float lastSentPitch, float pitch, uint32_t flags) {
+    if ((flags & (kSwimming | kFlying)) == 0) return false;
+    return std::abs(pitch - lastSentPitch) >= kFacingResendRadians;
+}
+
+// ---- The pitch keys (PitchUp/PitchDown, CGInputControl bits 0x400/0x800) ----
+
+/// The player's pitch limits (0x9F1FF4 / 0x9E8D88), radians.
+inline constexpr float kMaxPitch = 1.57079637f;
+
+/// Keyboard pitching (0x9877D0): the pitch rate, times kTurnWhileMovingFactor
+/// while moving unless flags2 has FULL_SPEED_PITCHING.
+inline float keyboardPitchRate(float pitchRate, uint32_t flags, uint32_t flags2 = 0) {
+    if ((flags & kMovingMask) != 0 && (flags2 & kFlag2FullSpeedPitching) == 0) {
+        return pitchRate * kTurnWhileMovingFactor;
+    }
+    return pitchRate;
+}
+
+/// The pitch vote (0x5FB1A0): PitchUp +1, PitchDown -1, nothing while the
+/// mouse steers (input bits 0x2000001) or unless the player swims or flies
+/// (0x5FBBC0: flags 0x2200000 or flags2 0x20). +1 starts PITCH_UP
+/// (0x72E900(t, 1), event 0xE), -1 PITCH_DOWN (event 0xF), 0 stops (0x72E9B0,
+/// event 0x10).
+inline int pitchVote(bool pitchUpKey, bool pitchDownKey, bool mouseSteering,
+                     bool swimmingOrFlying) {
+    if (mouseSteering || !swimmingOrFlying) return 0;
+    return (pitchUpKey ? 1 : 0) - (pitchDownKey ? 1 : 0);
+}
+
+/// One frame of the pitch keys: the pitch moved by vote x rate x dt and held
+/// to +-pi/2.
+inline float stepPitch(float pitch, int vote, float rate, float dt) {
+    return std::clamp(pitch + static_cast<float>(vote) * rate * dt, -kMaxPitch, kMaxPitch);
+}
+
 /// The liquid depth over the feet at which swimming starts, and the one below
 /// which it stops (0x730D10), for a unit of the given collision height.
 inline float swimEnterDepth(float collisionHeight) {
