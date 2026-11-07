@@ -10,6 +10,7 @@
 namespace wowee::core  { class Window; }
 namespace wowee::audio { class AudioCoordinator; }
 namespace wowee::game  { class ExpansionRegistry; }
+namespace wowee::rendering { class CameraController; }
 
 namespace wowee::addons {
 
@@ -314,6 +315,14 @@ struct LuaServices {
     /// Routed through the same call rather than reimplemented, so both put the
     /// file in the same place under the same name.
     std::function<void()> takeScreenshot;
+
+    /// The camera, for the view and zoom bindings (SetView, CameraZoomIn,
+    /// FlipCameraYaw, MoveViewInStart, ...). Null outside the world.
+    std::function<rendering::CameraController*()> getCameraController;
+
+    /// IsFlyableArea (0x51A1D0): the AreaTable flags of the area the player
+    /// stands in, else of its zone, have 0x400 and not 0x20000000.
+    std::function<bool()> isFlyableArea;
 };
 
 } // namespace wowee::addons

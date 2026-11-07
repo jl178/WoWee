@@ -3,6 +3,7 @@
 //                        pet commands (/petattack, /petfollow, etc.)
 // Moved from ChatPanel::sendChatMessage() if/else chain (Phase 3).
 #include "ui/chat/i_chat_command.hpp"
+#include "ui/chat/macro_evaluator.hpp"
 #include "ui/chat_panel.hpp"
 #include "game/game_handler.hpp"
 #include "game/pet_action.hpp"
@@ -87,7 +88,8 @@ public:
 class DismountCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.dismount();
+        // SlashCmdList["DISMOUNT"]: when the options match.
+        if (evaluateMacroOptions(ctx.args, ctx.gameHandler).matched) ctx.gameHandler.dismount();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"dismount"}; }
@@ -98,6 +100,7 @@ public:
 class CancelFormCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
+        if (!evaluateMacroOptions(ctx.args, ctx.gameHandler).matched) return {};
         for (const auto& aura : ctx.gameHandler.getPlayerAuras()) {
             if (aura.spellId == 0) continue;
             if (aura.flags & 0x20) {
@@ -116,7 +119,10 @@ class CancelAuraCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (ctx.args.empty()) return {.handled = false, .clearInput = false};
-        std::string auraArg = ctx.args;
+        // SecureCmdList["CANCELAURA"]: spell = SecureCmdOptionParse(msg).
+        const MacroOptionsResult opt = evaluateMacroOptions(ctx.args, ctx.gameHandler);
+        if (!opt.matched) return {};
+        std::string auraArg = opt.action;
         while (!auraArg.empty() && auraArg.front() == ' ') auraArg.erase(auraArg.begin());
         while (!auraArg.empty() && auraArg.back()  == ' ') auraArg.pop_back();
         // Try numeric ID first
@@ -155,7 +161,15 @@ public:
 class PetAttackCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        uint64_t target = ctx.gameHandler.hasTarget() ? ctx.gameHandler.getTargetGuid() : 0;
+        // SecureCmdList["PET_ATTACK"]: the action names the unit unless
+        // target= named one other than "pettarget"; neither is the target.
+        const MacroOptionsResult opt = evaluateMacroOptions(ctx.args, ctx.gameHandler);
+        if (!opt.matched) return {};
+        std::string unit = (opt.hasTarget && opt.target != "pettarget") ? opt.target : opt.action;
+        while (!unit.empty() && unit.front() == ' ') unit.erase(unit.begin());
+        const uint64_t target = unit.empty()
+            ? (ctx.gameHandler.hasTarget() ? ctx.gameHandler.getTargetGuid() : 0)
+            : resolveMacroUnit(unit, ctx.gameHandler);
         ctx.gameHandler.sendPetAction(
             game::pet::packPetAction(game::pet::ActionType::Command, game::pet::kAttack), target);
         return {};
@@ -167,6 +181,7 @@ public:
 class PetFollowCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
+        if (!evaluateMacroOptions(ctx.args, ctx.gameHandler).matched) return {};
         ctx.gameHandler.sendPetAction(
             game::pet::packPetAction(game::pet::ActionType::Command, game::pet::kFollow), 0);
         return {};
@@ -178,6 +193,7 @@ public:
 class PetStayCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
+        if (!evaluateMacroOptions(ctx.args, ctx.gameHandler).matched) return {};
         ctx.gameHandler.sendPetAction(
             game::pet::packPetAction(game::pet::ActionType::Command, game::pet::kStay), 0);
         return {};
@@ -189,6 +205,7 @@ public:
 class PetPassiveCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
+        if (!evaluateMacroOptions(ctx.args, ctx.gameHandler).matched) return {};
         ctx.gameHandler.sendPetAction(
             game::pet::packPetAction(game::pet::ActionType::Reaction, game::pet::kPassive), 0);
         return {};
@@ -200,6 +217,7 @@ public:
 class PetDefensiveCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
+        if (!evaluateMacroOptions(ctx.args, ctx.gameHandler).matched) return {};
         ctx.gameHandler.sendPetAction(
             game::pet::packPetAction(game::pet::ActionType::Reaction, game::pet::kDefensive), 0);
         return {};
@@ -211,6 +229,7 @@ public:
 class PetAggressiveCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
+        if (!evaluateMacroOptions(ctx.args, ctx.gameHandler).matched) return {};
         ctx.gameHandler.sendPetAction(
             game::pet::packPetAction(game::pet::ActionType::Reaction, game::pet::kAggressive), 0);
         return {};

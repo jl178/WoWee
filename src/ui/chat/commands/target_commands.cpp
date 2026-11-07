@@ -61,23 +61,18 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (ctx.args.empty()) return {.handled = false, .clearInput = false};
 
-        std::string targetArg = ctx.args;
-
-        // Evaluate conditionals if present
-        uint64_t targetCmdOverride = static_cast<uint64_t>(-1);
-        if (!targetArg.empty() && targetArg.front() == '[') {
-            targetArg = evaluateMacroConditionals(targetArg, ctx.gameHandler, targetCmdOverride);
-            if (targetArg.empty() && targetCmdOverride == static_cast<uint64_t>(-1)) return {};
-            trimInPlace(targetArg);
-        }
-
-        // If conditionals resolved to a specific GUID, target it directly
-        if (targetCmdOverride != static_cast<uint64_t>(-1) && targetCmdOverride != 0) {
-            ctx.gameHandler.setTarget(targetCmdOverride);
+        // SecureCmdList["TARGET"]: the action names the unit unless target=
+        // named one other than "target" (chatframe.lua), then TargetUnit.
+        const MacroOptionsResult opt = evaluateMacroOptions(ctx.args, ctx.gameHandler);
+        if (!opt.matched) return {};
+        std::string targetArg = (opt.hasTarget && opt.target != "target") ? opt.target : opt.action;
+        trimInPlace(targetArg);
+        if (targetArg.empty()) return {};
+        if (const uint64_t unit = resolveMacroUnit(targetArg, ctx.gameHandler)) {
+            ctx.gameHandler.setTarget(unit);
             return {};
         }
-
-        if (targetArg.empty()) return {};
+        if (opt.hasTarget && opt.target != "target") return {};
 
         std::string targetArgLower = targetArg;
         for (char& c : targetArgLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -102,17 +97,7 @@ public:
 class ClearTargetCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        bool condPass = true;
-        if (!ctx.args.empty()) {
-            std::string ctArg = ctx.args;
-            trimInPlace(ctArg);
-            if (!ctArg.empty() && ctArg.front() == '[') {
-                uint64_t ctOver = static_cast<uint64_t>(-1);
-                std::string res = evaluateMacroConditionals(ctArg, ctx.gameHandler, ctOver);
-                condPass = !(res.empty() && ctOver == static_cast<uint64_t>(-1));
-            }
-        }
-        if (condPass) ctx.gameHandler.clearTarget();
+        if (evaluateMacroOptions(ctx.args, ctx.gameHandler).matched) ctx.gameHandler.clearTarget();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"cleartarget"}; }
@@ -179,19 +164,18 @@ class FocusCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (!ctx.args.empty()) {
-            std::string focusArg = ctx.args;
+            // SecureCmdList["FOCUS"]: the action names the unit unless
+            // target= named one other than "focus"; FocusUnit("") is the target.
+            const MacroOptionsResult opt = evaluateMacroOptions(ctx.args, ctx.gameHandler);
+            if (!opt.matched) return {};
+            std::string focusArg = (opt.hasTarget && opt.target != "focus") ? opt.target : opt.action;
+            trimInPlace(focusArg);
+            const uint64_t focusUnit = focusArg.empty()
+                ? ctx.gameHandler.getTargetGuid() : resolveMacroUnit(focusArg, ctx.gameHandler);
 
-            // Evaluate conditionals if present
-            uint64_t focusCmdOverride = static_cast<uint64_t>(-1);
-            if (!focusArg.empty() && focusArg.front() == '[') {
-                focusArg = evaluateMacroConditionals(focusArg, ctx.gameHandler, focusCmdOverride);
-                if (focusArg.empty() && focusCmdOverride == static_cast<uint64_t>(-1)) return {};
-                trimInPlace(focusArg);
-            }
-
-            if (focusCmdOverride != static_cast<uint64_t>(-1) && focusCmdOverride != 0) {
-                ctx.gameHandler.setFocus(focusCmdOverride);
-            } else if (!focusArg.empty()) {
+            if (focusUnit != 0) {
+                ctx.gameHandler.setFocus(focusUnit);
+            } else if (!focusArg.empty() && !(opt.hasTarget && opt.target != "focus")) {
                 std::string focusArgLower = focusArg;
                 for (char& c : focusArgLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 uint64_t bestGuid = findNearestByName(ctx.gameHandler, focusArgLower);

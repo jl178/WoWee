@@ -1120,6 +1120,7 @@ set(WOWEE_SOURCES
     src/addons/lua_social_api.cpp
     src/addons/lua_system_api.cpp
     src/addons/lua_action_api.cpp
+    src/addons/lua_macro_api.cpp
     src/addons/lua_world_map_api.cpp
     src/addons/toc_parser.cpp
 

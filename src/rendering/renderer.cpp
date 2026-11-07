@@ -2278,7 +2278,7 @@ void Renderer::recordScreenCapture() {
     }
 }
 
-bool Renderer::captureScreenshot(const std::string& outputPath) {
+bool Renderer::captureScreenshot(const std::string& outputPath, int jpegQuality) {
     if (!vkCtx) return false;
 
     VkDevice device     = vkCtx->getDevice();
@@ -2365,8 +2365,15 @@ bool Renderer::captureScreenshot(const std::string& outputPath) {
     if (outPath.has_parent_path())
         std::filesystem::create_directories(outPath.parent_path());
 
-    int ok = stbi_write_png(outputPath.c_str(),
-                            static_cast<int>(w), static_cast<int>(h),
+    const std::string ext = outPath.extension().string();
+    int ok = 0;
+    if (ext == ".jpg" || ext == ".jpeg")
+        ok = stbi_write_jpg(outputPath.c_str(), static_cast<int>(w), static_cast<int>(h),
+                            4, pixels, jpegQuality);
+    else if (ext == ".tga")
+        ok = stbi_write_tga(outputPath.c_str(), static_cast<int>(w), static_cast<int>(h), 4, pixels);
+    else
+        ok = stbi_write_png(outputPath.c_str(), static_cast<int>(w), static_cast<int>(h),
                             4, pixels, static_cast<int>(w * 4));
 
     vmaUnmapMemory(alloc, stagingAlloc);
@@ -2375,7 +2382,7 @@ bool Renderer::captureScreenshot(const std::string& outputPath) {
     if (ok) {
         LOG_INFO("Screenshot saved: ", outputPath);
     } else {
-        LOG_WARNING("Screenshot: stbi_write_png failed for ", outputPath);
+        LOG_WARNING("Screenshot: could not write for ", outputPath);
     }
     return ok != 0;
 }

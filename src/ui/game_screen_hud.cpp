@@ -12,6 +12,7 @@
 #include "core/window.hpp"
 #include "rendering/vk_context.hpp"
 #include "core/application.hpp"
+#include "core/config_paths.hpp"
 #include "core/appearance_composer.hpp"
 #include "ui/map_window.hpp"
 #include "addons/addon_manager.hpp"
@@ -54,6 +55,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <ctime>
+#include <chrono>
 #include <sstream>
 #include <cstdlib>
 #include <filesystem>
@@ -846,14 +849,33 @@ void GameScreen::takeScreenshot() {
     auto* renderer = services_.renderer;
     if (!renderer) return;
 
-    const std::string path = capturePath("screenshots", "png");
+    // The stock Screenshot() (0x5150E0 -> 0x4A8570): the Screenshots folder,
+    // WoWScrnShot_MMDDYY_HHMMSS, a JPEG at quality round(5.5 * q + 45) for
+    // screenshotQuality q (1-10, default 3), or a TGA when screenshotFormat
+    // is "tga" (default "jpeg"); then SCREENSHOT_SUCCEEDED or _FAILED, which
+    // worldframe.lua shows as "Screen Captured".
+    const std::string format = addons::storedCVarValue("screenshotFormat", "jpeg");
+    int quality = 3;
+    try { quality = std::stoi(addons::storedCVarValue("screenshotQuality", "3")); } catch (...) {}
+    quality = std::clamp(quality, 1, 10);
+    const int jpegQuality = static_cast<int>(std::lround(quality * 5.5 + 45.0));
 
-    if (renderer->captureScreenshot(path)) {
-        game::MessageChatData sysMsg;
-        sysMsg.type = game::ChatType::SYSTEM;
-        sysMsg.language = game::ChatLanguage::UNIVERSAL;
-        sysMsg.message = "Screenshot saved: " + path;
-        services_.gameHandler->addLocalChatMessage(sysMsg);
+    const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    const std::tm tm = core::localTime(now);
+    char stamp[32];
+    std::strftime(stamp, sizeof(stamp), "%m%d%y_%H%M%S", &tm);
+    const std::string path = core::getConfigRoot() + "/Screenshots/WoWScrnShot_" + stamp +
+                             (format == "tga" ? ".tga" : ".jpg");
+
+    const bool ok = renderer->captureScreenshot(path, jpegQuality);
+    auto* gh = services_.gameHandler;
+    if (!gh) return;
+    auto* am = core::Application::getInstance().getAddonManager();
+    if (am && am->isInitialized()) {
+        gh->fireAddonEvent(ok ? "SCREENSHOT_SUCCEEDED" : "SCREENSHOT_FAILED", {});
+    } else if (ok) {
+        // No interface to say so: this client's own line.
+        gh->addSystemChatMessage("Screenshot saved: " + path);
     }
 }
 

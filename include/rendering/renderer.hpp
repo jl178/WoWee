@@ -249,7 +249,9 @@ public:
     float getBodyFacingStep() const { return bodyFacingStep_; }
 
     // Screenshot capture - copies swapchain image to PNG file
-    bool captureScreenshot(const std::string& outputPath);
+    /// Writes the last presented frame. The format follows the extension:
+    /// .jpg at `jpegQuality` (the stock Screenshot path), .tga, else .png.
+    bool captureScreenshot(const std::string& outputPath, int jpegQuality = 90);
 
     /// Start writing the screen, interface included, and what the client
     /// plays to a video file. False, with the reason in error, when it cannot.

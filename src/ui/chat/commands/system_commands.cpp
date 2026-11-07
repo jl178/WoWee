@@ -139,18 +139,8 @@ public:
 class StopMacroCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        bool shouldStop = true;
-        if (!ctx.args.empty()) {
-            std::string condArg = ctx.args;
-            while (!condArg.empty() && condArg.front() == ' ') condArg.erase(condArg.begin());
-            if (!condArg.empty() && condArg.front() == '[') {
-                // Append a sentinel action so evaluateMacroConditionals can signal a match.
-                uint64_t tgtOver = static_cast<uint64_t>(-1);
-                std::string hit = evaluateMacroConditionals(condArg + " __stop__", ctx.gameHandler, tgtOver);
-                shouldStop = !hit.empty();
-            }
-        }
-        if (shouldStop) ctx.panel.macroStopped() = true;
+        // SecureCmdList["STOPMACRO"]: stop when any clause matches.
+        if (evaluateMacroOptions(ctx.args, ctx.gameHandler).matched) ctx.panel.macroStopped() = true;
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"stopmacro"}; }

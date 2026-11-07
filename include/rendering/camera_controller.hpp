@@ -4,6 +4,7 @@
 #include "core/input.hpp"
 #include "game/stock_movement.hpp"
 #include <SDL3/SDL.h>
+#include <array>
 #include <algorithm>
 #include <functional>
 #include <optional>
@@ -70,6 +71,36 @@ public:
     void setSteering(bool steering) { steering_ = steering; }
 
     void processMouseWheel(float delta);
+
+    // ---- The stock camera views (CGCamera +0xB4 current, +0xB8 + 12*i
+    //      distance/pitch/yaw; Lua SetView 0x6039B0 -> 0x603330, SaveView
+    //      0x5FF260 -> 0x5FE440, ResetView 0x604C80 -> 0x6048A0, NextView
+    //      0x604CE0, PrevView 0x604D10; docs/re/macros-bindings.md) ----
+    /// Eight slots; 1-5 are the ones Lua reaches. Defaults (0xAD1BA8):
+    /// 1 first person, 2 5.55 yd / 10 deg (the start view), 3 5.55 / 20,
+    /// 4 13.88 / 30, 5 13.88 / 10; yaw 0 behind the character.
+    static constexpr int kViewCount = 8;
+    /// Moves to view `index`: eased when it is another view, at once when it
+    /// is the current one (0x603330 blend 1 -> 2).
+    void setView(int index);
+    /// The camera as it is now, into view `index`.
+    void saveView(int index);
+    /// View `index` back to its default, and moved to when it is current.
+    void resetView(int index);
+    [[nodiscard]] int currentView() const { return currentView_; }
+    /// FlipCameraYaw(degrees) (0x5FF2C0): the view's yaw turned by `degrees`.
+    void flipYaw(float degrees);
+    /// MoveViewIn/Out/Left/Right/Up/Down Start and Stop (0x5FF000): held
+    /// camera motion, `speed` times the camera's move speed.
+    enum class ViewMove { In = 0, Out, Right, Left, Up, Down };
+    void setViewMove(ViewMove move, bool on, float speed = 1.0f);
+    /// TurnOrActionStart (right button) and CameraOrSelectOrMoveStart (left
+    /// button) from a script: held as the button would be, for steering and
+    /// two-button running. The physical buttons are not affected.
+    void setScriptedMouseButton(bool right, bool down) {
+        (right ? scriptedRightButton_ : scriptedLeftButton_) = down;
+    }
+
     void setFollowTarget(glm::vec3* target);
     void setDefaultSpawn(const glm::vec3& position, float yawDeg, float pitchDeg) {
         defaultPosition = position;
@@ -610,6 +641,21 @@ private:
     static constexpr float kFollowPitchDownMaxDeg = 30.0f;
     static constexpr float kFollowTimeMin = 0.1f;
     static constexpr float kFollowTimeMax = 2.0f;
+
+    /// The views: distance (yards), pitch (degrees looking down), yaw
+    /// (degrees from behind the character).
+    struct CameraView { float distance; float pitchDown; float yaw; };
+    static constexpr std::array<CameraView, kViewCount> kDefaultViews{{
+        {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {5.55f, 10.0f, 0.0f}, {5.55f, 20.0f, 0.0f},
+        {13.88f, 30.0f, 0.0f}, {13.88f, 10.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {5.0f, 10.0f, 0.0f},
+    }};
+    std::array<CameraView, kViewCount> views_ = kDefaultViews;
+    int currentView_ = 2;   // cameraView "2"
+    /// Held MoveView* motion: speed per direction, 0 when not held.
+    std::array<float, 6> viewMoveSpeed_{};
+    void stepViewMoves(float deltaTime);
+    bool scriptedLeftButton_ = false;
+    bool scriptedRightButton_ = false;
     void updateStockFollow(float deltaTime, bool forward, bool backward,
                            bool strafeLeft, bool strafeRight,
                            bool turnLeft, bool turnRight, bool cameraDrivesFacing);
