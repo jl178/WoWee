@@ -2945,10 +2945,12 @@ public:
     void setLevelUpCallback(LevelUpCallback cb) { levelUpCallback_ = std::move(cb); }
 
     // Stat deltas from the last SMSG_LEVELUP_INFO (valid until next level-up)
+    // Signed: the server sends new base minus current create values, which
+    // can go down (a module's own base tables).
     struct LevelUpDeltas {
-        uint32_t hp   = 0;
-        uint32_t mana = 0;
-        uint32_t str = 0, agi = 0, sta = 0, intel = 0, spi = 0;
+        int32_t hp   = 0;
+        int32_t mana = 0;
+        int32_t str = 0, agi = 0, sta = 0, intel = 0, spi = 0;
     };
     const LevelUpDeltas& getLastLevelUpDeltas() const { return lastLevelUpDeltas_; }
 

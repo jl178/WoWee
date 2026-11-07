@@ -1498,20 +1498,28 @@ void GameHandler::registerCoreOpcodes() {
     for (auto op : {Opcode::SMSG_LEVELUP_INFO, Opcode::SMSG_LEVELUP_INFO_ALT}) {
         dispatchTable_[op] = [this](network::Packet& packet) {
             // Server-authoritative level-up event.
-            // WotLK layout: uint32 newLevel + uint32 hpDelta + uint32 manaDelta + 5x uint32 statDeltas
+            // WotLK layout: uint32 level, health, then one delta per power
+            // (MAX_POWERS = 7: mana first) and one per stat (5). The deltas are
+            // signed differences written as uint32.
             if (packet.hasRemaining(4)) {
                 uint32_t newLevel = packet.readUInt32();
                 if (newLevel > 0) {
-                    // Parse stat deltas (WotLK layout has 7 more uint32s)
+                    // Classic and TBC send five powers; count them from the
+                    // size rather than assume.
+                    constexpr size_t kStats = 5;
+                    const size_t words = packet.getRemainingSize() / 4;
+                    const size_t kPowers = words >= 1 + kStats + 1 ? words - 1 - kStats : 0;
                     lastLevelUpDeltas_ = {};
-                    if (packet.hasRemaining(28)) {
-                        lastLevelUpDeltas_.hp    = packet.readUInt32();
-                        lastLevelUpDeltas_.mana  = packet.readUInt32();
-                        lastLevelUpDeltas_.str   = packet.readUInt32();
-                        lastLevelUpDeltas_.agi   = packet.readUInt32();
-                        lastLevelUpDeltas_.sta   = packet.readUInt32();
-                        lastLevelUpDeltas_.intel = packet.readUInt32();
-                        lastLevelUpDeltas_.spi   = packet.readUInt32();
+                    if (kPowers > 0) {
+                        auto next = [&packet] { return static_cast<int32_t>(packet.readUInt32()); };
+                        lastLevelUpDeltas_.hp   = next();
+                        lastLevelUpDeltas_.mana = next();
+                        for (size_t i = 1; i < kPowers; ++i) next();
+                        lastLevelUpDeltas_.str   = next();
+                        lastLevelUpDeltas_.agi   = next();
+                        lastLevelUpDeltas_.sta   = next();
+                        lastLevelUpDeltas_.intel = next();
+                        lastLevelUpDeltas_.spi   = next();
                     }
                     uint32_t oldLevel = serverPlayerLevel_;
                     serverPlayerLevel_ = std::max(serverPlayerLevel_, newLevel);
