@@ -114,4 +114,91 @@ inline ViewMoveStep viewMoveStep(float in, float out, float right, float left, f
     return s;
 }
 
+// ---- The water line (0x6049C0, 0x606F90, 0x6023D0) ----
+
+/// Where the camera's target is against the liquid (0x6049C0, every frame,
+/// CGCamera +0x98 bits 0x100000 / 0x200000): Shallow while the liquid over
+/// the feet is at most the collision height less 2/9 yd (0xA1EA24), so the
+/// head is out - a swimmer floating 0.75 h under is Shallow; Submerged below
+/// that; None out of liquid.
+enum class WaterLine { None, Shallow, Submerged };
+inline constexpr float kWaterLineHeadroom = 0.222222224f;  // 0xA1EA24
+inline WaterLine waterLine(bool inLiquid, float depthOverFeet, float collisionHeight) {
+    if (!inLiquid) return WaterLine::None;
+    return depthOverFeet <= collisionHeight - kWaterLineHeadroom ? WaterLine::Shallow
+                                                                 : WaterLine::Submerged;
+}
+
+/// The CVars (0x5FE010): cameraDive 1 (0xC249A0), cameraSurfacePitch 0
+/// (0xC2499C), cameraSubmergePitch 18 (0xC24998), cameraSurfaceFinalPitch 5
+/// (0xC24994), cameraSubmergeFinalPitch 5 (0xC24990), degrees looking down.
+inline constexpr float kDefaultSurfacePitch = 0.0f;
+inline constexpr float kDefaultSubmergePitch = 18.0f;
+inline constexpr float kDefaultSurfaceFinalPitch = 5.0f;
+inline constexpr float kDefaultSubmergeFinalPitch = 5.0f;
+
+/// cameraDive (0x606F90 every frame for a swimmer, 0x6023D0 on a steering
+/// mouse move): whether the swimmer's pitch is held level (0x5FBE70(0)). At
+/// the surface (Shallow) a positive cameraSubmergePitch holds it unless the
+/// mouse steers with the camera looking down by that much or more - so the
+/// keys alone, and a glance down under 18 degrees, do not dive. Submerged, a
+/// negative cameraSurfacePitch does the same for looking up (off by
+/// default). `cameraPitchDownDeg` is the camera's pitch, positive down.
+/// Drunk players and click-to-move skip it (the caller's).
+inline bool diveHoldsLevel(WaterLine w, bool steering, float cameraPitchDownDeg,
+                           float surfacePitch = kDefaultSurfacePitch,
+                           float submergePitch = kDefaultSubmergePitch) {
+    if (w == WaterLine::Shallow && submergePitch > 0.0f &&
+        (!steering || (cameraPitchDownDeg > 0.0f && cameraPitchDownDeg < submergePitch))) {
+        return true;
+    }
+    if (w == WaterLine::Submerged && surfacePitch < 0.0f &&
+        (!steering || (cameraPitchDownDeg < 0.0f && surfacePitch < cameraPitchDownDeg))) {
+        return true;
+    }
+    return false;
+}
+
+/// The camera pitch eased to on crossing the water line (0x606F90 with
+/// cameraWaterCollision on): Submerged to Shallow is cameraSurfaceFinalPitch,
+/// Shallow to Submerged cameraSubmergeFinalPitch, degrees down; a negative
+/// answer (nothing) when neither, or when that CVar is 0. The ease is the
+/// pitch blend 0x601190: |change| / cameraPitchSmoothSpeed (45 deg/s).
+inline float waterLineFinalPitch(WaterLine before, WaterLine now, bool* fires,
+                                 float surfaceFinal = kDefaultSurfaceFinalPitch,
+                                 float submergeFinal = kDefaultSubmergeFinalPitch) {
+    float p = 0.0f;
+    if (before == WaterLine::Submerged && now == WaterLine::Shallow) p = surfaceFinal;
+    else if (before == WaterLine::Shallow && now == WaterLine::Submerged) p = submergeFinal;
+    *fires = p != 0.0f;
+    return p;
+}
+
+// ---- The player model fade (0x606F90's tail -> 0x4F8660) ----
+
+/// Opaque from 1.8315 yd (0xA1E308) of camera distance beyond the near clip
+/// (CGCamera +0x38, 0.2 - 0x9E8D84 via 0x607B00), clear at 1/360 yd
+/// (0xA1E344), the cosine ease 0x8CA080 between. With the camera nearer than
+/// the pivot height and pitched up past -1.1868 rad (0xA1EA7C, stock pitch,
+/// i.e. looking up from below) the fade starts further out: the start over
+/// ((-pi/2 - pitch) x -2.6043 (0xA1EA78))^2. 0x4F8660 then hides the model
+/// at 0 (0x6CEE50) and draws it at alpha / 255 otherwise (0x737390).
+inline constexpr float kModelFadeStart = 1.83150017f;
+inline constexpr float kModelFadeEnd = 0.00277777785f;
+inline constexpr float kNearClip = 0.2f;
+inline float playerModelAlpha(float cameraDistance, float cameraPitchDownDeg, float pivotHeight,
+                              float nearClip = kNearClip) {
+    float start = kModelFadeStart;
+    const float pitchRad = cameraPitchDownDeg * 0.0174532924f;
+    if (cameraDistance < pivotHeight && pitchRad < -1.18682384f) {
+        const float k = (-1.57079637f - pitchRad) * -2.60435295f;
+        if (std::abs(k) >= 1e-4f) start /= k * k;
+    }
+    const float d = cameraDistance - nearClip;
+    if (d >= start) return 1.0f;
+    if (d <= kModelFadeEnd) return 0.0f;
+    const float t = (d - kModelFadeEnd) / (start - kModelFadeEnd);
+    return (1.0f - std::cos(t * 3.14159274f)) * 0.5f;
+}
+
 }  // namespace wowee::rendering::stock_camera
