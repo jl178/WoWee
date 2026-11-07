@@ -309,33 +309,101 @@ right after the dome; then the sun, moons and clouds; then the other sky
 models. The dome is opaque here and drawn first, the stars and the sprites
 add to it, which comes to what stock's additive dome over them gives.
 
-## 8. ScreenEffect 2 and 3, the underwater glow wave (traced, not drawn)
+## 8. ScreenEffect 2 and 3, the underwater glow wave
 
-0x4f7020 picks the full-screen effect by ScreenEffect.dbc's Effect (+8):
+0x4f7020 picks the full-screen effect by ScreenEffect.dbc's Effect (+8).
+Both 2 and 3 then set the row's light slot (+0x1c, 0x7ecec0) and sound
+(+0x20, +0x24, 0x4c8fa0), as types 0 and 1 do.
 
-- **2, nether** ("Invis Screen Effect" 81, 121; "Echo of Ymiron" 221;
-  "World of Shadows" 342): 0x7ed870(0.7, 150, colour, 0) saves the current
-  fog (0xd38c1c, 0xd38bf4, 0xd38c20, 0xd38c24) and puts in its place a fog
-  colour 0xff4c4c63 (0xffffffff when 0xd45774 +0x30 is set; not identified) with the end 150 yd and the start 0.7 of it; leaving it
-  restores them (0x7ed820). The chain (0x7ea470, cvar `ffxNetherWorld`):
-  `ffxnetherblur` (four taps averaged, x0.25) into the quarter target, then
-  `ffxnethercombine`: `m = scene * 0.5 + blur; g = dot(m, 1/6);
-  m = m * 0.5 + g; out = scene + c0.w * (m * c0.rgb - scene)`.
-- **3, special** (21, 41, 43, 61, ...): the row's colour (+0xc) and
-  parameters (+0x10..) go to the special chain's vtable +0x10 (0x7ea5f0,
-  cvar `ffxSpecial`, "full screen test effect"); only with shaders (0x682d20).
-- Both then set the row's light slot (+0x1c, 0x7ecec0) and sound (+0x20,
-  +0x24, 0x4c8fa0) as types 0 and 1 do.
-- **Under liquid** the glow chain's last pass is `ffxglowwave`: texture 0 is
-  a wave map whose xy, scaled by c0 and c1, offsets the scene's and the
-  blur's coordinates before the glow combine
-  (`lerp(scene, blur, z) + blur^2 * w`).
+### Type 2, the nether world (drawn)
 
-Wowee draws none of these yet (the nether fog override is the easiest
-start: it needs only the screen effect's type from the game handler).
+Rows 81, 121 ("Invis Screen Effect"), 221 ("Echo of Ymiron"), 342 ("World
+of Shadows"); spells such as 42786 / 43466 (Echo of Ymiron), 44856, 47740.
 
-## 9. Not done here
+- **Fog** (0x7ed870(0.7, 150, 0xff4c4c63, 0)): the current fog (0xd38c1c,
+  0xd38bf4, 0xd38c20, 0xd38c24) is saved and replaced by the colour
+  (0x4c, 0x4c, 0x63), the end 150 yd and the start 0.7 of it; 0x7ed820
+  puts the old one back. (0xffffffff instead when 0xd45774 +0x30 is set;
+  not identified.)
+- **Chain** (0x7ea470, cvar `ffxNetherWorld`, in place of the glow):
+  `FFXNetherBlur` (vertex program with moving taps from three 36-entry
+  random tables, 0x7e8990; pixel: four taps averaged) into the quarter
+  target, then `FFXNetherCombine` (0x7e8bd0, drawn by 0x7e8c80):
+  `m = scene * 0.5 + blur; g = dot(m, 1/6); m = m * 0.5 + g;
+  out = scene + c0.w * (m * c0.rgb - scene)` with c0 = (0.6, 0.6, 0.78,
+  fade) (0xaf4940) and the fade climbing by the frame time to 0.75
+  (0xa4179c).
 
-- **Weather.dbc**: the light scale is applied at once, not eased over 5 s.
-- **ScreenEffect 2 and 3** and the **underwater glow wave**: traced above,
-  not drawn.
+**Wowee now**: `Renderer::applyScreenEffectFog` (renderer_weather_fx.cpp)
+puts the nether fog into the frame's fog when the ScreenEffect row's Effect
+is 2, and hands the fade to `PostProcessPipeline::setNether`; `fxaa.frag`
+draws the combine exactly, in place of the glow. The blur's four taps turn
+about the pixel 1.5 quarter texels out instead of following the stock
+random tables.
+
+### Type 3, the special chain (traced, not drawn)
+
+Rows 21, 41, 43, 61, 123 and others (colour +0xc, two numbers +0x10,
++0x14). The chain (0x7ea5f0, cvar `ffxSpecial`, only with shaders,
+0x682d20): a pass that fills a 256 x 256 (and 256 x 128) target, then
+`FFXPropagateFog` (0x7e80b0, drawn by 0x7e9080: four taps averaged, alpha
+minus c0.x = row +0x10 / 255, 0x7e9010), then `FFXFogCombine` (0x7e81b0,
+drawn by 0x7e9670): `f = tex1; g = dot(f, 1/3); f += sat(c0) (g - f);
+f += sat(c1) (1 - f); out = f + scene.a (scene - f)`, c0 = row +0x14 * 0.01
+and c1 = 0.1, both eased in over 3 s (0xa12098). The row colour goes to the
+first pass (0x7e9010 writes it at its +0x34). The result rests on what the
+world writes into the scene's alpha and on the persistent propagated
+target; neither was traced far enough to draw it faithfully.
+
+### The underwater glow wave (drawn)
+
+With the camera in liquid the glow's chain ends in `FFXGlowWave`
+(0x8c2ce0, drawn by 0x8c2350) instead of `FFXGlow`:
+
+- the wave map "PassGlowWave" (0x8c2920), 128 x 128: per axis
+  `1 - (6 - 4f) f^2` of the fraction of `x / 64 - 0.5`, negated on odd
+  periods, to 0..255;
+- its coordinates: the screen in pixels over 128, the height times 0.88
+  (0xb24b28, 0xb24b2c), turned 10 degrees (0xa942ac), scrolled by the
+  millisecond clock modulo 3174 and 2805 (0xb24b20, 0xb24b24);
+- c0 = 3 scene texels, c1 = 0.75 blur texels (0xa94288, 0x9e9ee4): the
+  scene is read `wave * 3` pixels off and the blur `wave * 0.75` quarter
+  texels off, then the glow combine as before.
+
+**Wowee now**: exactly that in `fxaa.frag` (`waveAt`, `waveAxis`), the
+map computed in the shader rather than sampled from a texture (the
+texture's own bilinear filtering is not reproduced), on while the camera
+is under liquid and the glow is on.
+
+### Cost (Iris Xe, 1251 x 986, the FXAA/glow pass's GPU time)
+
+`WOWEE_FRAME_PROFILE=1` gives one frame's pass times every 10 s: Goldshire
+with the glow 0.63-0.94 ms; the nether combine 0.39-0.79 ms (it replaces
+the 16-tap glow blur with 4 taps); the glow wave under water 0.58-0.84 ms.
+The machine was loaded and the samples single frames, so none of the
+three differs measurably from the plain glow pass.
+
+## 9. Breath bubbles, the light scale, the mist's steep cut
+
+- **Bubbles** (0x732650): a player at drunk 0.5 or more blows "HARDCODED
+  Inebriated Bubbles" (`Spells\Bubble_Drunk.m2`); else a unit under water
+  (bit 0x20, set by 0x71fa90 every 10 s when the liquid's surface stands
+  over it) "HARDCODED Breath Underwater" (`Particles\Bubbles.m2`); else the
+  cold breath. `stock_weather::breathFor`; the underwater test is the
+  surface over the unit's breath point (attachment 17). Only the local
+  player's drunk level is read. Character models carry `$BTH` in their
+  stand animations and not in the swim ones (HumanMale), so a swimming
+  player blows none, as in stock; one standing on a lake bed does.
+- **Light scale** (0x784850): eased from the old row's to the new one's
+  over `(|change| * 4 + 0.001) * 5 s`; at once while nothing falls
+  (`Renderer::easeWeatherLightScale`).
+- **Mist steep cut** (0x786330): the ground is sampled every 2 yd along the
+  sheet's way (63 at most); at the first sample where it climbs more than
+  1 yd over three samples, 0.75 over two or 0.5 over one, the sheet's life
+  ends (`stock_weather::mistSteepCut`), and between samples it is kept 6 yd
+  over them. The 2 yd spacing is a stand-in for the world query's own.
+
+## 10. Not done here
+
+- ScreenEffect 3 (above).
+- Other players' drunk bubbles (their PLAYER_BYTES_3 is not read here).
