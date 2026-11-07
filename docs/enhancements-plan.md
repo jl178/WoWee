@@ -1337,6 +1337,50 @@ Shots (scratch `hdw/shots/`, 1280x540): `ab_<place>_<noon|dusk>_<stock|hd>.png`
 for `canal1`, `canal2`, `canal3`, `crystal`, `westfall`, `river`, `river2`;
 `ab_under_noon_<stock|hd>.png` (from under the canal's surface: the same,
 the HD surface is drawn only from above). Contact sheets `hdw/final_*.png`.
+### 3.20 Measured cost of E35, smoother characters (2026-11-07)
+
+`WOWEE_ENHANCE_AB=characterfidelity:5` from a `WOWEE_DEBUG_LUA` script with
+`WOWEE_FRAME_PROFILE=1`, the Iris Xe, a 1280x540 window (kept small: Jered
+was playing on the machine, so the GPU was shared and every number is
+noisy), Stormwind Trade District at noon. The script spawned 29 friendly
+units with `.npc add temp` (guards, sentinels, two trainers) on a 2.5 yd
+grid around the player, the plaza's own units beyond them, and the camera at
+9 yd: about 30 characters in view, most within 10 yd. GPU is the main
+`pass`, as the difference of each "on" window from the mean of the two
+"off" windows either side (the first pair dropped: it holds the pipeline
+builds and the weld buffers).
+
+| Variant | main pass, on - off (paired) | median |
+|---|---|---|
+| Every unit within 22 yd tessellated, level up to 5 | +3.1..+5.0 ms (frame GPU 18.1 vs 14.4 median) | about +4 ms |
+| The six nearest on screen, level up to 4 (committed) | -1.1..+2.2 ms, 11 pairs | +0.92 ms |
+
+The patch stages cost about the same per unit whatever the level, so the
+budget is on the number of units, not the level: about 0.13 ms a unit. The
+committed rule tessellates the six nearest units on screen and eases each
+one's rounding out over the last 3 yd of that radius, so a unit leaving the
+six changes nothing on screen. Main-thread CPU: `beginFrame/record+ubo`
+±0.01 ms, `renderWorld` +0.15 ms median (the extra pipeline binds and the
+per-frame sort of up to a few dozen distances). Memory: one 16-byte weld
+vertex per vertex of each model drawn tessellated (made on first use), and
+four pipelines. With the row off none of it exists, and
+`character.vert.spv` and `character.frag.spv` build byte-identical to the
+base commit's (the tessellation vertex code is under `CHAR_TESS` and built
+separately as `character_tess.vert.spv`).
+
+The 2x composite bake (the second part of the brief) was built, shot and
+dropped: replaying the stock bake's layers through a Catmull-Rom resample at
+1024x1024 took 34-77 ms of main-thread CPU per composite (7-19 layers;
+every change of equipment re-bakes), quadrupled each composite's memory
+(1.4 MB to 5.6 MB with mips), and at both a 1280x540 window and a 2.2 yd
+close-up the result could not be told from the stock 512 bake (scratch
+`fid/shots/zoom_selfclose_front.png`). The stock 512 atlas is already about
+one texel per pixel on a near character.
+
+Shots (scratch `fid/shots/`, 1280x540, `off_*` stock and `on_*` the row):
+morphed displays `human|orc|tauren|nelf` x `plate|robe` x `front|side|close`,
+the player in a robe `selfclose_front|side|back`, crowds `crowd0|60|300`;
+side-by-side crops `pair_*.png` and `zoom_*.png`.
 
 ## 4. Proposed enhancements
 
@@ -2700,6 +2744,52 @@ Done (2026-11-07): the row `hdwater`, "HD water" (the Sky page, after
 - **Verify.** Stock-vs-HD shots at the canals, Crystal Lake, the Westfall
   coast and the Thondroril, noon and dusk, and from under the canal's
   surface (3.19).
+### E35. Smoother characters
+
+- **Stock.** A unit is its M2 mesh, skinned per vertex, and on a near
+  character the outline of a shoulder, a skull or a calf shows its facets.
+  Wowee already lights units per pixel from the interpolated, renormalised
+  normal with the stock light model (character.frag), so the facets show on
+  the outline only.
+- **What.** Row `characterfidelity` (first Enhancements page, "Surfaces"),
+  recommended off. Phong tessellation (Boubekeur and Alexa 2008) of the
+  skinned mesh: `character_tess.vert` (the stock vertex shader built with
+  `CHAR_TESS`) skins exactly as stock, robe hem and cloak bend included, and
+  hands on the clip position, the weld normal and its clip-space image;
+  `character.tesc` sets each edge's level from its two corners alone (view
+  depth, how edge-on they are, the unit's share of the budget), so the two
+  patches on an edge agree and no crack opens; `character.tese` pulls each
+  new point 0.4 of the way to the corners' tangent planes, in world and
+  clip space at once (the projection is linear, so no matrix is needed),
+  and the stock `character.frag` shades it.
+  - **Seams.** The planes are weld normals (`weldNormals`): one normal per
+    position, averaged over the split copies a UV seam or a hard edge makes,
+    so both sides of a seam move alike. Where the copies disagree by
+    15-35 degrees or more (a boot's cuff, a belt edge, the two faces of a
+    hair card) the corner's weight eases to 0 and it stays put.
+  - **Where.** Only the outline: an edge's level rises only where a corner
+    is near edge-on to the camera, up to 4, full inside 6 yd and none at
+    22 yd. Only the six nearest units on screen; past that a unit is drawn
+    by the stock pipelines. Not the attached items (shoulders, helmets,
+    weapons): Phong rounding blew a plate pauldron up into a cushion, a
+    different shape rather than a smoother one. Alpha 0.6 made boots and
+    gloves puffy; 0.4 keeps the art's shapes.
+  - **Lighting.** Nothing to add: the per-pixel light from interpolated,
+    renormalised normals is already what the off path does, and the
+    tessellated points shade through the same fragment shader. A rim term
+    was not added; on these textures it reads as a newer game.
+  - **Texture.** A 2x bake of the composite was tried and dropped (3.20).
+    Item and composite textures already have full mip chains and 16x
+    anisotropic samplers on the off path.
+- **Winding.** With Vulkan's upper-left tessellation domain the evaluation
+  stage declares `cw`; `ccw` turned every face's `gl_FrontFacing` around and
+  character.frag lit it from behind.
+- **Off is stock.** No pipeline, weld buffer or per-frame work is made; the
+  stock pipelines and `character.vert.spv` are unchanged; `stages.z` in the
+  push constant, which only the tessellation vertex shader reads, is 0. A
+  device without `tessellationShader` keeps the stock mesh with a warning.
+- **Cost.** About 0.9 ms of GPU in a 30-unit crowd, 0.15 ms main thread;
+  see 3.20.
 
 ### Further weather ideas (not done)
 

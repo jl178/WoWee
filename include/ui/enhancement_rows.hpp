@@ -202,17 +202,17 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "steeper than 45 degrees, in the chunks that have such slopes, each layer is also read from the "
                  "side and blended by the slope; off binds the stock terrain.frag",
      .asBool = &Enhancements::cliffProjection},
-    {.key = "characterfidelity", .label = "Smoother, sharper characters", .kind = SettingKind::Bool,
+    {.key = "characterfidelity", .label = "Smoother characters", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPage, .section = "",
-     .tooltip = "Characters near you have rounder outlines - shoulders, heads,\n"
-                "arms - where the original shows flat facets, and their skin\n"
-                "and clothing are drawn from a sharper, larger picture. The\n"
-                "same models, textures and light as the original.",
-     // Measured in docs/enhancements-plan.md (3.19).
+     .tooltip = "The characters nearest you have rounder outlines - shoulders,\n"
+                "arms, legs - where the original shows flat facets. The same\n"
+                "models, textures and light as the original.",
+     // Off in the recommended set (docs/enhancements-plan.md 3.19): about
+     // 0.9 ms of GPU in a crowd for a change that shows only on the outline
+     // of the nearest few units.
      .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "character_fidelity",
-     .controls = "the tessellated character pipelines (built on first use) for units within "
-                 "22 yd and their weld-normal buffers; composites baked at 2x from then on",
-     .restartNote = "The sharper skin reaches characters dressed from now on;\nrestart to see it on everyone.",
+     .controls = "the tessellated character pipelines and per-model weld-normal buffers "
+                 "(made on first use), for the six nearest units on screen within 22 yd",
      .asBool = &Enhancements::characterFidelity},
 
     // ------------------------------------------------------------ Sky and air

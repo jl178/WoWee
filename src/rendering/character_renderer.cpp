@@ -64,7 +64,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <chrono>
-#include <deque>
 #include <cstdlib>
 #include <limits>
 #include <cstring>
@@ -393,7 +392,7 @@ void CharacterRenderer::buildFidelityPipelines() {
     fidelityPipelinesFailed_ = true;  // until every one is built
     if (!vkCtx_->isTessellationShaderSupported()) {
         LOG_WARNING("Smoother characters: the device has no tessellation shaders; "
-                    "units keep the stock mesh (the sharper bake still applies)");
+                    "units keep the stock mesh");
         return;
     }
     VkDevice device = vkCtx_->getDevice();
@@ -1450,144 +1449,6 @@ int impliedScale(const AtlasRegion256& region, int overlayWidth) {
 
 }  // namespace
 
-namespace {
-
-/// Smoother, sharper characters: the composite again at twice the stock size.
-///
-/// The stock bake (above) is recorded as it runs: each layer and the rectangle
-/// of the stock canvas it lands in, in order. The sharper bake replays that
-/// list on a canvas twice the size, resampling each layer from its own pixels
-/// into twice its rectangle with a Catmull-Rom filter on premultiplied colour.
-/// So every layer is placed exactly where the stock one is - nothing moves -
-/// and none of it passes through the stock bake's nearest-neighbour steps
-/// (the 256 body grown to 512, a half-size or odd-size overlay stretched),
-/// whose blocky texels and stair-stepped armour edges are what the larger
-/// picture removes. Nothing is invented: a 2x Catmull-Rom of the art.
-/// Used only with the row on; the stock bake is the stock code either way.
-struct BakeRecorder {
-    struct Placement { const pipeline::BLPImage* image; int x, y, w, h; };
-    std::deque<pipeline::BLPImage> kept;
-    std::vector<Placement> list;
-    void add(const pipeline::BLPImage& image, int x, int y, int w, int h) {
-        if (!image.isValid() || w <= 0 || h <= 0) return;
-        kept.push_back(image);
-        list.push_back({.image = &kept.back(), .x = x, .y = y, .w = w, .h = h});
-    }
-};
-
-/// Catmull-Rom weights for the four taps around t in [0, 1).
-inline void catmullRom(float t, float w[4]) {
-    const float t2 = t * t, t3 = t2 * t;
-    w[0] = 0.5f * (-t3 + 2.0f * t2 - t);
-    w[1] = 0.5f * (3.0f * t3 - 5.0f * t2 + 2.0f);
-    w[2] = 0.5f * (-3.0f * t3 + 4.0f * t2 + t);
-    w[3] = 0.5f * (t3 - t2);
-}
-
-/// One axis of the resample: for each of `outN` destination texels, the
-/// first of its four source taps and their weights.
-struct AxisTaps { std::vector<int> first; std::vector<float> w; };
-AxisTaps axisTaps(int srcN, int outN) {
-    AxisTaps a;
-    a.first.resize(static_cast<size_t>(outN));
-    a.w.resize(static_cast<size_t>(outN) * 4);
-    const float scale = static_cast<float>(srcN) / static_cast<float>(outN);
-    for (int i = 0; i < outN; ++i) {
-        const float s = (static_cast<float>(i) + 0.5f) * scale - 0.5f;
-        const float f = std::floor(s);
-        a.first[static_cast<size_t>(i)] = static_cast<int>(f) - 1;
-        catmullRom(s - f, &a.w[static_cast<size_t>(i) * 4]);
-    }
-    return a;
-}
-
-/// `src` resampled to w x h, premultiplied in float during the filter and
-/// handed back straight RGBA8, edges clamped.
-std::vector<uint8_t> resampleCatmullRom(const pipeline::BLPImage& src, int w, int h) {
-    const int sw = src.width, sh = src.height;
-    // Premultiplied source.
-    std::vector<float> pm(static_cast<size_t>(sw) * sh * 4);
-    for (size_t i = 0; i < static_cast<size_t>(sw) * sh; ++i) {
-        const float a = src.data[i * 4 + 3] / 255.0f;
-        pm[i * 4 + 0] = src.data[i * 4 + 0] / 255.0f * a;
-        pm[i * 4 + 1] = src.data[i * 4 + 1] / 255.0f * a;
-        pm[i * 4 + 2] = src.data[i * 4 + 2] / 255.0f * a;
-        pm[i * 4 + 3] = a;
-    }
-    // Horizontal pass: sh rows of w.
-    const AxisTaps ax = axisTaps(sw, w);
-    std::vector<float> rows(static_cast<size_t>(w) * sh * 4);
-    for (int y = 0; y < sh; ++y) {
-        for (int x = 0; x < w; ++x) {
-            float acc[4] = {0, 0, 0, 0};
-            for (int k = 0; k < 4; ++k) {
-                const int sx = std::clamp(ax.first[static_cast<size_t>(x)] + k, 0, sw - 1);
-                const float wk = ax.w[static_cast<size_t>(x) * 4 + k];
-                const float* p = &pm[(static_cast<size_t>(y) * sw + sx) * 4];
-                for (int c = 0; c < 4; ++c) acc[c] += p[c] * wk;
-            }
-            float* o = &rows[(static_cast<size_t>(y) * w + x) * 4];
-            for (int c = 0; c < 4; ++c) o[c] = acc[c];
-        }
-    }
-    // Vertical pass, and back to straight colour.
-    const AxisTaps ay = axisTaps(sh, h);
-    std::vector<uint8_t> out(static_cast<size_t>(w) * h * 4);
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            float acc[4] = {0, 0, 0, 0};
-            for (int k = 0; k < 4; ++k) {
-                const int sy = std::clamp(ay.first[static_cast<size_t>(y)] + k, 0, sh - 1);
-                const float wk = ay.w[static_cast<size_t>(y) * 4 + k];
-                const float* p = &rows[(static_cast<size_t>(sy) * w + x) * 4];
-                for (int c = 0; c < 4; ++c) acc[c] += p[c] * wk;
-            }
-            const float a = std::clamp(acc[3], 0.0f, 1.0f);
-            uint8_t* o = &out[(static_cast<size_t>(y) * w + x) * 4];
-            if (a <= 0.5f / 255.0f) { o[0] = o[1] = o[2] = o[3] = 0; continue; }
-            for (int c = 0; c < 3; ++c)
-                o[c] = static_cast<uint8_t>(std::clamp(acc[c] / a, 0.0f, 1.0f) * 255.0f + 0.5f);
-            o[3] = static_cast<uint8_t>(a * 255.0f + 0.5f);
-        }
-    }
-    return out;
-}
-
-/// The recorded bake on a `width` x `height` canvas (twice the stock one):
-/// the first placement is the body and is copied in; every later one is laid
-/// over it with the stock blend (blitOverlay: colour over, alpha the max).
-std::vector<uint8_t> replayBake(const BakeRecorder& rec, int width, int height, int factor) {
-    std::vector<uint8_t> canvas(static_cast<size_t>(width) * height * 4, 0);
-    bool first = true;
-    for (const auto& pl : rec.list) {
-        const int w = pl.w * factor, h = pl.h * factor;
-        const int x0 = pl.x * factor, y0 = pl.y * factor;
-        const std::vector<uint8_t> img = resampleCatmullRom(*pl.image, w, h);
-        for (int y = 0; y < h; ++y) {
-            const int dy = y0 + y;
-            if (dy < 0 || dy >= height) continue;
-            for (int x = 0; x < w; ++x) {
-                const int dx = x0 + x;
-                if (dx < 0 || dx >= width) continue;
-                const uint8_t* s = &img[(static_cast<size_t>(y) * w + x) * 4];
-                uint8_t* d = &canvas[(static_cast<size_t>(dy) * width + dx) * 4];
-                if (first) { std::memcpy(d, s, 4); continue; }
-                const uint8_t a = s[3];
-                if (a == 0) continue;
-                if (a == 255) { std::memcpy(d, s, 4); continue; }
-                const float alpha = a / 255.0f, inv = 1.0f - alpha;
-                for (int c = 0; c < 3; ++c)
-                    d[c] = static_cast<uint8_t>(s[c] * alpha + d[c] * inv);
-                d[3] = std::max(d[3], a);
-            }
-        }
-        first = false;
-    }
-    return canvas;
-}
-
-}  // namespace
-
 VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& layerPaths) {
     if (layerPaths.empty() || !assetManager || !assetManager->isInitialized()) {
         return whiteTexture_.get();
@@ -1596,10 +1457,7 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
     // Composite key is deterministic from layer set; if we've already built it,
     // reuse the existing GPU texture to keep live instance pointers valid.
     std::string cacheKey = "__composite__";
-    // The sharper bake is a different texture from the same layers.
-    if (fidelity_) cacheKey += "2x";
     for (const auto& lp : layerPaths) { cacheKey += '|'; cacheKey += lp; }
-    std::unique_ptr<BakeRecorder> bake = fidelity_ ? std::make_unique<BakeRecorder>() : nullptr;
     auto cachedComposite = textureCache.find(cacheKey);
     if (cachedComposite != textureCache.end()) {
         cachedComposite->second.lastUse = ++textureCacheCounter_;
@@ -1744,7 +1602,6 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
         width = height = newSize;
         coordScale = requiredScale;
     }
-    if (bake) bake->add(base, 0, 0, width, height);
 
     // Alpha-blend each overlay onto the composite
     for (auto& loaded : overlays) {
@@ -1756,7 +1613,6 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
         if (overlay.width == width && overlay.height == height) {
             // Same size: full alpha-blend
             blitOverlay(composite, width, height, overlay, 0, 0);
-            if (bake) bake->add(overlay, 0, 0, width, height);
         } else {
             // Where this layer belongs, from the one table that also sized the
             // canvas above.
@@ -1768,7 +1624,6 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
                 core::Logger::getInstance().info("Composite: UNKNOWN region for '",
                     loaded.path, "', centering at (", cx, ",", cy, ")");
                 blitOverlay(composite, width, height, overlay, cx, cy);
-                if (bake) bake->add(overlay, cx, cy, overlay.width, overlay.height);
                 continue;
             }
             int dstX = region.x, dstY = region.y;
@@ -1812,23 +1667,12 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
             if (needsResample) {
                 blitOverlayResampled(composite, width, height, overlay,
                                      dstX, dstY, expectedW, expectedH);
-                if (bake) bake->add(overlay, dstX, dstY, expectedW, expectedH);
             } else {
                 blitOverlay(composite, width, height, overlay, dstX, dstY);
-                if (bake) bake->add(overlay, dstX, dstY, overlay.width, overlay.height);
             }
         }
     }
 
-    if (bake && !bake->list.empty()) {
-        const auto t0 = std::chrono::steady_clock::now();
-        composite = replayBake(*bake, width * 2, height * 2, 2);
-        width *= 2;
-        height *= 2;
-        LOG_INFO("Sharper character bake: ", width, "x", height, " from ", bake->list.size(),
-                  " layers in ", std::chrono::duration<float, std::milli>(
-                      std::chrono::steady_clock::now() - t0).count(), " ms");
-    }
     bleedAndStripMagentaKey(composite, width, height);
     const bool hasAlpha = hasNonOpaqueAlpha(composite);
 
@@ -1882,9 +1726,7 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
                                                 const std::vector<std::string>& baseLayers,
                                                 const std::vector<std::pair<int, std::string>>& regionLayers) {
     // Build cache key from all inputs to avoid redundant compositing
-    // (the sharper bake is a different texture from the same layers).
-    std::string cacheKey = fidelity_ ? "2x|" + basePath : basePath;
-    std::unique_ptr<BakeRecorder> bake = fidelity_ ? std::make_unique<BakeRecorder>() : nullptr;
+    std::string cacheKey = basePath;
     for (const auto& bl : baseLayers) { cacheKey += '|'; cacheKey += bl; }
     cacheKey += '#';
     for (const auto& rl : regionLayers) {
@@ -1992,7 +1834,6 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
     } else {
         composite = base.data;
     }
-    if (bake) bake->add(base, 0, 0, width, height);
 
     // Blend face, facial hair and underwear overlays, each into its region at
     // the region's size on this canvas.
@@ -2017,7 +1858,6 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
 
         if (overlay.width == width && overlay.height == height) {
             blitOverlay(composite, width, height, overlay, 0, 0);
-            if (bake) bake->add(overlay, 0, 0, width, height);
         } else {
             // The same region table compositeTextures uses. This path kept its
             // own copy, which knew no facial hair: FacialUpperHair (a human's
@@ -2032,8 +1872,6 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
             if (!region.known) {
                 blitOverlay(composite, width, height, overlay,
                             (width - overlay.width) / 2, (height - overlay.height) / 2);
-                if (bake) bake->add(overlay, (width - overlay.width) / 2, (height - overlay.height) / 2,
-                                    overlay.width, overlay.height);
                 continue;
             }
             const int dstX = region.x * coordScale;
@@ -2045,7 +1883,6 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
             } else {
                 blitOverlayResampled(composite, width, height, overlay, dstX, dstY, dstW, dstH);
             }
-            if (bake) bake->add(overlay, dstX, dstY, dstW, dstH);
         }
     }
 
@@ -2100,11 +1937,9 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
         if (overlay.width == expectedW && overlay.height == expectedH) {
             // Exact match - blit 1:1
             blitOverlay(composite, width, height, overlay, dstX, dstY);
-            if (bake) bake->add(overlay, dstX, dstY, expectedW, expectedH);
         } else if (overlay.width * 2 == expectedW && overlay.height * 2 == expectedH) {
             // Overlay is half size - upscale 2x
             blitOverlayScaled2x(composite, width, height, overlay, dstX, dstY);
-            if (bake) bake->add(overlay, dstX, dstY, expectedW, expectedH);
         } else if (overlay.width > expectedW && overlay.height > expectedH &&
                    expectedW > 0 && expectedH > 0) {
             // Overlay is larger than region (e.g. HD textures for 1024 atlas on 512 canvas)
@@ -2114,10 +1949,8 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
             int ds = std::min(dsX, dsY);
             if (ds >= 2) {
                 blitOverlayDownscaleN(composite, width, height, overlay, dstX, dstY, ds);
-                if (bake) bake->add(overlay, dstX, dstY, overlay.width / ds, overlay.height / ds);
             } else {
                 blitOverlay(composite, width, height, overlay, dstX, dstY);
-                if (bake) bake->add(overlay, dstX, dstY, overlay.width, overlay.height);
             }
         } else {
             // Size mismatch - blit at natural size (may clip or leave gap)
@@ -2125,19 +1958,9 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
                 " at (", dstX, ",", dstY, ") overlay=", overlay.width, "x", overlay.height,
                 " expected=", expectedW, "x", expectedH, " from ", rl.second);
             blitOverlay(composite, width, height, overlay, dstX, dstY);
-            if (bake) bake->add(overlay, dstX, dstY, overlay.width, overlay.height);
         }
     }
 
-    if (bake && !bake->list.empty()) {
-        const auto t0 = std::chrono::steady_clock::now();
-        composite = replayBake(*bake, width * 2, height * 2, 2);
-        width *= 2;
-        height *= 2;
-        LOG_INFO("Sharper character bake: ", width, "x", height, " from ", bake->list.size(),
-                  " layers in ", std::chrono::duration<float, std::milli>(
-                      std::chrono::steady_clock::now() - t0).count(), " ms");
-    }
     bleedAndStripMagentaKey(composite, width, height);
     const bool hasAlpha = hasNonOpaqueAlpha(composite);
 

@@ -462,10 +462,9 @@ public:
     void setNormalMapStrength(float strength) { normalMapStrength_ = strength; }
     void setPOMEnabled(bool enabled) { pomEnabled_ = enabled; }
     void setPOMQuality(int quality) { pomQuality_ = quality; }
-    /// Smoother, sharper characters (Enhancements::characterFidelity): near
+    /// Smoother characters (Enhancements::characterFidelity): the nearest
     /// units are drawn through Phong tessellation pipelines (built on first
-    /// use) and composites made from now on are baked at twice the stock size.
-    /// Off is the stock pipelines and the stock bake; nothing is made for it.
+    /// use). Off is the stock pipelines; nothing is made for it.
     void setCharacterFidelity(bool on) { fidelity_ = on; }
     [[nodiscard]] bool characterFidelity() const { return fidelity_; }
     /// Past this view distance (yards) a unit is drawn by the stock pipelines
