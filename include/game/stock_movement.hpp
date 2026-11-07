@@ -252,6 +252,19 @@ inline float stepHeight(bool playerControlled, float objectScale = 1.0f) {
 
 /// Whether a heartbeat is due (0x6F09F0): moving, and 500 ms since the last
 /// movement packet.
+/// The ground walker's snap after a move runs off the triangle it was on
+/// (0x7620F0): the box is traced straight down by `dist x 1.8494` (0xA32830)
+/// for a slice of `dist` yards; walkable ground within that is landed on
+/// (0x75B690 -> 0x6EC7B0), none starts a fall with v0 = 0 (0x988370(0)). On a
+/// continuous walkable surface the walker moves along the triangle's plane
+/// and never needs it; it is what carries the box over a convex edge (a
+/// 50 degree descent needs tan 50 = 1.19 x dist). A sheer drop deeper than
+/// it is a fall, however short - stock has no step-down.
+inline constexpr float kWalkOffSnapPerYard = 1.84939897f;
+inline float walkOffSnapReach(float dist) {
+    return std::max(dist, 0.0f) * kWalkOffSnapPerYard;
+}
+
 inline bool heartbeatDue(uint32_t flags, uint32_t msSinceLastMovementPacket) {
     return (flags & kMovingMask) != 0 && msSinceLastMovementPacket >= kHeartbeatIntervalMs;
 }
