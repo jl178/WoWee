@@ -94,8 +94,18 @@ inline bool m2BatchNeedsAlphaTest(uint8_t blendMode, bool hasAlpha) {
 /// Stormwind's gate tunnel full of them. It took "Soft lamp halos", which
 /// replaces the card, to hide it. A blended card with no alpha still gets the
 /// key: blending by an alpha of 1 is drawing it opaque, backing and all.
-inline bool m2BatchWantsColorKey(uint8_t blendMode, bool textureIsKeyed, bool textureHasAlpha) {
-    if (blendMode == M2_BLEND_ALPHA && textureHasAlpha) return false;
+///
+/// Nor, whatever its blend, a texture that carries its own alpha. The stock
+/// client keys nothing: every batch takes its shape from the texture's alpha
+/// (alpha test or blend, 0x81FE90), and the key only stands in for an alpha
+/// channel a flame card on a black backing lacks. Keyed, an alpha-key or
+/// opaque batch with alpha lost its dark texels and was forced onto the
+/// cutout pipeline - StormwindStreetLamp01's STREETLAMP.BLP (blend 0) among
+/// some 350 world batches the flame-name hint caught. `forced` is the forge
+/// and bonfire rule, which keys its opaque flame cards whatever their alpha.
+inline bool m2BatchWantsColorKey(uint8_t blendMode, bool textureIsKeyed, bool textureHasAlpha,
+                                 bool forced = false) {
+    if (textureHasAlpha && !forced) return false;
     return textureIsKeyed && !m2BlendIsAdditive(blendMode) && blendMode != M2_BLEND_MODULATE &&
            blendMode != M2_BLEND_MODULATE2X;
 }

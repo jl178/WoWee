@@ -2632,7 +2632,8 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         !m2BlendIsAdditive(batch.blendMode) &&
                         (model.isGroundDetail || foliageCutout ||
                          m2BatchNeedsAlphaTest(batch.blendMode, batch.hasAlpha) ||
-                         batch.colorKeyBlack);
+                         m2BatchWantsColorKey(batch.blendMode, batch.colorKeyBlack,
+                                              batch.hasAlpha, batch.forgeFireCard));
 
                     // Each blend mode on its own stock pipeline (0xA453B0). A
                     // forge's flame card keyed off its black backing is added

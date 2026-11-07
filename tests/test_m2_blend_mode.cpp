@@ -101,8 +101,6 @@ TEST_CASE("everything else that asked for the key still gets it", "[m2]") {
     CHECK(m2BatchWantsColorKey(0, true, false));
     CHECK(m2BatchWantsColorKey(1, true, false));
     CHECK(m2BatchWantsColorKey(2, true, false));
-    CHECK(m2BatchWantsColorKey(0, true, true));
-    CHECK(m2BatchWantsColorKey(1, true, true));
 
     // And a texture nothing marked is never keyed, whatever it blends as.
     for (uint8_t mode = 0; mode <= 6; ++mode) {
@@ -117,4 +115,16 @@ TEST_CASE("an alpha-blended card with alpha is blended, not keyed", "[m2]") {
     // the alpha. Keyed, it was drawn opaque past the key - an orange
     // rectangle around every torch.
     CHECK_FALSE(m2BatchWantsColorKey(2, true, true));
+}
+
+TEST_CASE("no texture with its own alpha is keyed, whatever its blend", "[m2]") {
+    // Stock keys nothing; the alpha decides. StormwindStreetLamp01's
+    // STREETLAMP.BLP (blend 0, 8-bit alpha) was keyed by its name and forced
+    // onto the cutout pipeline.
+    CHECK_FALSE(m2BatchWantsColorKey(0, true, true));
+    CHECK_FALSE(m2BatchWantsColorKey(1, true, true));
+    // The forge and bonfire flame cards keep theirs.
+    CHECK(m2BatchWantsColorKey(0, true, true, /*forced=*/true));
+    CHECK(m2BatchWantsColorKey(1, true, true, /*forced=*/true));
+    CHECK_FALSE(m2BatchWantsColorKey(4, true, true, /*forced=*/true));
 }
