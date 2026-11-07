@@ -14,6 +14,9 @@
 #include "rendering/stock_weather.hpp"
 #include "rendering/spell_visual_system.hpp"
 #include "rendering/wmo_renderer.hpp"
+#include "rendering/water_renderer.hpp"
+#include "rendering/post_process_pipeline.hpp"
+#include "game/stock_death_rules.hpp"
 #include "rendering/terrain_manager.hpp"
 #include "game/zone_manager.hpp"
 #include "pipeline/asset_manager.hpp"
@@ -99,6 +102,40 @@ const stock_weather::WeatherRow* Renderer::weatherRowFor(uint32_t state) {
     }
     auto it = weatherRows_.find(state);
     return it == weatherRows_.end() ? nullptr : &it->second;
+}
+
+float Renderer::easeWeatherLightScale(float target, bool snap, float dt) {
+    if (snap) {
+        lightScaleFrom_ = lightScaleTo_ = lightScale_ = target;
+        lightScaleElapsed_ = lightScaleSeconds_ = 0.0f;
+        return lightScale_;
+    }
+    if (target != lightScaleTo_) {
+        lightScaleFrom_ = lightScale_;
+        lightScaleTo_ = target;
+        lightScaleElapsed_ = 0.0f;
+        lightScaleSeconds_ = stock_weather::lightScaleSeconds(lightScaleFrom_, lightScaleTo_);
+    }
+    lightScaleElapsed_ += std::max(dt, 0.0f);
+    const float t = lightScaleSeconds_ > 0.0f ? std::min(lightScaleElapsed_ / lightScaleSeconds_, 1.0f) : 1.0f;
+    lightScale_ = lightScaleFrom_ + (lightScaleTo_ - lightScaleFrom_) * t;
+    return lightScale_;
+}
+
+void Renderer::applyScreenEffectFog() {
+    const auto* gh = core::Application::getInstance().getGameHandler();
+    const bool nether = gh && gh->getScreenEffect().id != 0 &&
+        gh->getScreenEffect().effect == static_cast<uint32_t>(game::stock_death::ScreenEffectKind::Nether);
+    // The post pass's fade: up by the frame's time to 0.75 (0xa4179c), and
+    // gone with the effect.
+    netherFade_ = nether ? std::min(netherFade_ + lastDeltaTime_, 0.75f) : 0.0f;
+    if (postProcessPipeline_) postProcessPipeline_->setNether(netherFade_);
+    if (!nether) return;
+    // 0x7ed870(0.7, 150, 0xff4c4c63, 0): the fog colour and its end 150 yd,
+    // its start 0.7 of that.
+    currentFrameData.fogColor = glm::vec4(glm::vec3(0x4c, 0x4c, 0x63) / 255.0f, currentFrameData.fogColor.w);
+    currentFrameData.fogParams.x = 0.7f * 150.0f;
+    currentFrameData.fogParams.y = 150.0f;
 }
 
 void Renderer::updateWeatherFx(float fxDt) {
@@ -217,6 +254,23 @@ bool Renderer::unitInColdArea(uint32_t instanceId, const glm::vec3& position) {
     if (slot.recheckAt > breathClock_) return slot.cold;
     slot.recheckAt = breathClock_ + stock_weather::kColdRecheckSeconds;
     slot.cold = false;
+    slot.underwater = false;
+    // 0x71fa90 asks the liquid first: deep under its surface, the bubbles
+    // (bit 0x20) and not the cold. Taken here as the surface over the
+    // unit's breath point.
+    if (waterRenderer) {
+        glm::vec3 breathAt = position + glm::vec3(0.0f, 0.0f, 1.7f);
+        if (characterRenderer) {
+            glm::mat4 m;
+            if (characterRenderer->getAttachmentTransform(instanceId, 17, m)) breathAt = glm::vec3(m[3]);
+        }
+        if (auto surface = waterRenderer->getNearestWaterHeightAt(breathAt.x, breathAt.y, breathAt.z, 30.0f)) {
+            if (*surface > breathAt.z) {
+                slot.underwater = true;
+                return false;
+            }
+        }
+    }
     if (!zoneManager) return false;
     // The unit's area as the player's is found (updateLiveArea): the map
     // object group's WMOAreaTable row when it stands on that group's floor,
@@ -252,19 +306,28 @@ bool Renderer::unitInColdArea(uint32_t instanceId, const glm::vec3& position) {
 }
 
 void Renderer::onUnitBreathEvent(uint32_t instanceId, const glm::vec3& position) {
-    if (!spellVisualSystem_ || !camera || cameraUnderwater_) return;
+    if (!spellVisualSystem_ || !camera) return;
     // Units far off are not worth the model; stock plays it on every unit
     // whose model animates.
     if (glm::distance(position, camera->getPosition()) > 100.0f) return;
     bool cold = unitInColdArea(instanceId, position);
+    const bool underwater = breathAreas_[instanceId].underwater;
     // "Breath in the cold": the stock breath wherever snow is falling too.
     if (!cold && enh_.coldBreath && weather && weather->getWeatherType() == Weather::Type::SNOW &&
         stock_screen_fx::particleLevel(weather->getIntensity()) > 0.0f) {
         cold = true;
     }
-    if (!cold) return;
-    spellVisualSystem_->playEffectModel(stock_weather::kColdBreathModel, position, instanceId,
-                                        SpellVisualSystem::SLOT_BREATH);
+    // The drunk bubbles: the local player's drunk level (other players'
+    // PLAYER_BYTES_3 are not read here).
+    const bool isPlayer = instanceId == characterInstanceId;
+    const char* model = nullptr;
+    switch (stock_weather::breathFor(isPlayer, isPlayer ? drunkLevel_ : 0.0f, underwater, cold)) {
+        case stock_weather::Breath::DRUNK:      model = stock_weather::kDrunkBreathModel; break;
+        case stock_weather::Breath::UNDERWATER: model = stock_weather::kUnderwaterBreathModel; break;
+        case stock_weather::Breath::COLD:       model = stock_weather::kColdBreathModel; break;
+        case stock_weather::Breath::NONE:       return;
+    }
+    spellVisualSystem_->playEffectModel(model, position, instanceId, SpellVisualSystem::SLOT_BREATH);
 }
 
 void Renderer::applyWeatherFxLight() {
@@ -280,6 +343,8 @@ void Renderer::applyWeatherFxLight() {
         currentFrameData.fogParams.x *= k;
         currentFrameData.fogParams.y *= k;
     }
+    // A nether screen effect takes the fog over (stock, not a row).
+    applyScreenEffectFog();
 }
 
 }  // namespace rendering

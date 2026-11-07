@@ -35,6 +35,14 @@ layout(push_constant) uniform PC {
     float glowBlend;    // how far the picture is swapped for its blur (water, drink)
     float glowSource;   // 1 when uGlow holds this frame's boxed-down scene
     float pad2;
+    float netherFade;   // ScreenEffect type 2: ffxnethercombine's c0.w, 0 = off
+    float waveOn;       // 1 under liquid: the glow's last pass is ffxglowwave
+    float waveU;        // the wave map's scroll, (t mod 3.174 s) / 3.174
+    float waveV;        //                        (t mod 2.805 s) / 2.805
+    float effectTime;   // seconds, for the nether blur's moving taps
+    float pad3;
+    float pad4;
+    float pad5;
 } pc;
 
 // The scene boxed down to a quarter (mip 1 of a half-size image), the stock
@@ -77,16 +85,70 @@ vec3 stockBlur(vec2 uv) {
     return sum;
 }
 
+// The glow wave's map (PassGlow.cpp 0x8c2920, "PassGlowWave", 128 x 128):
+// along each axis a smooth wave, 1 - (6 - 4f) f^2 on the fraction of
+// x / 64 - 0.5, negated on odd periods, to 0..1. Its coordinates (0x8c2350):
+// the screen in pixels over 128 (the height times 0.88), turned 10 degrees
+// (0xa942ac), scrolled by the clock's 3174 and 2805 ms periods.
+float waveAxis(float x) {
+    float u = x / 64.0 - 0.5;
+    float n = floor(u);
+    float f = u - n;
+    float s = 1.0 - (6.0 - 4.0 * f) * f * f;
+    if (mod(n, 2.0) >= 1.0) s = -s;
+    return clamp(0.5 + 0.5 * s, 0.0, 1.0);
+}
+vec2 waveAt(vec2 uv) {
+    vec2 size = vec2(textureSize(uScene, 0));
+    vec2 tc = uv * vec2(size.x, size.y * 0.88) / 128.0;
+    const float c = 0.98480775, s = 0.17364818;   // 10 degrees
+    tc = vec2(c * tc.x - s * tc.y, s * tc.x + c * tc.y) + vec2(pc.waveU, pc.waveV);
+    vec2 texel = fract(tc) * 128.0;
+    return vec2(waveAxis(texel.x), waveAxis(texel.y));
+}
+
+// The nether world's blur (FFXNetherBlur): four taps of the quarter-size
+// scene averaged. Stock moves the taps in its vertex program from random
+// tables; here they turn about the pixel, 1.5 quarter texels out.
+vec3 netherBlur(vec2 uv) {
+    if (pc.glowSource < 0.5) return texture(uScene, uv).rgb;
+    vec2 texel = 1.0 / vec2(textureSize(uGlow, 1));
+    vec3 sum = vec3(0.0);
+    for (int i = 0; i < 4; ++i) {
+        float a = pc.effectTime * (0.7 + 0.3 * float(i)) + 1.5707963 * float(i);
+        sum += textureLod(uGlow, uv + vec2(cos(a), sin(a)) * 1.5 * texel, 1.0).rgb;
+    }
+    return sum * 0.25;
+}
+
+// ffxnethercombine with c0 = (0.6, 0.6, 0.78, fade) (0xaf4940, 0x7e8c80).
+vec3 netherCombine(vec3 scene, vec3 blur) {
+    vec3 m = scene * 0.5 + blur;
+    float g = dot(m, vec3(0.16666649));
+    m = m * 0.5 + vec3(g);
+    return scene + pc.netherFade * (m * vec3(0.6, 0.6, 0.78) - scene);
+}
+
 // What the stock client lays over the finished picture. Alive, ffxGlow
 // (ffxglow.bls): lerp(scene, blur, blend) + blur^2 * glow. A ghost, ffxDeath
 // (ffxdeath.bls) in its place: the scene plus the same glow, drained to grey
 // by (0.299, 0.587, 0.144) - the shader's own 0.144 - and the cold tint
 // (0x53, 0x93, 0xa8) laid on the mid-greys, 4 * grey * (1 - grey).
 vec3 stockScreenEffectComposite(vec3 c, vec2 uv) {
+    // The nether world's chain stands in for the glow (0x4f7020 type 2).
+    if (pc.netherFade > 0.0) return netherCombine(c, netherBlur(uv));
     float g = clamp(pc.ghost, 0.0, 1.0);
     bool glow = pc.glowAmount > 0.0 || pc.glowBlend > 0.0;
     if (g <= 0.0 && !glow) return c;
-    vec3 blur = stockBlur(uv);
+    vec2 blurUV = uv;
+    if (pc.waveOn > 0.5) {
+        // ffxglowwave: the scene read 0..3 pixels off and the blur 0..0.75
+        // quarter texels off along the wave (c0, c1 of 0x8c2350).
+        vec2 w = waveAt(uv);
+        c = texture(uScene, uv + w * 3.0 * pc.rcpFrame).rgb;
+        if (pc.glowSource > 0.5) blurUV = uv + w * 0.75 / vec2(textureSize(uGlow, 1));
+    }
+    vec3 blur = stockBlur(blurUV);
     vec3 alive = mix(c, blur, pc.glowBlend) + blur * blur * pc.glowAmount;
     if (g <= 0.0) return alive;
     vec3 lit = c + blur * blur * pc.glowAmount;

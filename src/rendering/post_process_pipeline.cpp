@@ -2,6 +2,8 @@
 // Extracted from Renderer to isolate post-processing concerns.
 
 #include "rendering/post_process_pipeline.hpp"
+
+#include <chrono>
 #include "rendering/highlight_rolloff.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_shader.hpp"
@@ -1848,7 +1850,7 @@ bool PostProcessPipeline::initFXAAResources() {
     VkPushConstantRange pc{};
     pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     pc.offset = 0;
-    pc.size = 48;  // three vec4
+    pc.size = 80;  // five vec4
     VkPipelineLayoutCreateInfo plCI{};
     plCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     plCI.setLayoutCount = 1;
@@ -1919,7 +1921,7 @@ void PostProcessPipeline::prepareSceneForFXAA(VkImage scene) {
     // Without a blur to show, or with nothing to show it for, the plain
     // transition the pass always had.
     const bool blurWanted = (glowWanted() && (glowAmount_ > 0.0f || glowBlend_ > 0.0f)) ||
-                            ghost_ > 0.001f;
+                            ghost_ > 0.001f || nether_ > 0.0f;
     if (!fxaa_.glowImage.image || !blurWanted) {
         transitionImageLayout(currentCmd_, scene,
             VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -2011,7 +2013,12 @@ void PostProcessPipeline::renderFXAAPass() {
     // Soft highlights: the shoulder for this glow's reach, or white 0 (off).
     const highlight_rolloff::Curve roll =
         highlight_rolloff::curveForGlow(highlightRollOff_, glowWanted() ? glowAmount_ : 0.0f);
-    float pc[12] = {
+    // The glow wave's scroll and the nether taps' clock (0x8c2350: the
+    // millisecond timer modulo 3174 and 2805).
+    const auto nowMs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    const bool wave = underwaterWave_ && glowWanted();
+    float pc[20] = {
         1.0f / static_cast<float>(ext.width),
         1.0f / static_cast<float>(ext.height),
         sharpness,
@@ -2025,7 +2032,13 @@ void PostProcessPipeline::renderFXAAPass() {
         glowWanted() ? glowAmount_ : 0.0f,
         glowWanted() ? glowBlend_ : 0.0f,
         fxaa_.glowImage.image ? 1.0f : 0.0f,
-        0.0f
+        0.0f,
+        nether_,
+        wave ? 1.0f : 0.0f,
+        static_cast<float>(nowMs % 3174u) / 3174.0f,
+        static_cast<float>(nowMs % 2805u) / 2805.0f,
+        static_cast<float>(nowMs % 3600000u) * 0.001f,
+        0.0f, 0.0f, 0.0f
     };
     vkCmdPushConstants(currentCmd_, fxaa_.pipelineLayout,
                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), pc);

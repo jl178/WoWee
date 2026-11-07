@@ -2923,7 +2923,9 @@ void Renderer::update(float deltaTime) {
         float stormIntensity =
             ((gh || weatherPreviewOn) && game::weatherKind(weatherState) != game::WeatherKind::NONE)
                 ? glm::clamp(weatherGrade, 0.0f, 1.0f) : 0.0f;
-        if (weatherRow && weatherRow->known) stormIntensity *= glm::clamp(weatherRow->lightScale, 0.0f, 1.0f);
+        stormIntensity *= easeWeatherLightScale(
+            weatherRow && weatherRow->known ? glm::clamp(weatherRow->lightScale, 0.0f, 1.0f) : 1.0f,
+            stormIntensity <= 0.0f, deltaTime);
         // Light.dbc's underwater slots while the camera is under the surface -
         // not while the player swims at it, which kept the underwater set up
         // with the camera in open air.
@@ -3978,6 +3980,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             // the stock drunk look (0x4F8770). Under the Drunken wobble
             // enhancement Wowee's own blur stands in for it, as before.
             stock_screen_fx::glowBlend(cameraUnderwater_, enh_.drunkWobble ? 0.0f : drunkLevel_));
+        postProcessPipeline_->setUnderwaterWave(cameraUnderwater_);
     }
 
     uint32_t frameIdx = vkCtx->getCurrentFrame();

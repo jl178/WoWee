@@ -56,6 +56,12 @@ inline WeatherEffect effectFor(const WeatherRow* row, uint32_t state) {
     }
 }
 
+/// Seconds the light scale takes from one row's to the next (0x784850:
+/// weather +0x28 eased from +0x2c to +0x30 over (|change| * 4 + 0.001) * 5 s).
+inline float lightScaleSeconds(float from, float to) {
+    return (std::fabs(to - from) * 4.0f + 0.001f) * 5.0f;
+}
+
 // ------------------------------------------------------------ Where it draws
 
 /// Whether the weather is drawn this frame (docs/re/weather-sky.md 1). Stock
@@ -121,6 +127,26 @@ inline float mistRate(const MistSpec& m, float level, float density) {
     const float l = std::max(level, 0.0f);
     if (m.sand) return m.shaderRate * density * l;
     return std::max(0.0f, (l - 0.5f) * 2.0f) * density * m.shaderRate;
+}
+
+/// The ground is sampled along a sheet's way at this spacing, at most this
+/// many times (0x786330: the count is 63 at most; the spacing comes from
+/// the world's own query and is taken as 2 yd here).
+inline constexpr float kMistPathStep = 2.0f;
+inline constexpr int kMistPathSamples = 63;
+
+/// Where a sheet's way rises too steeply for it (0x786330): the first sample
+/// `i` past which the ground climbs more than 1 yd over three samples, 0.75
+/// over two or 0.5 over one. The sheet lives to sample i + 1 of `count`; -1
+/// when nothing is too steep. `ground` holds `count` heights.
+inline int mistSteepCut(const float* ground, int count) {
+    for (int i = 0; i < count - 3; ++i) {
+        if (ground[i + 3] - ground[i] > 1.0f || ground[i + 2] - ground[i] > 0.75f ||
+            ground[i + 1] - ground[i] > 0.5f) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 /// Opacity of a sheet `age` seconds into a `life`-second life (0x786e10): in
@@ -200,6 +226,22 @@ inline bool areaIsCold(uint32_t areaFlags, bool hasParent, uint32_t parentFlags)
     return (f & 0x1u) != 0;
 }
 inline constexpr const char* kColdBreathModel = "Particles\\ColdBreath.m2";
+/// "HARDCODED Breath Underwater" (SpellVisualEffectName 108) and
+/// "HARDCODED Inebriated Bubbles" (1223), the other two $BTH effects.
+inline constexpr const char* kUnderwaterBreathModel = "Particles\\Bubbles.m2";
+inline constexpr const char* kDrunkBreathModel = "Spells\\Bubble_Drunk.m2";
+
+enum class Breath : uint8_t { NONE, COLD, UNDERWATER, DRUNK };
+
+/// Which breath a $BTH plays (0x732650): a player at drunk 0.5 or more
+/// (0x9e2ec4) blows the drunk bubbles; else under water (unit +0xa30 bit
+/// 0x20) the bubbles; else in the cold (bit 0x40) the cold breath.
+inline Breath breathFor(bool isPlayer, float drunk, bool underwater, bool cold) {
+    if (isPlayer && drunk >= 0.5f) return Breath::DRUNK;
+    if (underwater) return Breath::UNDERWATER;
+    if (cold) return Breath::COLD;
+    return Breath::NONE;
+}
 inline constexpr float kColdRecheckSeconds = 10.0f;
 
 }  // namespace stock_weather
