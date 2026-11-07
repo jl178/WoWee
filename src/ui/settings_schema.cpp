@@ -264,13 +264,12 @@ constexpr SettingDesc kSchema[] = {
      "Slowly circle the camera around you while you stand still.", "", 0},
     // The stock pair (InterfaceOptionsPanels): mouseSpeed is the Windows
     // pointer speed / 10 (Wow.exe 0x86A070), cameraYawMoveSpeed the mouse-look
-    // turn (0x6020B0, stock_camera.hpp). Both at the stock sliders' ranges.
+    // turn (0x6020B0, stock_camera.hpp). Mouse Look Speed has no row here (the
+    // Camera panel is full); the game's own Mouse panel draws its slider, and
+    // the field binding mouselookspeed carries it.
     {"mousespeed", "Mouse sensitivity", SettingKind::Float, 0.5f, 1.5f, 0.05f, "Camera", "Mouse",
      "The pointer speed, as the original client set it for Windows: 1 is\n"
      "the desktop's own, and mouse look turns with the pointer.", "", 1.0f},
-    {"mouselookspeed", "Mouse look speed", SettingKind::Float, 90.0f, 270.0f, 10.0f, "Camera", "Mouse",
-     "How far the view turns while looking with the mouse: degrees per\n"
-     "800 pixels at a 4:3 screen's width. Tilt runs at half of it.", "", 180.0f},
     {"invertmouse", "Invert mouse look", SettingKind::Bool, 0, 0, 0, "Camera", "",
      "Push the mouse forward to look up, as in a flight sim.", "", 0},
     {"gamepad", "Use a controller", SettingKind::Bool, 0, 0, 0, "Camera", "Controller",
