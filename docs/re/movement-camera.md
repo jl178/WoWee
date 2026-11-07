@@ -106,11 +106,44 @@ Autorun: pressing forward or back (the key going down) clears 0x1000
 
 The right button steers: on its press, and on every mouse move while it is
 held, 0x6023D0 sets the facing to the camera's yaw (0x5FB260 ->
-`CGPlayer_C::SetFacing` 0x72EA50 -> event 0x13). Mouse-look rotates the
-camera by `dx / 0.8 * 0.00125 * cameraYawMoveSpeed (180) deg` and
-`dy / 0.6 * 0.0016667 * cameraPitchMoveSpeed (90) deg` (0x6020B0; dx/dy are
-the event's normalised deltas, +0x24/+0x28), inverted by mouseInvertYaw /
-mouseInvertPitch.
+`CGPlayer_C::SetFacing` 0x72EA50 -> event 0x13).
+
+**Mouse look** (0x6020B0, from the mouse-move handler 0x5FBA60 and, per
+frame for held analogue input, 0x5FAB70):
+
+- **Delta units.** While the cursor is captured the window procedure
+  (0x86A210, WM_MOUSEMOVE with 0xD4156C = 1) reads the cursor with
+  GetPhysicalCursorPos (0x868C10), posts OS event 0xC with the integer
+  **pixel** difference from the window centre (0xD413EC / 0xD413F0) and
+  recentres the cursor (0x869DB0). 0x47FA60 turns event 0xC into the input
+  event 0xE carrying the two deltas as floats - the event's +0x24 / +0x28 -
+  unscaled. (0x568560 rescales them only in a vehicle-aim mode, 0xB7436C.)
+- **Scale.** 0x47C020 divides by the DDC rectangle, the screen with a unit
+  diagonal (0x47BF90: width `a / sqrt(a^2 + 1)` at 0xAC0CB4, height
+  `1 / sqrt(a^2 + 1)` at 0xAC0CB8; 0.8 x 0.6 at 4:3, 0.872 x 0.490 at 16:9).
+  Then `yaw -= dx / ddcW x 1/800 (0xA1E904) x cameraYawMoveSpeed x pi/180`
+  (0x5FE5F0 adds its argument, given negated) and `pitch += dy / ddcH x
+  1/600 (0xA1E900) x cameraPitchMoveSpeed x pi/180` (0x5FFC20, clamped to
+  +-1.5533 rad, 0xAD1B4C/0xAD1B50; a positive stock pitch looks down).
+  mouseInvertYaw / mouseInvertPitch (0xC24E70 / 0xC24E6C) multiply by -1
+  (0x9E2EF4). At the defaults a pixel turns **0.28125 deg** and tilts
+  **0.25 deg** at 4:3 (0.258 / 0.306 at 16:9); 800 pixels across turn 225 deg.
+  The held-analogue path uses the same function with `+0x64 x 800 x dt`
+  (0xA1DF2C) and `+0x68 x 600 x dt` (0x9E8990), the reference screen.
+- **mouseSpeed** (registered 0x401B60 with the OS pointer speed x 0.1 as its
+  default; set by 0x4015E0 -> 0x86A070) is clamped to [0.1, 2.0] (0x9E3004,
+  0xA4040C), times 10 (0x9E30CC), rounded and handed to
+  SystemParametersInfo(SPI_SETMOUSESPEED) while the window is active (0x86A210
+  WM_ACTIVATE restores the desktop's on deactivation). The look code never
+  reads it: it scales the cursor the delta is measured from, by Windows'
+  pointer-speed table (1/32, 1/16, 1/8, then eighths to 1 at 10, quarters to
+  3.5 at 20, enhance pointer precision off). Default 1.0 = speed 10 = x1.
+- **The sliders** (InterfaceOptionsPanels): Mouse Sensitivity is mouseSpeed,
+  0.5..1.5 step 0.05; Mouse Look Speed is cameraYawMoveSpeed, 90..270 step
+  10, and its OnValueChanged also sets cameraPitchMoveSpeed to half.
+- The CVar globals (0x5FD910): cameraYawMoveSpeed 0xC24E50, cameraPitchMoveSpeed
+  0xC24E54, cameraDistanceMoveSpeed 0xC24E58; cameraPivotDXMax 0xC249A8 and
+  cameraPivotDYMin 0xC249A4 gate the pivot branch of 0x6020B0.
 
 Click-to-move (`autoInteract`) and its pathing were not traced.
 
@@ -429,6 +462,7 @@ also skips the cameraDive surface/submerge pitch limits (0x6023D0,
 | 30 | Every jump sends MSG_MOVE_JUMP (event 0xA, 0x6EF860) as it leaves the ground | none went out for a jump from the ground: the send tested `grounded` after the physics had already cleared it for the take-off, so the server saw only the FALL_LAND (found in game 2026-11-04, debug log of the movement packets) | sent when the physics takes off (`jumpedThisFrame_`) |
 | 31 | A knockback (SMSG_MOVE_KNOCK_BACK, event 0x22 -> 0x6E9FF0) is a fall on the packet's direction at its speed, held to the landing like a jump's, FORWARD \| PENDING_STOP; the ack carries that fall; no JUMP (`unit-motion.md` section 6) | a horizontal push that decayed at 4.5/s, plus a MSG_MOVE_JUMP with a normal jump's fields before the ack | `stock_movement::knockBackFlags`, the ack's fall fields from the packet, the jump's latched path (`CameraController::applyKnockBack`) |
 | 32 | A server spline of the player's own (a charge, a leap) moves the player as any unit's; the controls and every movement packet wait; `CMSG_MOVE_SPLINE_DONE` at its end; the held keys start again (`unit-motion.md` section 6) | Charge was a dash of the client's own at 25 yd/s, ending elsewhere than the server's spline, with a heartbeat from there | followed from the spline (`MovementHandler::updateServerSpline`) |
+| 33 | Mouse look turns `dx / ddcW / 800 x cameraYawMoveSpeed` and tilts `dy / ddcH / 600 x cameraPitchMoveSpeed` degrees per cursor pixel, the cursor scaled by the Windows pointer speed mouseSpeed sets (section 4); two sliders, mouseSpeed 0.5..1.5 and cameraYawMoveSpeed 90..270 (pitch at half) | one "sensitivity" of 0.2 deg per pixel on both axes (0.15 from the renderer until settings loaded), which both stock sliders wrote, over ranges redefined to 0.05..1 | `stock_camera::mouseLook` in `turnByMouse`; settings `mousespeed` (mouseSpeed, default 1.0) and `mouselookspeed` (cameraYawMoveSpeed 180, pitch speed written at half, `mouselookpitchspeed` for cameraPitchMoveSpeed), bound to the three CVars at their stock ranges; the old `mouse_sensitivity` key is not read. The pad turns in degrees (`applyLookDegrees`) |
 
 Still different (not changed here; each needs in-game checking):
 
@@ -460,14 +494,6 @@ Still different (not changed here; each needs in-game checking):
 - **FALL_LAND after a jump that lands within 1/36 yd of its apex** (onto a
   ledge): stock sends none; Wowee sends it, as it is what clears FALLING in
   its copy of the flags.
-- **Mouse-look scale**: 0x6020B0 takes the event's deltas through 0x47C020,
-  which divides them by the DDC width and height (0xAC0CB4 = 0.6 x aspect,
-  0.8 at 4:3, written by 0x47BF90; 0xAC0CB8 = 0.6), then yaw `dx x 0.00125
-  (0xA1E904) x cameraYawMoveSpeed x pi/180`, pitch `dy x 0.0016667
-  (0xA1E900) x cameraPitchMoveSpeed x pi/180`. What units the event's
-  deltas (+0x24 / +0x28) are in - raw counts, scaled by mouseSpeed or not -
-  was not traced, so Wowee's pixel sensitivity slider is still not
-  reconciled with it.
 - Click-to-move, cameraDive / submerge pitch and the first-person fade were
   not traced.
 

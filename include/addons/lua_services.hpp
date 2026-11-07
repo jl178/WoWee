@@ -215,12 +215,8 @@ struct LuaServices {
 
     /// Whether looking up drags the view down, for mouseInvertPitch.
     ///
-    /// There is deliberately no counterpart for mouseSpeed, which sits beside
-    /// it on the same panel: FrameXML never declares that slider's range -
-    /// neither the control nor OptionsSliderTemplate sets minValue or maxValue
-    /// - so the number it writes has no scale to convert from, and the camera's
-    /// own sensitivity runs 0.05 to 1. Mapping one onto the other would be a
-    /// guess about both ends.
+    /// mouseSpeed and cameraYaw/PitchMoveSpeed are kClientCVars rows, in the
+    /// stock units the camera now reads (stock_camera.hpp).
     /// mouseInvertPitch and gxVSync had a pair each here. Both are rows in
     /// kClientCVars now - the client has settings keys for them, which it did
     /// not when they were written, and a row costs nothing where a pair costs

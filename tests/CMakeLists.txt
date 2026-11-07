@@ -186,6 +186,11 @@ wowee_add_test(test_hill_climbing
 wowee_add_test(test_stock_movement
     SOURCES test_stock_movement.cpp)
 
+# The stock camera input rules: the mouse-look scale, mouseSpeed's pointer
+# speed, the MoveView rates and the water-line pitches. Header-only.
+wowee_add_test(test_stock_camera
+    SOURCES test_stock_camera.cpp)
+
 # ── test_stock_cast_timing ──────────────────────────────────
 # The press-to-cast rules of the stock client: the predicted global cooldown,
 # the once-per-burst cast error, the "not ready" line, the world click, and

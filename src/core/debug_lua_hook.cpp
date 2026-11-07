@@ -24,6 +24,9 @@
 //                                  frame, through the same queue
 //   WoweeDebug_Camera(yaw, pitch, dist)
 //                                  the camera at a yaw from the facing
+//   WoweeDebug_MouseMotion(dx, dy) a relative mouse move, in pixels
+//   WoweeDebug_CameraState()       camera yaw, pitch, facing, movement
+//                                  pitch (degrees) and distance
 //   WoweeDebug_TimeOfDay(hours)    hold the world clock at an hour (0..24),
 //                                  or a negative hour for the game's clock
 //   WoweeDebug_UseObject(name)     right-click the nearest game object of
@@ -227,6 +230,32 @@ int luaDebugCamera(lua_State* L) {
     return 0;
 }
 
+/// WoweeDebug_MouseMotion(dx, dy) - a relative mouse move of (dx, dy) pixels
+/// through the SDL queue, as a held button drags it.
+int luaDebugMouseMotion(lua_State* L) {
+    SDL_Event mv{};
+    mv.type = SDL_EVENT_MOUSE_MOTION;
+    mv.motion.xrel = static_cast<float>(luaL_checknumber(L, 1));
+    mv.motion.yrel = static_cast<float>(luaL_checknumber(L, 2));
+    mv.motion.windowID = gWindowId;
+    SDL_PushEvent(&mv);
+    return 0;
+}
+
+/// WoweeDebug_CameraState() - camera yaw, pitch (degrees), the facing yaw,
+/// the movement pitch (degrees) and the camera distance.
+int luaDebugCameraState(lua_State* L) {
+    auto* renderer = Application::getInstance().getRenderer();
+    auto* cc = renderer ? renderer->getCameraController() : nullptr;
+    if (!cc) return 0;
+    lua_pushnumber(L, cc->getYaw());
+    lua_pushnumber(L, cc->getPitch());
+    lua_pushnumber(L, cc->getFacingYaw());
+    lua_pushnumber(L, glm::degrees(cc->getFlightPitchRad()));
+    lua_pushnumber(L, cc->getViewDistance());
+    return 5;
+}
+
 /// WoweeDebug_TimeOfDay(hours) - the light and sky held at an hour, so a test
 /// can shoot the same place at noon and at dusk. A negative hour gives the
 /// clock back to the game.
@@ -384,6 +413,8 @@ void debugLuaHookTick(addons::LuaEngine* engine, SDL_Window* window) {
     lua_register(L, "WoweeDebug_ProfileTag", luaDebugProfileTag);
     lua_register(L, "WoweeDebug_Mouse", luaDebugMouse);
     lua_register(L, "WoweeDebug_Camera", luaDebugCamera);
+    lua_register(L, "WoweeDebug_MouseMotion", luaDebugMouseMotion);
+    lua_register(L, "WoweeDebug_CameraState", luaDebugCameraState);
     lua_register(L, "WoweeDebug_TimeOfDay", luaDebugTimeOfDay);
     lua_register(L, "WoweeDebug_UseObject", luaDebugUseObject);
     lua_register(L, "WoweeDebug_RightClickCorpse", luaDebugRightClickCorpse);
