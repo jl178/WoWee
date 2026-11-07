@@ -88,8 +88,11 @@ inline constexpr uint32_t kVehicleCameraFade = 0x80000;      // the model fades 
 /// How opaque a vehicle with kVehicleCameraFade draws with the camera
 /// `distance` from it (Camera.cpp, 0x607000 area): clear within
 /// CameraFadeDistScalarMin x its size, whole beyond Max x its size, eased in
-/// between.
-inline float cameraFadeAlpha(const VehicleRecord& v, float modelSize, float distance) {
+/// between. The distance is taken less the camera's near clip (CGCamera
+/// +0x38, 0.2 - the same loop subtracts it for the player's model).
+inline float cameraFadeAlpha(const VehicleRecord& v, float modelSize, float distance,
+                             float nearClip = 0.2f) {
+    distance -= nearClip;
     const float lo = v.cameraFadeDistScalarMin * modelSize;
     const float hi = v.cameraFadeDistScalarMax * modelSize;
     if (distance >= hi) return 1.0f;
