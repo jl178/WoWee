@@ -4,10 +4,11 @@
 /// "Enhancements: Weather" page): how much more the "Weather intensity" slider
 /// draws, the client-only weather preview, which zones are cold, dry or
 /// firefly country, when lightning strikes and its thunder follows, how fast
-/// snow settles, how thick a sandstorm's haze is, and when breath shows.
+/// snow settles and how thick a sandstorm's haze is.
 ///
-/// None of this is stock. The stock client draws the server's rain and snow
-/// (Weather, stock_screen_fx.hpp) and nothing else; every rule here returns
+/// None of this is stock. The stock client draws the server's rain, snow and
+/// sand, their mist and the cold breath (Weather, stock_screen_fx.hpp,
+/// stock_weather.hpp) and nothing else; every rule here returns
 /// "nothing" at the row's stock value, and the renderer asks none of them
 /// while the rows are off (Renderer::updateWeatherFx).
 ///
@@ -91,8 +92,8 @@ inline Forced previewWeather(int choice) {
 /// would be at home.
 enum Climate : uint8_t {
     kTemperate = 0,
-    kCold      = 1u << 0,  ///< breath shows by day and night
-    kCool      = 1u << 1,  ///< breath shows at night and in snow
+    kCold      = 1u << 0,  ///< snowfields (the breath follows AreaTable instead, stock_weather)
+    kCool      = 1u << 1,  ///< cold nights
     kDry       = 1u << 2,  ///< desert and badlands: a sandstorm's country
     kFireflies = 1u << 3,  ///< woods, meadows and marshes: fireflies at night
 };
@@ -132,22 +133,6 @@ inline float nightAmount(float hours) {
     auto ramp = [](float x, float a, float b) { return std::clamp((x - a) / (b - a), 0.0f, 1.0f); };
     if (h >= 12.0f) return ramp(h, 19.5f, 21.0f);
     return 1.0f - ramp(h, 5.0f, 6.5f);
-}
-
-/// Whether a breath shows: always in the snowfields, at night in the cool
-/// zones, and anywhere it is snowing.
-inline bool breathShows(uint8_t climate, bool snowing, float hours) {
-    if (snowing) return true;
-    if (climate & kCold) return true;
-    if (climate & kCool) return nightAmount(hours) > 0.5f;
-    return false;
-}
-
-/// Seconds between one unit's breaths: a calm breath every three and a half
-/// to five seconds, quicker while it runs.
-inline float breathInterval(float speed, float roll) {
-    const float base = 3.5f + 1.5f * std::clamp(roll, 0.0f, 1.0f);
-    return speed > 4.0f ? base * 0.6f : base;
 }
 
 /// How many fireflies to keep around the camera, as a share of the most:
@@ -258,9 +243,9 @@ inline float sandFogScale(float level, float intensity = 1.0f) {
 
 // -------------------------------------------------------------- Mist sheets
 
-/// How many distant mist sheets to keep in the air (the stock mist's 128
-/// cap, MapWeather 0x78c420, is the ceiling): rain and snow past half their
-/// level, as the stock spawn rate (level - 0.5) * 2, sand at any level.
+/// How many of the row's taller distant sheets to keep in the air, on top of
+/// the stock mist (stock_weather.hpp): rain and snow past half their level,
+/// as the stock mist's spawn rate (level - 0.5) * 2, sand at any level.
 inline int mistSheetTarget(bool sand, float level, float intensity, int cap) {
     const float l = std::clamp(level, 0.0f, 1.0f);
     const float share = sand ? l : std::max(0.0f, (l - 0.5f) * 2.0f);

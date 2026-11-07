@@ -1210,6 +1210,7 @@ set(WOWEE_HEADERS
     include/rendering/lens_flare.hpp
     include/rendering/weather.hpp
     include/rendering/weather_fx.hpp
+    include/rendering/stock_weather.hpp
     include/rendering/lightning.hpp
     include/rendering/swim_effects.hpp
     include/rendering/world_map.hpp

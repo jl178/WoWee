@@ -207,6 +207,10 @@ void NPCInteractionCallbackHandler::handleUnitAnimEvent(uint32_t instanceId, uin
     if (meleeEventHook_ && (eventTag == m2EventTag("$CAH") || eventTag == m2EventTag("$CPP")))
         meleeEventHook_(instanceId, eventTag);
     if (eventTag == m2EventTag("$CPP")) return;  // silent
+    if (eventTag == m2EventTag("$BTH")) {         // a breath (0x732650)
+        if (renderer_) renderer_->onUnitBreathEvent(instanceId, position);
+        return;
+    }
     auto* csm = audioCoordinator_ ? audioCoordinator_->getCombatSoundManager() : nullptr;
     if (!csm) return;
     if (eventTag == m2EventTag("$CSS") || eventTag == m2EventTag("$CAH")) {

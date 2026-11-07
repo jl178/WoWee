@@ -282,8 +282,10 @@ constexpr uint32_t m2EventTag(const char (&name)[5]) {
 /// victim's dodge, parry or block plays (Wow.exe 0x756240), which is silent
 /// but rides the same list to reach the same callback.
 constexpr bool isM2SoundEventTag(uint32_t tag) {
+    // $BTH, silent too: the unit breathes out (0x732650 plays the cold,
+    // underwater or drunk breath effect at attachment 17).
     if (tag == m2EventTag("$CSS") || tag == m2EventTag("$CAH") || tag == m2EventTag("$WNG") ||
-        tag == m2EventTag("$CPP"))
+        tag == m2EventTag("$CPP") || tag == m2EventTag("$BTH"))
         return true;
     const uint32_t stem = tag & 0x00FFFFFFu;
     const uint32_t last = tag >> 24;

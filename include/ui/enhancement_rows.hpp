@@ -517,13 +517,13 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .asBool = &Enhancements::softSnow},
     {.key = "weathersheets", .label = "Distant rain and snow", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "",
-     .tooltip = "Sheets of rain, snow or blowing dust drift across the middle\n"
-                "distance in a heavy fall, in the colour of the fog. The\n"
-                "original game draws a mist like this; it was missing here.",
+     .tooltip = "Tall sheets of rain, snow or blowing dust drift across the\n"
+                "middle distance in a heavy fall, in the colour of the fog,\n"
+                "beyond the original game's own closer mist.",
      .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "weather_sheets",
      .controls = "Weather::Style::mistSheets: up to 40 camera-facing SnowMist01 sheets "
                  "16-70 yd out past half the weather's level (sand: any level), "
-                 "loaded on first use",
+                 "on top of the stock mist (stock_weather.hpp)",
      .asBool = &Enhancements::weatherSheets},
     {.key = "wetground", .label = "Wet ground in rain", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "",
@@ -576,22 +576,20 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .asBool = &Enhancements::stormLightning},
     {.key = "sandstorms", .label = "Sandstorms", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "",
-     .tooltip = "When the server sends a sandstorm (Tanaris, Silithus and the\n"
-                "like), sand blows past in the wind and the haze closes in.\n"
-                "Off, this client draws nothing for one.",
+     .tooltip = "In a sandstorm (Tanaris, Silithus and the like) the haze\n"
+                "closes in and the wind blows harder. Off, the original\n"
+                "game's sand and dust are still drawn.",
      .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "sandstorms",
-     .controls = "Weather::Type::SAND (blowing grains in a low box around the eye, "
-                 "fog-coloured) and the fog pulled in by up to 40%, eased",
+     .controls = "on top of the stock sand (Weather::updateSand): the fog pulled in by "
+                 "up to 40%, eased, the foliage and cloth wind and the volumetric mist",
      .asBool = &Enhancements::sandstorms},
     {.key = "coldbreath", .label = "Breath in the cold", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "",
-     .tooltip = "Players and creatures near you breathe a little mist in the\n"
-                "snowfields (Northrend, Dun Morogh, Winterspring), on cold\n"
-                "nights in Grizzly Hills, and wherever it snows.",
+     .tooltip = "The original game's breath in the cold (Dun Morogh,\n"
+                "Winterspring, most of Northrend) also wherever it snows.",
      .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "cold_breath",
-     .controls = "a second FootfallDust (built on first use) fed a puff at each nearby "
-                 "unit's breath attachment every few seconds in cold air; nothing "
-                 "elsewhere",
+     .controls = "Renderer::onUnitBreathEvent: the stock $BTH breath (ColdBreath.m2) "
+                 "played while snow falls, outside the AreaTable-cold areas too",
      .asBool = &Enhancements::coldBreath},
     {.key = "fireflies", .label = "Fireflies at night", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "",

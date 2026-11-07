@@ -1,7 +1,8 @@
 // The "Enhancements: Weather" rows on the renderer's side (docs/enhancements-
 // plan.md E23-E31; the rules are rendering/weather_fx.hpp): the weather's
 // style, the client-only preview, snow settling, a sandstorm's haze,
-// lightning and its thunder, breath in the cold and the fireflies.
+// lightning and its thunder and the fireflies; and the stock cold breath,
+// which the "Breath in the cold" row extends to falling snow.
 //
 // With every row at its stock value nothing here allocates, spawns, plays or
 // changes a number: updateWeatherFx hands the weather a default Style and a
@@ -10,14 +11,18 @@
 #include "rendering/renderer.hpp"
 #include "rendering/weather.hpp"
 #include "rendering/weather_fx.hpp"
-#include "rendering/footfall_dust.hpp"
+#include "rendering/stock_weather.hpp"
+#include "rendering/spell_visual_system.hpp"
+#include "rendering/wmo_renderer.hpp"
+#include "rendering/terrain_manager.hpp"
+#include "game/zone_manager.hpp"
+#include "game/wmo_area.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/stock_screen_fx.hpp"
 #include "audio/audio_engine.hpp"
 #include "core/application.hpp"
-#include "core/entity_spawner.hpp"
 #include "core/logger.hpp"
 #include "game/game_handler.hpp"
 
@@ -27,7 +32,6 @@
 #include <cstdlib>
 #include <cmath>
 #include <random>
-#include <unordered_set>
 
 namespace wowee {
 namespace rendering {
@@ -48,12 +52,6 @@ constexpr const char* kThunderRumbles[] = {
     "Sound\\Doodad\\BlastedLandsLightningBolt01Stand-Bolt2.wav",
     "Sound\\Doodad\\BlastedLandsLightningBolt01Stand-Bolt3.wav",
 };
-
-// The M2 attachment a breath comes from (stock $BTH: attachment 17), and the
-// head's as a fallback for models that carry no breath point.
-constexpr uint32_t kAttachBreath = 17;
-constexpr uint32_t kAttachHead = 11;
-constexpr float kBreathRange = 32.0f;
 
 }  // namespace
 
@@ -88,8 +86,7 @@ void Renderer::updateWeatherFx(float fxDt) {
     const float grade = glm::clamp(weather->getIntensity(), 0.0f, 1.0f);
     const bool falling = type != Weather::Type::NONE && grade > 0.05f;
     const float hours = lightingManager ? lightingManager->getVisualTimeOfDayHours() : 12.0f;
-    const bool anyClimateRow = enh_.fireflies || enh_.coldBreath;
-    const uint8_t climate = anyClimateRow ? weather_fx::climateForZone(getCurrentZoneId())
+    const uint8_t climate = enh_.fireflies ? weather_fx::climateForZone(getCurrentZoneId())
                                           : static_cast<uint8_t>(weather_fx::kTemperate);
 
     // Fireflies: out of doors, in their country, at night, dry.
@@ -160,7 +157,9 @@ void Renderer::updateWeatherFx(float fxDt) {
         std::erase_if(pendingThunder_, [](const PendingThunder& t) { return t.delay <= 0.0f; });
     }
 
-    updateBreath(fxDt, climate, type == Weather::Type::SNOW && falling, hours);
+    breathClock_ += fxDt;
+    // Instances come and go; the areas are cheap to ask again.
+    if (breathAreas_.size() > 512) breathAreas_.clear();
 
     // WOWEE_WEATHER_LOG=1: the weather's state every two seconds, for
     // checking the rows in a scripted run.
@@ -176,101 +175,66 @@ void Renderer::updateWeatherFx(float fxDt) {
             LOG_INFO("Weather fx: type ", static_cast<int>(type), " grade ", grade, " enabled ",
                      weather->isEnabled(), " particles ", weather->getParticleCount(), " sheets ",
                      weather->mistSheetCount(), " fireflies ", weather->fireflyCount(), " snowCover ",
-                     snowCover_, " sandHaze ", sandHaze_, " zone ", getCurrentZoneId(), " breathing ",
-                     nextBreath_.size());
+                     snowCover_, " sandHaze ", sandHaze_, " zone ", getCurrentZoneId(), " mist ",
+                     weather->stockMistCount(), " grains ", weather->sandGrainCount(), " breath areas ",
+                     breathAreas_.size());
         }
     }
 }
 
-void Renderer::updateBreath(float fxDt, uint8_t climate, bool snowing, float hours) {
-    // Made on first use and released a few frames after the row goes off,
-    // once no frame in flight can still draw from it - as the footfall dust.
-    if (!enh_.coldBreath) {
-        nextBreath_.clear();
-        if (breathPuffs_) {
-            breathPuffs_->clear();
-            if (++breathIdleFrames_ > MAX_FRAMES + 1) breathPuffs_.reset();
+bool Renderer::unitInColdArea(uint32_t instanceId, const glm::vec3& position) {
+    auto& slot = breathAreas_[instanceId];
+    if (slot.recheckAt > breathClock_) return slot.cold;
+    slot.recheckAt = breathClock_ + stock_weather::kColdRecheckSeconds;
+    slot.cold = false;
+    if (!zoneManager) return false;
+    // The unit's area as the player's is found (updateLiveArea): the map
+    // object group's WMOAreaTable row when it stands on that group's floor,
+    // else the terrain's (0x78F1F0: 0x77F1B0, else 0x782560).
+    uint32_t area = 0;
+    if (instanceId == characterInstanceId && liveAreaValid_) {
+        area = liveAreaId_;
+    } else {
+        if (terrainManager) {
+            if (auto a = terrainManager->getAreaIdAt(position.x, position.y)) area = *a;
         }
-        return;
-    }
-    breathIdleFrames_ = 0;
-    if (!camera) return;
-    const bool shows = weather_fx::breathShows(climate, snowing, hours) && !cameraUnderwater_;
-    if (!shows) {
-        nextBreath_.clear();
-        if (breathPuffs_) breathPuffs_->update(fxDt, *camera);  // let the last ones fade
-        return;
-    }
-    if (!breathPuffs_ && !breathFailed_ && vkCtx) {
-        breathPuffs_ = std::make_unique<FootfallDust>();
-        if (!breathPuffs_->initialize(vkCtx, perFrameSetLayout)) {
-            LOG_WARNING("Breath puffs initialization failed (non-fatal)");
-            breathPuffs_.reset();
-            breathFailed_ = true;
+        WMORenderer::AreaHit hit;
+        if (wmoRenderer && wmoRenderer->insideWmoArea(position.x, position.y, position.z + 1.0f, &hit) &&
+            hit.wmoId != 0 && hit.wmoGroupId != 0) {
+            const game::WmoAreaInfo info =
+                zoneManager->resolveWmoArea(hit.wmoId, hit.nameSet, static_cast<int32_t>(hit.wmoGroupId));
+            if (info.areaId != 0) {
+                const auto floor = wmoRenderer->getFloorHeight(position.x, position.y, position.z + 2.0f,
+                                                               nullptr, position.z);
+                std::optional<float> ground;
+                if (terrainManager && !terrainManager->isHoleAt(position.x, position.y))
+                    ground = terrainManager->getHeightAt(position.x, position.y);
+                if (game::wmoDecidesArea(position.z, floor, ground)) area = info.areaId;
+            }
         }
     }
-    if (!breathPuffs_) return;
+    if (area == 0) return false;
+    const uint32_t zone = zoneManager->resolveAreaZoneId(area);
+    const bool hasParent = zone != 0 && zone != area;
+    slot.cold = stock_weather::areaIsCold(zoneManager->getAreaFlags(area), hasParent,
+                                          hasParent ? zoneManager->getAreaFlags(zone) : 0u);
+    return slot.cold;
+}
 
-    // Who is close by, a few times a second: the player and the units the
-    // spawner drew within range of the camera.
-    breathScanClock_ += fxDt;
-    if (breathScanClock_ >= 0.25f && characterRenderer) {
-        const float elapsed = breathScanClock_;
-        breathScanClock_ = 0.0f;
-        const glm::vec3 camPos = camera->getPosition();
-        std::unordered_set<uint32_t> nearUnits;
-        auto consider = [&](uint32_t inst) {
-            if (inst == 0 || nearUnits.count(inst)) return;
-            glm::vec3 p;
-            if (!characterRenderer->getInstancePosition(inst, p)) return;
-            if (glm::distance(p, camPos) > kBreathRange) return;
-            nearUnits.insert(inst);
-        };
-        consider(characterInstanceId);
-        auto& app = core::Application::getInstance();
-        const auto* gh = app.getGameHandler();
-        const core::EntitySpawner* spawner = app.getEntitySpawner();
-        if (gh && spawner) {
-            for (const auto& [guid, entity] : gh->getEntityManager().getEntities()) {
-                if (!entity || !entity->isUnit()) continue;
-                consider(spawner->characterInstanceIdForGuid(guid));
-                if (nearUnits.size() >= 48) break;
-            }
-        }
-        // Each unit breathes on its own clock; one met for the first time
-        // starts part way through its breath.
-        std::erase_if(nextBreath_, [&](const auto& kv) { return nearUnits.count(kv.first) == 0; });
-        for (uint32_t inst : nearUnits) {
-            auto [it, fresh] = nextBreath_.try_emplace(inst, weather_fx::breathInterval(0.0f, fxRand()) * fxRand());
-            if (!fresh) it->second -= elapsed;
-            if (it->second > 0.0f) continue;
-            it->second = weather_fx::breathInterval(0.0f, fxRand());
-            glm::mat4 m;
-            glm::vec3 mouth, facing;
-            if (characterRenderer->getAttachmentTransform(inst, kAttachBreath, m)) {
-                mouth = glm::vec3(m[3]);
-                facing = glm::vec3(m[0]);
-            } else if (characterRenderer->getAttachmentTransform(inst, kAttachHead, m)) {
-                facing = glm::vec3(m[0]);
-                mouth = glm::vec3(m[3]) + glm::normalize(facing) * 0.15f - glm::vec3(0.0f, 0.0f, 0.1f);
-            } else {
-                continue;
-            }
-            glm::vec2 dir(facing);
-            const float len = glm::length(dir);
-            dir = len > 1e-4f ? dir / len : glm::vec2(1.0f, 0.0f);
-            footfall_dust::Puff puff;
-            puff.sprites = 1;
-            puff.alpha = 0.16f + 0.06f * fxRand();
-            puff.size = 0.05f;
-            puff.life = 1.3f + 0.4f * fxRand();
-            // The dust kicks a puff back from the stride; a breath goes out
-            // ahead of the face, so it is handed the reverse direction.
-            breathPuffs_->spawn(mouth - glm::vec3(0.0f, 0.0f, puff.size * 0.7f), -dir, puff,
-                                glm::vec3(0.86f, 0.89f, 0.93f));
-        }
+void Renderer::onUnitBreathEvent(uint32_t instanceId, const glm::vec3& position) {
+    if (!spellVisualSystem_ || !camera || cameraUnderwater_) return;
+    // Units far off are not worth the model; stock plays it on every unit
+    // whose model animates.
+    if (glm::distance(position, camera->getPosition()) > 100.0f) return;
+    bool cold = unitInColdArea(instanceId, position);
+    // "Breath in the cold": the stock breath wherever snow is falling too.
+    if (!cold && enh_.coldBreath && weather && weather->getWeatherType() == Weather::Type::SNOW &&
+        stock_screen_fx::particleLevel(weather->getIntensity()) > 0.0f) {
+        cold = true;
     }
-    breathPuffs_->update(fxDt, *camera);
+    if (!cold) return;
+    spellVisualSystem_->playEffectModel(stock_weather::kColdBreathModel, position, instanceId,
+                                        SpellVisualSystem::SLOT_BREATH);
 }
 
 void Renderer::applyWeatherFxLight() {

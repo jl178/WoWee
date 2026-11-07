@@ -667,7 +667,7 @@ void SpellVisualSystem::playSpellVisualKit(uint32_t kitId, const glm::vec3& worl
 }
 
 bool SpellVisualSystem::playEffectModel(const std::string& modelPath, const glm::vec3& feetPos,
-                                        uint32_t attachInstanceId) {
+                                        uint32_t attachInstanceId, uint8_t slot) {
     if (!m2Renderer_ || modelPath.empty()) return false;
     if (!cachedAssetManager_)
         cachedAssetManager_ = core::Application::getInstance().getAssetManager();
@@ -675,7 +675,7 @@ bool SpellVisualSystem::playEffectModel(const std::string& modelPath, const glm:
     KitSpawn s;
     s.feetPos = feetPos;
     s.attachInstanceId = attachInstanceId;
-    return spawnKitModel(0, modelPath, SLOT_BASE, /*world=*/false, s);
+    return spawnKitModel(0, modelPath, slot < SLOT_COUNT ? slot : uint8_t{SLOT_BASE}, /*world=*/false, s);
 }
 
 bool SpellVisualSystem::visualHasKitSound(uint32_t visualId, KitSoundMoment moment) {
