@@ -361,6 +361,18 @@ TEST_CASE("A knockback is a fall on the packet's path", "[stock_movement][knockb
     CHECK((sm::landWithPendingKeys(f) & (sm::kForward | sm::kFalling | sm::kPendingStop)) == 0);
 }
 
+TEST_CASE("a jump onto a ledge at its apex lands with no FALL_LAND") {
+    // 0x73D4A0: the fall height is the apex less the landing z; within 1/36
+    // nothing is sent, however long the jump took.
+    const float apex = 10.0f + sm::jumpApexHeight();
+    CHECK_FALSE(sm::fallLandDue(apex, apex - 0.02f));
+    CHECK(sm::fallLandDue(apex, apex - 0.03f));
+    // A walk off an edge starts at v0 = 0, so its apex is the edge: it is
+    // reported (and lands with FALL_LAND) once it has dropped 1/36.
+    CHECK_FALSE(sm::fallLandDue(10.0f, 10.0f - sm::kFallLandMinHeight * 0.5f));
+    CHECK(sm::fallLandDue(10.0f, 10.0f - sm::kFallLandMinHeight * 1.5f));
+}
+
 TEST_CASE("the walker snaps 1.85 x the move down after running off an edge") {
     // 0x7620F0 / 0xA32830: enough for a walkable 50 degree descent at any
     // speed, never a step - a sheer drop deeper than it is a fall.

@@ -294,6 +294,13 @@ public:
     // Movement callback for sending opcodes to server
     using MovementCallback = std::function<void(uint32_t opcode)>;
     void setMovementCallback(MovementCallback cb) { movementCallback = std::move(cb); }
+    /// A fall that began without a jump (walked off an edge), reported with
+    /// the milliseconds since it began: the movement handler's
+    /// beginWalkOffFall (stock event 9, a HEARTBEAT with FALLING).
+    void setFallReportCallback(std::function<void(uint32_t)> cb) { fallReportCallback_ = std::move(cb); }
+    /// A reported fall that lands within 1/36 yd of its apex: no FALL_LAND,
+    /// the flags landed without a packet (MovementHandler::landWithoutPacket).
+    void setSilentLandingCallback(std::function<void()> cb) { silentLandingCallback_ = std::move(cb); }
 
     // Callback invoked when the player stands up via local input (space/X/movement key
     // while server-sitting), so the caller can send CMSG_STAND_STATE_CHANGE(0).
@@ -997,6 +1004,9 @@ private:
     /// as they happen).
     bool jumpedThisFrame_ = false;  // the physics took off this frame
     bool fallTracking_ = false;
+    float fallElapsed_ = 0.0f;  ///< seconds since the fall in progress began
+    std::function<void(uint32_t)> fallReportCallback_;
+    std::function<void()> silentLandingCallback_;
     bool fallJumped_ = false;
     float fallApexZ_ = 0.0f;
     bool wasAscending_ = false;   // Space held while flyingActive_
