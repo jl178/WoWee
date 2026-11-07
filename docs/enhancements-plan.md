@@ -1607,6 +1607,80 @@ stock, the budget, and how to verify.
     flap motion. The verification so far is the player (human male, cloak
     3511) and a raptor mount in Goldshire; other races and the great
     dragons were checked by the chain survey, not on screen.
+- **Cloth pass (2026-11-07).** Stronger, more visible cloth, a strength
+  slider, robes, and a body collider. All in `secondary_motion.hpp`
+  (`test_secondary_motion`), `CharacterRenderer` and `character.vert`.
+  - **Strength row** `secondarymotionstrength` "How far capes swing", 0-2,
+    stock 0, recommended 1, saved as `secondary_motion_strength`. It sits at
+    the foot of the Sky page (the Motion page is full,
+    `test_settings_panel_layout`). It scales every chain's steady swing
+    (gain x s) and its limits (x `limitScale` = 0.6 + 0.4 s). 0 is off, the
+    same as level 0: no spring, collider, robe or cloak bend runs, and every
+    bone and vertex is stock. It reaches the springs through
+    `secondary_motion::setStrength` from `SettingsPanel::applyEnhancements`,
+    a process-wide value, because `Renderer::setEnhancements` /
+    `setMotionEnhancements` (renderer.cpp) belonged to another agent during
+    this pass. Moving it into `setMotionEnhancements` is a two-line change.
+  - **Cloak tuning (s = 1).** Cloth springs 1.6 Hz at the root to 1.1 Hz at
+    the tip, damping 0.35, gain 0.032 rad per yd/s^2, limits 43 deg out,
+    6 deg toward the legs, 23 deg aside. The steady answer eases into the
+    limits (`tanh`), so a hard start bends the cloak round instead of
+    pinning it. The probe lever behind a cloak is 0.45 yd. The probe takes
+    35% of its motion from the root's parent bone as last posed
+    (`kGaitShare`), so the stride's bob and a jump's crouch push the cloth
+    too, not only the model's travel. The foliage wind counts at 40%
+    (`kWindShare`): a breeze stirs a cloak a few degrees. A frame is
+    simulated up to 0.1 s (was 0.05), so a hitch doesn't run the spring in
+    slow motion. Measured in game at 60 fps (WOWEE_SPRING_LOG, human male):
+    the cloak kicks about 33 deg setting off, trails 10-14 deg at a run,
+    20 deg out and 15-20 deg aside in a running turn, swings in about 5 deg
+    on a stop and settles in 0.7 s, floats about 30 deg out on a jump's
+    fall, and drops on landing. Offline (`sim.cpp`), the same chain at 60 fps
+    goes to 37 deg at the start, 14 deg steady, 33/22 deg in a running turn
+    and 26 deg on a fall.
+  - **Cloak bend.** The chain's own bones (HumanMale 5-12) carry only the
+    lower part of a cloak; most of it is skinned to the chest. So the whole
+    cloak also bends as a plate about a line across the shoulders (15% below
+    the cloak geosets' top): per yard below the line it moves out and aside
+    by the chain's summed swing (x `kCapeBendShare` = 1), and up by half the
+    square so it keeps its length. `CharacterRenderer::updateCapeBend` puts
+    this in bone slot 238 (`kCapeSlot`), and `character.vert` applies it on
+    cloak batches (geosets 1502-1599, `stages.y` bit 1).
+  - **Robes and skirts.** Long robes (geosets 1302-1399) have no bones of
+    their own; the hem is skinned to the thighs, knees and ankles. Each leg
+    gets one point spring (`stepHem`): 2.2 Hz, damping 0.45, air drag 0.8/s.
+    The spring hangs on the middle of the shin, with the spring and damper
+    relative to the shin, so moving at a steady speed leaves no lag; the
+    stride and the body's starts, stops and turns move it off. The lag is
+    softly limited (`tanh`) to 0.10 of the leg's length x `limitScale`, and
+    its vertical part is cut to 30%. `character.vert` (`stages.y` bit 0,
+    bone slot 239 `kHemSlot`) spreads it over the robe by depth below the
+    robe's top, squared, and by distance from that side's leg line, eased
+    from 0.09 to 0.22 leg lengths. The cloth that hugs the shin stays on it,
+    so the leg does not poke through. Each side takes its own leg's lag.
+  - **Body collider.** Five capsules from `foot_ik::findLegs`: each thigh
+    (0.11 leg lengths), each shin (0.08) and one across the hips (0.13).
+    Each radius is fitted to 85% of the gap the rest pose leaves to every
+    tested cloth point, so nothing at rest is moved. After the pose (and
+    after E9's feet), each cloth bone's tip and middle, on the midline and
+    at 75% of the cloth's half-width each side, are tested. A bone that
+    meets a capsule is turned about its pivot along the chain's posed
+    outward direction until it clears, at most 0.7 rad, and the bones below
+    it go with it (`clearanceTurn`). This also makes the tabard's front flap
+    ride over a thigh that kicks into it.
+  - **Cost.** 3.8's method (`perf/parse2.py` pairing, 5 s A/B windows,
+    WOWEE_FRAME_PROFILE=1, `enhanceab=secondarymotion:5`), noon,
+    recommended set, Release, a 1251x986 window, on a busy machine (load
+    16-27). `update/characters`, paired median on minus off: Stormwind
+    Trade District +0.043 ms (0.64 on, 0.60 off, n=15); Dalaran +0.037 ms
+    (1.23 on, n=13). No GPU work beyond a branch on robe and cloak batches.
+  - **Not done.** Shoulder pads and dangling armour bits (step 4) were
+    dropped. Shoulders are separate rigid item models attached to the
+    shoulder bones, with no free bones to swing. Any motion would mean
+    animating the attachment matrix, which reads as the pad sliding off the
+    shoulder rather than dangling. Creature loincloths are not chains: the
+    rule's cloth kind needs character geosets, and a creature's waist
+    flaps can't be told from its legs by weight alone.
 
 ### E8. Corpse settles to the ground slope
 
