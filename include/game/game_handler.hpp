@@ -174,6 +174,9 @@ class GameHandler : public IConnectionState,
     friend struct GameHandlerTestAccess;
 
 public:
+    /// A server packet handed in as if it had arrived (the WOWEE_DEBUG_LUA
+    /// hook, for a test that cannot make the server send it).
+    void debugInjectPacket(network::Packet& packet) { handlePacket(packet); }
     // Talent data structures (aliased from handler_types.hpp)
     using TalentEntry = game::TalentEntry;
     using TalentTabEntry = game::TalentTabEntry;
