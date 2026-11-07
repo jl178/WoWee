@@ -87,7 +87,7 @@ TEST_CASE("the water line: a swimmer at the float depth is at the surface") {
     // 0x6049C0: depth <= h - 2/9 is Shallow. A human (2.031) floats 1.52 under.
     CHECK(sc::waterLine(false, 0.0f, 2.031f) == sc::WaterLine::None);
     CHECK(sc::waterLine(true, 0.75f * 2.031f, 2.031f) == sc::WaterLine::Shallow);
-    CHECK(sc::waterLine(true, 1.80f, 2.031f) == sc::WaterLine::Submerged);
+    CHECK(sc::waterLine(true, 1.85f, 2.031f) == sc::WaterLine::Submerged);
     // A gnome (1.056) too.
     CHECK(sc::waterLine(true, 0.75f * 1.056f, 1.056f) == sc::WaterLine::Shallow);
 }

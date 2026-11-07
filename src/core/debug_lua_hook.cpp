@@ -26,7 +26,8 @@
 //                                  the camera at a yaw from the facing
 //   WoweeDebug_MouseMotion(dx, dy) a relative mouse move, in pixels
 //   WoweeDebug_CameraState()       camera yaw, pitch, facing, movement
-//                                  pitch (degrees) and distance
+//                                  pitch (degrees), distance and the
+//                                  player model's camera fade
 //   WoweeDebug_TimeOfDay(hours)    hold the world clock at an hour (0..24),
 //                                  or a negative hour for the game's clock
 //   WoweeDebug_UseObject(name)     right-click the nearest game object of
@@ -253,7 +254,8 @@ int luaDebugCameraState(lua_State* L) {
     lua_pushnumber(L, cc->getFacingYaw());
     lua_pushnumber(L, glm::degrees(cc->getMovePitchRad()));
     lua_pushnumber(L, cc->getViewDistance());
-    return 5;
+    lua_pushnumber(L, cc->playerModelAlpha());
+    return 6;
 }
 
 /// WoweeDebug_TimeOfDay(hours) - the light and sky held at an hour, so a test
