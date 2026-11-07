@@ -218,6 +218,12 @@ Then:
 
 - A one-shot cast animation ends and the unit re-picks: the Ready stance
   of its weapons in combat, else Stand. The cast kit animation is not held.
+- A new cast does not wait for it: its precast kit's AnimID plays at
+  `SMSG_SPELL_START` (0x805330 -> 0x7FA2E0 -> 0x73B140 -> 0x7385C0) and cuts
+  the release; a second instant's cast kit plays its AnimID from the first
+  frame again. A wound mid-cast does not end the cast: the re-pick after it
+  answers the spell pose (0x7224D0). See `combat-targeting-movement.md`
+  section 3, "A cast during another's pose or release".
 
 ## 6. Missiles
 

@@ -341,3 +341,22 @@ TEST_CASE("FALL_LAND goes out for any fall over 1/36 yd (0x73D4A0)") {
     // Landing higher than the start (a jump onto a ledge) still counts its rise.
     CHECK(sm::fallLandDue(10.0f + sm::jumpApexHeight(), 11.0f));
 }
+
+TEST_CASE("A knockback is a fall on the packet's path", "[stock_movement][knockback]") {
+    // 0x6E9FF0: running forward and strafing, knocked back: falling, along
+    // the packet's direction (FORWARD) until the landing stops it
+    // (PENDING_STOP); the strafe stays as it was.
+    const uint32_t f = sm::knockBackFlags(sm::kForward | sm::kStrafeLeft, 0);
+    CHECK((f & sm::kFalling) != 0);
+    CHECK((f & sm::kForward) != 0);
+    CHECK((f & sm::kPendingStop) != 0);
+    CHECK((f & sm::kStrafeLeft) != 0);
+    // Backpedalling: the path is the packet's, forward along it.
+    CHECK((sm::knockBackFlags(sm::kBackward, 0) & (sm::kBackward | sm::kForward)) == sm::kForward);
+    // Out of the water and the air; a root waits as PENDING_ROOT; CAN_FLY goes.
+    const uint32_t w = sm::knockBackFlags(sm::kSwimming | sm::kAscending | sm::kFlying | 0x800u | 0x1000000u, 0);
+    CHECK((w & (sm::kSwimming | sm::kAscending | sm::kFlying | 0x800u | 0x1000000u)) == 0);
+    CHECK((w & 0x100000u) != 0);
+    // The landing stops it (FALL_LAND with the pending stop applied).
+    CHECK((sm::landWithPendingKeys(f) & (sm::kForward | sm::kFalling | sm::kPendingStop)) == 0);
+}

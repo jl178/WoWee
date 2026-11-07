@@ -393,6 +393,7 @@ MonsterMovePlan planMonsterMove(const MonsterMoveSpec& spec, const MoverSnapshot
 
     UnitSpline sp;
     sp.flags = flags & ~(SplineFlags::Done | SplineFlags::NoSpline);
+    sp.id = spec.splineId;
     sp.startMs = nowMs;
     sp.durationMs = duration;
     sp.finalPoint = pts.back();
@@ -834,10 +835,14 @@ void RemoteMover::receive(const MovementSample& s, uint32_t now) {
         queue_.push_back({s, applyAt});
         return;
     }
+    advanceTo(applyAt);
     apply(s, applyAt, now);
 }
 
 void RemoteMover::apply(const MovementSample& s, uint32_t applyAtMs, uint32_t now) {
+    // Where the unit was drawn at the packet's time, against where the
+    // packet puts it: the correction (stock sets the position outright).
+    if (appliedCount_ > 0) correction_ += s.position - state_.position;
     state_.applySample(s);
     lastApplied_ = s;
     ++appliedCount_;

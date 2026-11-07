@@ -81,14 +81,34 @@ void CombatFSM::startSpellCast(uint32_t precast, uint32_t cast, bool castLoop, u
     spellPrecastFrames_ = 0;
     spellFinalizeAnimSeen_ = false;
     spellFinalizeFrames_ = 0;
+    spellAnimFresh_ = true;
+    resumeSpellAfterHit_ = false;
     state_ = (precast != 0) ? State::SPELL_PRECAST : State::SPELL_CASTING;
 }
 
 void CombatFSM::stopSpellCast() {
-    if (state_ != State::SPELL_PRECAST && state_ != State::SPELL_CASTING) return;
+    // The cast went off during a flinch: the release still plays (the cast
+    // kit plays its AnimID at SPELL_GO whatever the body is doing).
+    const bool heldUnderHit = state_ == State::HIT_REACTION && resumeSpellAfterHit_;
+    if (state_ != State::SPELL_PRECAST && state_ != State::SPELL_CASTING && !heldUnderHit) return;
+    resumeSpellAfterHit_ = false;
+    hitReactionAnimId_ = 0;
     spellFinalizeAnimSeen_ = false;
     spellFinalizeFrames_ = 0;
+    spellAnimFresh_ = true;
     state_ = State::SPELL_FINALIZE;
+}
+
+void CombatFSM::cancelSpellCast() {
+    if (state_ == State::HIT_REACTION && resumeSpellAfterHit_) {
+        // Ended during a flinch: the flinch finishes, nothing comes back.
+        resumeSpellAfterHit_ = false;
+        clearSpellState();
+        return;
+    }
+    if (state_ != State::SPELL_PRECAST && state_ != State::SPELL_CASTING) return;
+    clearSpellState();
+    state_ = State::INACTIVE;
 }
 
 void CombatFSM::clearSpellState() {
@@ -100,6 +120,8 @@ void CombatFSM::clearSpellState() {
     spellPrecastFrames_ = 0;
     spellFinalizeAnimSeen_ = false;
     spellFinalizeFrames_ = 0;
+    spellAnimFresh_ = false;
+    resumeSpellAfterHit_ = false;
 }
 
 // ── Hit/stun ─────────────────────────────────────────────────────────────────
@@ -107,8 +129,17 @@ void CombatFSM::clearSpellState() {
 void CombatFSM::triggerHitReaction(uint32_t animId) {
     // Don't interrupt swim/jump/stun states
     if (state_ == State::STUNNED) return;
-    // Interrupt spell casting
-    if (state_ == State::SPELL_PRECAST || state_ == State::SPELL_CASTING || state_ == State::SPELL_FINALIZE) {
+    // A wound does not end a cast: the flinch plays (0x736640) and the cast
+    // pose comes back after it - the re-pick (0x73AC30) answers the spell
+    // pose while the unit casts (0x7224D0). Clearing the cast here left a
+    // caster hit mid-cast standing idle for the rest of it. A release
+    // already playing is a one-shot the flinch replaces.
+    if (state_ == State::SPELL_PRECAST || state_ == State::SPELL_CASTING) {
+        if (animId != 0) resumeSpellAfterHit_ = true;
+        else return;  // a clear, not a reaction: the cast goes on
+    } else if (state_ == State::HIT_REACTION && resumeSpellAfterHit_) {
+        // Hit again during the flinch: still casting underneath.
+    } else if (state_ == State::SPELL_FINALIZE) {
         clearSpellState();
     }
     if (animId == 0) {  // a clear, not a reaction
@@ -286,7 +317,9 @@ void CombatFSM::updateTransitions(const Input& in) {
             if (in.swimming || (in.jumping && !in.grounded)) {
                 clearSpellState();
                 state_ = State::INACTIVE;
-            } else if (in.haveAnimState) {
+            } else if (in.haveAnimState && !spellAnimFresh_) {
+                // (Not on the frame it was asked for: the body still shows
+                // the last release, which would read as this one ending.)
                 uint32_t expectedAnim = spellFinalizeAnimId_ ? spellFinalizeAnimId_
                     : (spellCastAnimId_ ? spellCastAnimId_ : anim::SPELL);
                 if (in.currentAnimId == expectedAnim) spellFinalizeAnimSeen_ = true;
@@ -306,6 +339,10 @@ void CombatFSM::updateTransitions(const Input& in) {
         case State::HIT_REACTION:
             if (in.swimming || in.moving) {
                 hitReactionAnimId_ = 0;
+                if (resumeSpellAfterHit_) {
+                    resumeSpellAfterHit_ = false;
+                    clearSpellState();
+                }
                 state_ = State::INACTIVE;
             } else if (in.haveAnimState) {
                 uint32_t expectedAnim = hitReactionAnimId_ ? hitReactionAnimId_ : anim::COMBAT_WOUND;
@@ -315,7 +352,13 @@ void CombatFSM::updateTransitions(const Input& in) {
                 if ((hitReactionAnimSeen_ && oneShotComplete(in, expectedAnim)) ||
                     (!hitReactionAnimSeen_ && ++hitReactionFrames_ > 10)) {
                     hitReactionAnimId_ = 0;
-                    state_ = in.inCombat ? State::COMBAT_IDLE : State::INACTIVE;
+                    if (resumeSpellAfterHit_) {
+                        resumeSpellAfterHit_ = false;
+                        spellAnimFresh_ = true;
+                        state_ = State::SPELL_CASTING;
+                    } else {
+                        state_ = in.inCombat ? State::COMBAT_IDLE : State::INACTIVE;
+                    }
                 }
             }
             break;
@@ -503,7 +546,25 @@ AnimOutput CombatFSM::resolve(const Input& in, const AnimCapabilitySet& caps,
             break;
 
         case State::CHARGE:
-            animId = caps.resolvedRun ? caps.resolvedRun : anim::RUN;
+            // The spline's pace (0x717050), as for any unit on one: a charge
+            // at its 28 yd/s cap sprints. A leap in the air jumps.
+            if (chargeAirborne_) {
+                animId = caps.resolvedJump ? caps.resolvedJump : anim::JUMP;
+                loop = true;
+                break;
+            }
+            switch (paceFor(chargeSpeed_, chargeWalkSpeed_)) {
+                case Pace::Sprint:
+                    animId = caps.resolvedSprint ? caps.resolvedSprint
+                           : caps.resolvedRun   ? caps.resolvedRun : anim::RUN;
+                    break;
+                case Pace::Run:
+                    animId = caps.resolvedRun ? caps.resolvedRun : anim::RUN;
+                    break;
+                case Pace::Walk:
+                    animId = caps.resolvedWalk ? caps.resolvedWalk : anim::WALK;
+                    break;
+            }
             loop = true;
             break;
 
@@ -519,7 +580,13 @@ AnimOutput CombatFSM::resolve(const Input& in, const AnimCapabilitySet& caps,
     }
 
     if (animId == 0) return AnimOutput::stay();
-    return AnimOutput::ok(animId, loop);
+    AnimOutput out = AnimOutput::ok(animId, loop);
+    if (state_ == State::SPELL_PRECAST || state_ == State::SPELL_CASTING ||
+        state_ == State::SPELL_FINALIZE) {
+        out.restart = spellAnimFresh_;
+        spellAnimFresh_ = false;
+    }
+    return out;
 }
 
 // ── Reset ────────────────────────────────────────────────────────────────────

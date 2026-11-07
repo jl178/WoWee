@@ -387,6 +387,61 @@ TEST_CASE("remote smoothing: a step glides, motion does not, a teleport snaps", 
     }
 }
 
+TEST_CASE("remote smoothing: reported corrections glide, a charge does not", "[remote_smoothing]") {
+    const float dt = 1.0f / 60.0f;
+    {
+        // A charge: standing, 0.6 s at the 28 yd/s cap, standing. Motion
+        // throughout - the motion reports no correction - so the model is
+        // drawn where the unit is at every frame: no lag at the start, no
+        // overshoot at the end.
+        rs::State s;
+        glm::vec3 p(0);
+        float worst = 0.0f;
+        for (int i = 0; i < 30; ++i) rs::stepReported(s, p, 0.0f, dt, glm::vec3(0));
+        for (int i = 0; i < 36; ++i) {
+            p.x += 28.0f * dt;
+            rs::stepReported(s, p, 0.0f, dt, glm::vec3(0));
+            worst = std::max(worst, glm::length(s.offset));
+        }
+        for (int i = 0; i < 30; ++i) {
+            rs::stepReported(s, p, 0.0f, dt, glm::vec3(0));
+            worst = std::max(worst, glm::length(s.offset));
+        }
+        CHECK(worst == 0.0f);
+    }
+    {
+        // The guess from the velocity, for the same charge, lagged at the
+        // start and overshot at the end - why the stock motion reports.
+        rs::State s;
+        glm::vec3 p(0);
+        for (int i = 0; i < 30; ++i) rs::step(s, p, 0.0f, dt);
+        for (int i = 0; i < 36; ++i) { p.x += 28.0f * dt; rs::step(s, p, 0.0f, dt); }
+        rs::step(s, p, 0.0f, dt);
+        CHECK(glm::length(s.offset) > 0.25f);
+    }
+    {
+        // A packet that put the unit 1 yd from where dead reckoning had it:
+        // drawn near the old spot, then there within half a second.
+        rs::State s;
+        glm::vec3 p(0);
+        for (int i = 0; i < 30; ++i) rs::stepReported(s, p, 0.0f, dt, glm::vec3(0));
+        p.x += 1.0f;
+        rs::stepReported(s, p, 0.0f, dt, glm::vec3(1, 0, 0));
+        CHECK(glm::length(p + s.offset) < 0.9f);
+        for (int i = 0; i < 30; ++i) rs::stepReported(s, p, 0.0f, dt, glm::vec3(0));
+        CHECK(glm::length(s.offset) < 0.01f);
+    }
+    {
+        // A long correction snaps, as stock.
+        rs::State s;
+        glm::vec3 p(0);
+        for (int i = 0; i < 10; ++i) rs::stepReported(s, p, 0.0f, dt, glm::vec3(0));
+        p.x += 12.0f;
+        rs::stepReported(s, p, 0.0f, dt, glm::vec3(12, 0, 0));
+        CHECK(glm::length(s.offset) == 0.0f);
+    }
+}
+
 TEST_CASE("remote smoothing: the locomotion blend floor and nothing else", "[remote_smoothing]") {
     CHECK(rs::blendMs(0, true, true, true) == rs::kLocomotionBlendFloorMs);
     CHECK(rs::blendMs(500, true, true, true) == 500);  // a longer stock blend stays

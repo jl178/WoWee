@@ -18,6 +18,7 @@ class ICharacterAnimator : public IAnimator {
 public:
     virtual void startSpellCast(uint32_t precast, uint32_t cast, bool loop, uint32_t finalize) = 0;
     virtual void stopSpellCast() = 0;
+    virtual void cancelSpellCast() = 0;
     virtual void triggerMeleeSwing() = 0;
     virtual void triggerRangedShot() = 0;
     virtual void triggerHitReaction(uint32_t animId) = 0;

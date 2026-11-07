@@ -880,20 +880,6 @@ glm::vec3 CameraController::moveFollowedCharacter(float /*deltaTime*/, FrameInpu
             targetPos += f.movement * f.speed * f.physicsDeltaTime;
         }
 
-        // Apply server-driven knockback horizontal velocity (decays over time).
-        if (knockbackActive_) {
-            targetPos.x += knockbackHorizVel_.x * f.physicsDeltaTime;
-            targetPos.y += knockbackHorizVel_.y * f.physicsDeltaTime;
-            // Exponential drag: reduce each frame so the player decelerates naturally.
-            float drag = std::exp(-KNOCKBACK_HORIZ_DRAG * f.physicsDeltaTime);
-            knockbackHorizVel_ *= drag;
-            // Once negligible, clear the flag so collision/grounding work normally.
-            if (glm::dot(knockbackHorizVel_, knockbackHorizVel_) < 0.0025f) {
-                knockbackActive_ = false;
-                knockbackHorizVel_ = glm::vec2(0.0f);
-            }
-        }
-
         // Sliding down ground too steep to stand on (see groundFollowedCharacter).
         if (slopeSlideVel_.x != 0.0f || slopeSlideVel_.y != 0.0f) {
             targetPos.x += slopeSlideVel_.x * f.physicsDeltaTime;
@@ -4461,27 +4447,31 @@ bool CameraController::isSprinting() const {
 }
 
 void CameraController::applyKnockBack(float vcos, float vsin, float hspeed, float vspeed) {
-    // The server sends (vcos, vsin) as the 2D direction vector in server/wire
-    // coordinate space.  After the server→canonical→render swaps, the direction
-    // in render space is simply (vcos, vsin) - the two swaps cancel each other.
-    knockbackHorizVel_ = glm::vec2(vcos, vsin) * hspeed;
-    knockbackActive_ = true;
-
-    // vspeed in the wire packet is negative when the server wants to launch the
-    // player upward (matches TrinityCore: data << float(-speedZ)).  Negate it
-    // here to obtain the correct upward initial velocity.
+    // SMSG_MOVE_KNOCK_BACK (0x6E9FF0): a fall from where the player is, on
+    // the packet's direction at its speed - the direction and speed held
+    // until the ground is back, as for a jump (no drag: the server and every
+    // other client draw the arc the packet and the ack describe, and a path
+    // that slowed down here landed short of theirs, then pulled the player
+    // back for them). The direction is (vcos, vsin) in the server's axes;
+    // after the server->canonical->render swaps it is the same pair in
+    // render space. vspeed is the stock z speed, negative up.
+    const float len = std::sqrt(vcos * vcos + vsin * vsin);
+    airMoveLatched_ = true;
+    // FORWARD and PENDING_STOP (0x4001) whatever the speed: a key pressed in
+    // the air only waits for the landing, it starts no drift.
+    airForward_ = true;
+    airBackward_ = airStrafeLeft_ = airStrafeRight_ = false;
+    airDirX_ = len > 1e-4f ? vcos / len : 0.0f;
+    airDirY_ = len > 1e-4f ? vsin / len : 0.0f;
+    airSpeed_ = len > 1e-4f ? std::max(hspeed, 0.0f) : 0.0f;
     verticalVelocity = -vspeed;
     grounded = false;
     coyoteTimer = 0.0f;
     jumpBufferTimer = 0.0f;
-
-    // Notify the server that the player left the ground so the FALLING flag is
-    // set in subsequent movement heartbeats.  The normal jump detection
-    // (nowJump && grounded) does not fire during a server-driven knockback.
-    if (movementCallback) {
-        movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_JUMP));
-        fallJumped_ = true;
-    }
+    // The fall is the server's (MovementHandler::handleMoveKnockBack put it
+    // in the flags and sent the ack): no MSG_MOVE_JUMP goes out, and it
+    // lands with FALL_LAND like a reported jump.
+    fallJumped_ = true;
 }
 
 } // namespace rendering

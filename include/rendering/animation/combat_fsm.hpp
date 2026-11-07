@@ -72,6 +72,10 @@ public:
                        const WeaponLoadout& loadout);
 
     [[nodiscard]] State getState() const { return state_; }
+    /// The cast pose a flinch taken during the cast returns to, 0 for none.
+    [[nodiscard]] uint32_t resumeAnimAfterHit() const {
+        return (state_ == State::HIT_REACTION && resumeSpellAfterHit_) ? spellCastAnimId_ : 0u;
+    }
     void setState(State s) { state_ = s; }
 
     [[nodiscard]] bool isStunned() const { return state_ == State::STUNNED; }
@@ -80,13 +84,36 @@ public:
 
     // ── Spell cast management ───────────────────────────────────────────
     void startSpellCast(uint32_t precast, uint32_t cast, bool castLoop, uint32_t finalize);
+    /// The cast went off: its release (finalize) one-shot, then idle.
     void stopSpellCast();
+    /// The cast ended without going off - failed, interrupted, cancelled, a
+    /// channel's end, the caster's death: its pose is put away at once, no
+    /// release (0x7FEC00 -> 0x72E430). A release already playing for a cast
+    /// that did go off is left to finish.
+    void cancelSpellCast();
     void clearSpellState();
 
     // ── Hit/stun management ─────────────────────────────────────────────
     void triggerHitReaction(uint32_t animId);
     void setStunned(bool stunned);
     void setCharging(bool charging);
+    /// While charging (on a server spline): the spline's speed over the
+    /// ground and the unit's walk speed, for the pace 0x717050 picks.
+    /// `airborne`: a parabolic spline's leap (or a falling one) is in the
+    /// air - the jump loop, as its MSG_MOVE_JUMP event raises (0x6E9C30).
+    void setChargePace(float speed, float walkSpeed, bool airborne = false) {
+        chargeSpeed_ = speed;
+        chargeWalkSpeed_ = walkSpeed;
+        chargeAirborne_ = airborne;
+    }
+    /// The locomotion a unit moving at `speed` plays (0x717050): above
+    /// 11 yd/s Sprint, above twice its walk speed Run, else Walk.
+    enum class Pace : uint8_t { Walk, Run, Sprint };
+    [[nodiscard]] static Pace paceFor(float speed, float walkSpeed) {
+        if (speed > 11.0f) return Pace::Sprint;
+        if (speed > walkSpeed + walkSpeed) return Pace::Run;
+        return Pace::Walk;
+    }
 
     static constexpr uint8_t PRIORITY = 50;
 
@@ -103,6 +130,14 @@ private:
     bool spellFinalizeAnimSeen_ = false;
     uint8_t spellFinalizeFrames_ = 0;
 
+    // The spell one-shot or pose was (re)started since the last resolve: it
+    // plays from its first frame (AnimOutput::restart).
+    bool spellAnimFresh_ = false;
+    // A wound taken during a cast: the cast goes on, and its pose comes back
+    // when the flinch is over (0x73AC30's re-pick answers the spell pose,
+    // 0x7224D0, while the unit casts).
+    bool resumeSpellAfterHit_ = false;
+
     // Hit reaction
     uint32_t hitReactionAnimId_ = 0;
     bool hitReactionAnimSeen_ = false;  ///< the wound anim has started playing
@@ -118,8 +153,11 @@ private:
     // Stun
     bool stunned_ = false;
 
-    // Charge
+    // Charge (a server spline moving the player)
     bool charging_ = false;
+    float chargeSpeed_ = 7.0f;
+    float chargeWalkSpeed_ = 2.5f;
+    bool chargeAirborne_ = false;
 
     // Off-hand alternation for dual wielding
     /// Which hand the next swing uses, and which this one chose.

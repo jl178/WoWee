@@ -198,6 +198,19 @@ public:
     }
 
     void updateClientTaxi(float deltaTime);
+    /// A spline of the server's own moves the player (a charge, a leap, a
+    /// scripted MovePoint, an exit off a seat - not a taxi flight, which has
+    /// its own path above, nor a vehicle's seat). The stock client runs it as
+    /// any unit's (no active-player branch in 0x73C8E0): the controls do
+    /// nothing (0x5FA060), no movement packet goes out (0x6F09F0 asks
+    /// 0x4F5240 for a running spline) and the player is where the spline has
+    /// them.
+    [[nodiscard]] bool playerOnServerSpline() const;
+    /// Each frame after the units moved: the player's position follows that
+    /// spline, and at its end (0x6EB0B0 -> 0x6EAE70 -> 0x71F210) the player,
+    /// on the end point with forward and the pending stop cleared
+    /// (0x98BD10), sends CMSG_MOVE_SPLINE_DONE with the spline's id.
+    void updateServerSpline();
     /// The flight is over (the server cleared UNIT_FLAG_TAXI_FLIGHT after its
     /// spline ran): back on the ground, MSG_MOVE_STOP.
     void endTaxiFlight();
@@ -412,6 +425,9 @@ private:
     // updateClientTaxi()'s comment on why a dropped reply needs this now.
     static constexpr float kTaxiActivateReplyTimeoutSeconds = 8.0f;
     bool taxiClientActive_ = false;
+    // updateServerSpline: a server spline has the player (and its id).
+    bool serverSplineActive_ = false;
+    uint32_t serverSplineId_ = 0;
     float taxiLandingCooldown_ = 0.0f;
     float taxiStartGrace_ = 0.0f;
     bool taxiRecoverPending_ = false;

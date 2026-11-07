@@ -320,7 +320,86 @@ path trim transforms the unit's position into that frame (0x7180C0 via
 0x74B4C0), and the world position is composed each frame from the
 transport's. Its motion therefore follows the deck while the ship moves.
 
-## 6. Wowee against this
+## 6. The player's own server splines and knockbacks
+
+### A spline for the active mover (a charge, a leap, MoveJump, a seat's exit)
+
+AzerothCore moves a charging player with a spline of its own
+(`MotionMaster::MoveCharge` -> `PointMovementGenerator<Player>`, speed
+`SPEED_CHARGE` 42, limited like the client's to `max(28, 4 * run)`), sent as
+`SMSG_MONSTER_MOVE` for the player's guid to the player and everyone in range.
+
+- **No active-player branch.** 0x73F590 -> 0x73C8E0 -> 0x6EB680 runs it as any
+  unit's (section 1), and 0x98CA00 moves the player along it each frame: the
+  player is where the spline has them, facing along the path.
+  0x98C770 starts the mover forward on it (0x988A20, backward for a spline
+  with flag `0x8000000`).
+- **The controls do nothing**: 0x5FA060 (can move / can turn) is false while
+  a spline without its Done bit (`0x400`) runs; 0x5FBBC0 stops autorun.
+- **Nothing is sent.** The heartbeat (0x6F09F0) asks 0x4F5240 for a running
+  spline and sends none. A parabolic spline's take-off raises `MSG_MOVE_JUMP`
+  (0x6E9C30 -> 0x7413F0 with its send flag); AzerothCore drops any movement
+  packet whose mover's spline is not finalized (`VerifyMovementInfo`), and
+  Wowee sends none.
+- **The end** (0x6EB0B0): forward and the pending stop cleared (0x98BD10,
+  `& ~0x4003`), on the end point (from 3 yards), the final facing; the stop
+  event re-picks the animation **without a packet** (0x7413F0's send flag is
+  0). Then 0x6EAE70 -> **0x71F210: `CMSG_MOVE_SPLINE_DONE`** (0x2C9): the
+  packed guid, the mover's movement block (at the end point), the spline's
+  id (u32); the next heartbeat 500 ms on (0x6E9B70); and **0x5FBBC0(time, 1)
+  gives the keys back**: a direction still held sends its start packet.
+  AzerothCore reads the packet only for a taxi or a transport change.
+
+So the server's position and the client's agree at the end: both ran the same
+spline from the same start. **A charge is not simulated by the client.**
+
+### A knockback (SMSG_MOVE_KNOCK_BACK 0xEF)
+
+0x732450 -> 0x7307A0 case 0xEF -> 0x72D1B0: packed guid, counter, direction x,
+y, horizontal speed, z speed; queued as movement event 0x22 (0x6ECC80) and run
+in order by 0x6EF860:
+
+- **0x6E9FF0**: swimming (0x98BFF0) or flying (0x98C240) stopped; ROOT made
+  PENDING_ROOT (`0x800` -> `0x100000`); CAN_FLY (`0x1000000`) cleared; a fall
+  from where the unit is (0x988370 with the packet's z speed, negative up:
+  FALLING set, SWIMMING, ASCENDING, DESCENDING, FLYING, SPLINE_ELEVATION and
+  without ALWAYS_ALLOW_PITCHING the pitch keys cleared, fall time 0, start z
+  = z; refused on a transport); the direction (+0x70/+0x74) the packet's (on a
+  transport turned into its frame), the speed (+0x8C) the packet's, and
+  FORWARD | PENDING_STOP (`0x4001`) with BACKWARD cleared.
+- Then `CMSG_MOVE_KNOCK_BACK_ACK` (0xF0) with that movement and the counter.
+  **No `MSG_MOVE_JUMP`.**
+- The fall is a jump's (section 2, "Falling"): the direction and speed hold
+  until the landing, **no drag**; the landing applies PENDING_STOP and sends
+  `MSG_MOVE_FALL_LAND`.
+
+AzerothCore relays the ack's movement to everyone else as
+**`MSG_MOVE_KNOCK_BACK` (0xF1)**, its movement block then the four knockback
+floats. Stock reads it with the other movement packets: the registration at
+0x7426EA puts 0xF1 on 0x741B60 (section 2), so the other client draws the
+fall from the block's FALLING, z speed, direction and speed.
+
+### The rubber band, and what Wowee did
+
+| # | Wowee before | Stock | Fix |
+|---|---|---|---|
+| 1 | Charge (spell 100/6178/11578) started a dash of its own on the key press: a smoothstep from the player to 2 yd short of where the target stood, at 25 yd/s, then a snap to 1.5 yd from the target's current position, a heartbeat from there and a client-side auto attack. The server's spline for the player was cancelled the next frame (`MovementHandler::setPosition` -> `Entity::setPosition` ends any stock motion). The server's spline is 28 yd/s and ends at the target's contact point, so the heartbeat sent from the dash's end put the player somewhere else for the server and every other client: they drew the charge to the contact point, then the jump back | the server's spline, run by the stock motion; nothing sent during it; `CMSG_MOVE_SPLINE_DONE` at its end; the attack is the server's (`SMSG_ATTACKSTART` from `PointMovementGenerator::DoFinalize`) | the dash is gone; any server spline of the player's own (not a taxi, not a seat) is followed (`MovementHandler::playerOnServerSpline` / `updateServerSpline`, `Application::updateServerSplineFollow`): position and facing from the spline, the controls held, every movement packet held, the end sends `CMSG_MOVE_SPLINE_DONE` with the spline's id from the end point and hands the controls that position, the keys still held start again (`CameraController::forgetMovementEdges`). The character runs at the spline's pace (0x717050: Sprint above 11 yd/s, `CombatFSM::paceFor`) |
+| 2 | Only the exit off a vehicle's seat, for 5 s after it, was followed | every spline of the mover's | as above |
+| 3 | Knockback: a horizontal velocity that decayed at 4.5/s (exponential drag) on top of the keys; `MSG_MOVE_JUMP` sent with a normal jump's fields (-7.955, the direction of travel, run speed), then the ack with those | a fall on the packet's direction at its speed until the landing; the ack carries the packet's fall; no JUMP | `stock_movement::knockBackFlags`, the ack's fall fields, `CameraController::applyKnockBack` latches the packet's path (the jump's `airDir`/`airSpeed_`); no JUMP |
+| 4 | `MSG_MOVE_KNOCK_BACK` was not read: another player knocked back stood until its `FALL_LAND`, then jumped to where it had landed | 0xF1 -> 0x741B60 | registered with the other movement packets |
+| 5 | "Smoother other units" (E10) guessed a step from the drawn velocity: a charge (0 to 28 yd/s and back within a frame) read as a step behind at its start and a step ahead at its stop - the charger lagged 2 yd, then overshot the end and slid back | (stock smooths nothing) | the motion reports its corrections (`RemoteMover::takeCorrection`, a monster move's Place and a ground path's sideways step, `Entity::takeMotionCorrection`) and E10 glides over those alone (`remote_smoothing::stepReported`); the guess stays for the older expansions |
+
+In game (lab, 2026-11-06, warrior charging a Young Wolf 18 yd away, a
+`WOWEE_DEBUG_LUA` script sampling the drawn and entity positions each frame,
+`WOWEE_INPUT_TRACE` for the packets): `SMSG_MONSTER_MOVE` for the player one
+frame after `CMSG_CAST_SPELL`; the character in Sprint (143) along it, 17.1
+yd in about 0.65 s; no movement packet during it ("not sent while a server
+spline moves the character"); `CMSG_MOVE_SPLINE_DONE` on the frame it ended,
+the drawn and entity positions both on the end point and staying there.
+With forward held through the charge: `MSG_MOVE_START_FORWARD` on the same
+frame as the SPLINE_DONE, from the end point, and heartbeats on from there.
+
+## 7. Wowee against this
 
 | # | Gap (before) | Stock | Fix |
 |---|---|---|---|
@@ -350,7 +429,7 @@ transport's. Its motion therefore follows the deck while the ship moves.
 Kept for Classic/TBC/Turtle: the old interpolation (their flag values and
 packet layouts differ); the stock model is gated on `wotlk`.
 
-## 7. Not done / open
+## 8. Not done / open
 
 - The banking of a Flying spline (roll from the turn 1 s ahead) and the
   spine/head twist that takes the rest of a body lag are not drawn.

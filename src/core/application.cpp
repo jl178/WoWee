@@ -3499,9 +3499,6 @@ void Application::performLogoutToLogin(bool toCharacterSelect) {
     lastSentCanonicalYaw_ = 1000.0f;
     idleYawned_ = false;
 
-    // --- Charge state ---
-    if (animationCallbacks_) animationCallbacks_->resetChargeState();
-
     // --- Player identity ---
     spawnedPlayerGuid_ = 0;
     spawnedAppearanceBytes_ = 0;
@@ -3606,18 +3603,36 @@ void Application::applyMoverBody() {
     }
 }
 
-// Off a vehicle's seat the player rides the server's exit spline
-// (TransportExit) to where it puts them, as the stock unit motion runs any
-// unit's spline; the controls take over at its end.
-void Application::updateSeatExitFollow(float deltaTime, bool onTaxi) {
-    const bool inSeat = gameHandler && gameHandler->vehiclePassenger(gameHandler->getPlayerGuid());
-    if (wasInVehicleSeat_ && !inSeat) sinceVehicleExit_ = 0.0f;
-    else sinceVehicleExit_ += deltaTime;
-    wasInVehicleSeat_ = inSeat;
-    playerOnSeatSpline_ = false;
-    if (!inSeat && !onTaxi && gameHandler && sinceVehicleExit_ < 5.0f) {
-        if (auto pe = gameHandler->getEntityManager().getEntity(gameHandler->getPlayerGuid()))
-            playerOnSeatSpline_ = pe->hasStockMotion() && pe->stockMotionIsSpline();
+// A server spline of the player's own (a charge, a leap, MoveJump, the exit
+// off a vehicle's seat): the stock client runs it as any unit's spline
+// (0x73C8E0 has no active-player branch; 0x98CA00 moves the player) while the
+// controls do nothing (0x5FA060). The character is drawn where it has them,
+// facing along the path; at the end the controls take over from there, and a
+// key still held starts its movement again (0x5FBBC0).
+void Application::updateServerSplineFollow(bool onTaxi) {
+    const bool was = playerOnServerSpline_;
+    playerOnServerSpline_ = !onTaxi && gameHandler && gameHandler->getMovementHandler() &&
+                            gameHandler->getMovementHandler()->playerOnServerSpline();
+    if (playerOnServerSpline_ == was || !renderer) return;
+    auto* ac = renderer->getAnimationController();
+    if (ac) ac->setCharging(playerOnServerSpline_);
+    if (playerOnServerSpline_) return;
+    // Ended: the controls start from the end point and the facing it left
+    // (the final facing, applied on its last frame), not from the frame
+    // before it - the position the controls report would otherwise step
+    // back by a frame of the spline.
+    auto* cc = renderer->getCameraController();
+    if (cc) cc->forgetMovementEdges();
+    if (auto pe = gameHandler->getEntityManager().getEntity(gameHandler->getPlayerGuid())) {
+        const glm::vec3 renderPos =
+            core::coords::canonicalToRender(glm::vec3(pe->getX(), pe->getY(), pe->getZ()));
+        renderer->getCharacterPosition() = renderPos;
+        const float deg = core::coords::canonicalToCharacterYawDeg(pe->getOrientation());
+        renderer->setCharacterYaw(deg);
+        if (cc) {
+            cc->setFacingYaw(deg);
+            if (glm::vec3* ft = cc->getFollowTargetMutable()) *ft = renderPos;
+        }
     }
 }
 
@@ -3794,9 +3809,9 @@ void Application::applyServerMovementState(float deltaTime) {
     // A ship carries the player's reference frame, but it must not
     // freeze local controls like a taxi flight. On-deck walking is
     // folded into the transport-local offset in the sync block below.
-    updateSeatExitFollow(deltaTime, onTaxi);
-    const bool externallyDrivenMotion = onTaxi || playerOnSeatSpline_ || playerSeatedInVehicle(gameHandler.get()) ||
-        (animationCallbacks_ && animationCallbacks_->isCharging());
+    updateServerSplineFollow(onTaxi);
+    const bool externallyDrivenMotion = onTaxi || playerOnServerSpline_ ||
+        playerSeatedInVehicle(gameHandler.get());
     // Keep physics frozen (externalFollow) during landing clamp when terrain
     // hasn't loaded yet - prevents gravity from pulling player through void.
     bool hearthFreeze = worldEntryCallbacks_ && worldEntryCallbacks_->isHearthTeleportPending();
@@ -3989,7 +4004,7 @@ void Application::applyServerMovementState(float deltaTime) {
 
     snapControlsToActiveMover();
 
-    if (!placePlayerInVehicleSeat(*gameHandler, renderer.get()) && (onTaxi || playerOnSeatSpline_)) {
+    if (!placePlayerInVehicleSeat(*gameHandler, renderer.get()) && (onTaxi || playerOnServerSpline_)) {
         auto playerEntity = gameHandler->getEntityManager().getEntity(gameHandler->getPlayerGuid());
         glm::vec3 canonical(0.0f);
         bool haveCanonical = false;
@@ -4011,6 +4026,17 @@ void Application::applyServerMovementState(float deltaTime) {
                 if (followTarget) {
                     *followTarget = renderPos;
                 }
+            }
+            // Off a taxi the spline faces the player along its path every
+            // frame and as asked at its end (0x98CA00, 0x6EB0B0); the
+            // controls take that facing over when it ends.
+            if (playerOnServerSpline_ && playerEntity) {
+                const float deg = core::coords::canonicalToCharacterYawDeg(playerEntity->getOrientation());
+                renderer->setCharacterYaw(deg);
+                if (auto* cc = renderer->getCameraController()) cc->setFacingYaw(deg);
+                if (auto* ac = renderer->getAnimationController())
+                    ac->setChargePace(playerEntity->stockMotionSpeed(), gameHandler->getServerWalkSpeed(),
+                                      playerEntity->stockMotionAirborne());
             }
         }
     } else if (onTransport) {
@@ -4122,9 +4148,6 @@ void Application::applyServerMovementState(float deltaTime) {
             }
         }
         gameHandler->updateM2TransportBoarding(canonical);
-    } else if (animationCallbacks_ && animationCallbacks_->isCharging()) {
-        // Warrior Charge: interpolation delegated to AnimationCallbackHandler
-        animationCallbacks_->updateCharge(deltaTime);
     } else {
         hasWMORideLock_ = false;
         lastWMORideTransportGuid_ = 0;
@@ -4378,11 +4401,18 @@ void Application::syncCreatureRenderInstances(float deltaTime) {
         const uint64_t currentTargetGuid = gameHandler->hasTarget()
             ? gameHandler->getTargetGuid() : 0;
         const uint64_t autoAttackGuid = gameHandler->getAutoAttackTargetGuid();
+        const bool stockUnitMotion = game::isActiveExpansion("wotlk");
         for (const auto& [guid, instanceId] : _creatureInstances) {
             auto entity = gameHandler->getEntityManager().getEntity(guid);
             if (!entity || entity->getType() != game::ObjectType::UNIT) continue;
             // In a vehicle's seat: syncVehiclePassengers places and animates it.
             if (gameHandler->vehiclePassenger(guid)) continue;
+            // What the motion corrected this frame, for E10 (the stock model
+            // says; the older expansions' interpolation does not).
+            if (stockUnitMotion) {
+                charRenderer->addMotionCorrection(
+                    instanceId, core::coords::canonicalToRender(entity->takeMotionCorrection()));
+            }
 
             if (npcWeaponRetryTick &&
                 weaponAttachesThisTick < EntitySpawner::MAX_WEAPON_ATTACHES_PER_TICK) {
@@ -4728,10 +4758,17 @@ void Application::syncPlayerRenderInstances(float deltaTime) {
         // The local rider's pose, by the same rule.
         if (auto* ac = renderer->getAnimationController(); ac && ac->isMounted())
             ac->setMountRiderAnim(riderAnimFor(gameHandler->getPlayerGuid()));
+        const bool stockUnitMotion = game::isActiveExpansion("wotlk");
         for (const auto& [guid, instanceId] : _playerInstances) {
             auto entity = gameHandler->getEntityManager().getEntity(guid);
             if (!entity || entity->getType() != game::ObjectType::PLAYER) continue;
             if (gameHandler->vehiclePassenger(guid)) continue;  // syncVehiclePassengers
+            if (stockUnitMotion) {
+                const glm::vec3 c = core::coords::canonicalToRender(entity->takeMotionCorrection());
+                charRenderer->addMotionCorrection(instanceId, c);
+                if (const auto* m = entitySpawner_->getRemotePlayerMount(guid))
+                    charRenderer->addMotionCorrection(m->instanceId, c);
+            }
 
             // Distance cull
             if (havePPos) {

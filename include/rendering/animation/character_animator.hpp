@@ -36,6 +36,7 @@ public:
     // ── ICharacterAnimator ──────────────────────────────────────────────
     void startSpellCast(uint32_t precast, uint32_t cast, bool loop, uint32_t finalize) override;
     void stopSpellCast() override;
+    void cancelSpellCast() override;
     void triggerMeleeSwing() override;
     void triggerRangedShot() override;
     void triggerHitReaction(uint32_t animId) override;

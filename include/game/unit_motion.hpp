@@ -239,6 +239,8 @@ struct MonsterMoveSpec {
     bool hasParabolic = false;
     float verticalAcceleration = 0.0f;
     uint32_t parabolicStartMs = 0;
+    /// The spline's id (MoveSpline +0x30): CMSG_MOVE_SPLINE_DONE names it.
+    uint32_t splineId = 0;
     /// The nodes after the start, in path order; the last is the destination.
     std::vector<glm::vec3> points;
 };
@@ -255,6 +257,7 @@ class UnitSpline {
 public:
     SplineCurve curve;
     uint32_t flags = 0;
+    uint32_t id = 0;             // +0x30, the server's spline id
     uint32_t startMs = 0;        // +0x24
     uint32_t durationMs = 0;     // +0x2C, the client's own (0x73C8E0)
     float durationMod = 1.0f;    // +0x204
@@ -430,6 +433,7 @@ public:
         jitterIndex_ = 0;
         sincePacketMs_ = 0;
         appliedCount_ = 0;
+        correction_ = glm::vec3(0.0f);
     }
     /// Put the unit somewhere without a packet (a spline ended, a teleport).
     void place(const glm::vec3& position, float facing);
@@ -441,6 +445,15 @@ public:
     [[nodiscard]] const MovementSample& lastApplied() const { return lastApplied_; }
     [[nodiscard]] uint32_t appliedCount() const { return appliedCount_; }
     [[nodiscard]] int32_t jitterHoldMs() const { return jitterHold_; }
+    /// Where the packets applied since the last call put the unit, less where
+    /// dead reckoning had it at their time (the sum; server axes): the
+    /// corrections, which are not motion. The first packet after a reset has
+    /// nothing to correct.
+    glm::vec3 takeCorrection() {
+        const glm::vec3 c = correction_;
+        correction_ = glm::vec3(0.0f);
+        return c;
+    }
 
 private:
     struct Pending {
@@ -463,6 +476,7 @@ private:
     std::array<int16_t, 32> jitter_{};  // +0xE8
     uint32_t jitterIndex_ = 0;      // +0x128
     uint32_t appliedCount_ = 0;  // since the last reset
+    glm::vec3 correction_{0.0f};
 };
 
 /// The movement time the stall rule leaves after `sincePacketMs` without a

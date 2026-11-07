@@ -34,6 +34,7 @@ motion::MonsterMoveSpec specFrom(const MonsterMoveData& d) {
     spec.facingAngle = d.facingAngle;
     spec.splineFlags = d.splineFlags;
     spec.durationMs = d.duration;
+    spec.splineId = d.splineId;
     spec.hasAnimation = d.hasAnimation;
     spec.animationType = d.animationType;
     spec.animationStartMs = d.animationStartTime;

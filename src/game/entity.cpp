@@ -186,6 +186,7 @@ motion::MonsterMovePlan Entity::startMonsterMove(const motion::MonsterMoveSpec& 
                 if (d.x * d.x + d.y * d.y > 1e-6f) f = std::atan2(d.y, d.x);
             }
             publishMotionFrame(plan.position, f);
+            motionCorrection_ += plan.position - pos;
             break;
         }
         case motion::MonsterMovePlan::Kind::Spline: {
@@ -211,6 +212,9 @@ motion::MonsterMovePlan Entity::startMonsterMove(const motion::MonsterMoveSpec& 
             motionFramePos_ = pos;
             motionFrameFacing_ = facing;
             updateStockMotion();
+            // The path starts at the unit, but a ground path it stands beside
+            // starts at its foot on it (0x7180C0): that step is the only jump.
+            motionCorrection_ += motionFramePos_ - pos;
             break;
         }
     }
@@ -335,6 +339,7 @@ void Entity::updateStockMotion() {
         motionSpeed_ = !motionTranslating_ ? 0.0f
                      : st.falling() ? st.jumpXYSpeed
                                     : motion::selectSpeed(moveSpeeds_, st.flags);
+        motionCorrection_ += remoteMover_->takeCorrection();
         if (remoteMover_->appliedCount() > 0) publishMotionFrame(st.position, st.facing);
         return;
     }

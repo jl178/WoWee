@@ -318,6 +318,15 @@ public:
     void setExternalFollow(bool enabled) { externalFollow_ = enabled; }
     void setExternalMoving(bool moving) { externalMoving_ = moving; }
     void setFacingYaw(float yaw) { facingYaw = yaw; }  // For taxi/scripted movement
+    /// Forget the movement keys' last state, so a key still held reads as
+    /// newly pressed and sends its start packet (the stock 0x5FBBC0 after a
+    /// server spline gave the controls back).
+    void forgetMovementEdges() {
+        clearMovementInputs();
+        wasMovingForward = wasMovingBackward = false;
+        wasStrafingLeft = wasStrafingRight = false;
+        wasTurningLeft = wasTurningRight = false;
+    }
     void clearMovementInputs();
     void suppressMovementFor(float seconds) { movementSuppressTimer_ = seconds; }
     void suspendGravityFor(float seconds) { gravitySuspendTimer_ = seconds; }
@@ -1056,13 +1065,6 @@ private:
     bool hasCachedFloor_ = false;
     static constexpr float COLLISION_CACHE_DISTANCE = 0.15f;  // Re-check every 15cm
 
-    // Server-driven knockback state.
-    // When the server sends SMSG_MOVE_KNOCK_BACK, we apply horizontal + vertical
-    // impulse here and let the normal physics loop (gravity, collision) resolve it.
-    bool knockbackActive_ = false;
-    glm::vec2 knockbackHorizVel_ = glm::vec2(0.0f); // render-space horizontal velocity (units/s)
-    // Horizontal velocity decays via WoW-like drag so the player doesn't slide forever.
-    static constexpr float KNOCKBACK_HORIZ_DRAG = 4.5f; // exponential decay rate (1/s)
 
     // The stock camera's shakes (0x606970): the strongest of each direction
     // plays.

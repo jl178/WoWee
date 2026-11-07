@@ -14,6 +14,7 @@
 #include "rendering/animation/emote_registry.hpp"
 #include "game/game_handler.hpp"
 #include "game/spell_classification.hpp"
+#include "game/spell_handler.hpp"
 #include "game/world_packets.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/audio_engine.hpp"
@@ -46,83 +47,6 @@ uint32_t AnimationCallbackHandler::kitCastAnim(uint32_t spellId) {
     return svs->getKitAnimations(it->second.spellVisualId).cast;
 }
 
-void AnimationCallbackHandler::resetChargeState() {
-    chargeActive_ = false;
-    chargeTimer_ = 0.0f;
-    chargeDuration_ = 0.0f;
-    chargeTargetGuid_ = 0;
-}
-
-bool AnimationCallbackHandler::updateCharge(float deltaTime) {
-    if (!chargeActive_) return false;
-
-    // Warrior Charge: lerp position from start to end using smoothstep
-    chargeTimer_ += deltaTime;
-    float t = std::min(chargeTimer_ / chargeDuration_, 1.0f);
-    // smoothstep for natural acceleration/deceleration
-    float s = t * t * (3.0f - 2.0f * t);
-    glm::vec3 renderPos = chargeStartPos_ + (chargeEndPos_ - chargeStartPos_) * s;
-    renderer_.getCharacterPosition() = renderPos;
-
-    // Keep facing toward target
-    glm::vec3 dir = chargeEndPos_ - chargeStartPos_;
-    float dirLenSq = glm::dot(dir, dir);
-    if (dirLenSq > 1e-4f) {
-        dir *= glm::inversesqrt(dirLenSq);
-        float yawDeg = glm::degrees(std::atan2(dir.x, dir.y));
-        renderer_.setCharacterYaw(yawDeg);
-    }
-
-    // Sync to game handler
-    glm::vec3 canonical = core::coords::renderToCanonical(renderPos);
-    gameHandler_.setPosition(canonical.x, canonical.y, canonical.z);
-
-    // Update camera follow target
-    if (renderer_.getCameraController()) {
-        glm::vec3* followTarget = renderer_.getCameraController()->getFollowTargetMutable();
-        if (followTarget) {
-            *followTarget = renderPos;
-        }
-    }
-
-    // Charge complete
-    if (t >= 1.0f) {
-        chargeActive_ = false;
-        if (auto* ac = renderer_.getAnimationController()) ac->setCharging(false);
-        renderer_.getCameraController()->setExternalFollow(false);
-        renderer_.getCameraController()->setExternalMoving(false);
-
-        // Snap to melee range of target's CURRENT position (it may have moved)
-        if (chargeTargetGuid_ != 0) {
-            auto targetEntity = gameHandler_.getEntityManager().getEntity(chargeTargetGuid_);
-            if (targetEntity) {
-                glm::vec3 targetCanonical(targetEntity->getX(), targetEntity->getY(), targetEntity->getZ());
-                glm::vec3 targetRender = core::coords::canonicalToRender(targetCanonical);
-                glm::vec3 toTarget = targetRender - renderPos;
-                float dSq = glm::dot(toTarget, toTarget);
-                if (dSq > 2.25f) {
-                    // Place us 1.5 units from target (well within 8-unit melee range)
-                    glm::vec3 snapPos = targetRender - toTarget * (1.5f * glm::inversesqrt(dSq));
-                    renderer_.getCharacterPosition() = snapPos;
-                    glm::vec3 snapCanonical = core::coords::renderToCanonical(snapPos);
-                    gameHandler_.setPosition(snapCanonical.x, snapCanonical.y, snapCanonical.z);
-                    if (renderer_.getCameraController()) {
-                        glm::vec3* ft = renderer_.getCameraController()->getFollowTargetMutable();
-                        if (ft) *ft = snapPos;
-                    }
-                }
-            }
-            gameHandler_.startAutoAttack(chargeTargetGuid_);
-            if (auto* ac = renderer_.getAnimationController()) ac->triggerMeleeSwing();
-        }
-
-        // Send movement heartbeat so server knows our new position
-        gameHandler_.sendMovement(game::Opcode::MSG_MOVE_HEARTBEAT);
-    }
-
-    return true; // charge is active
-}
-
 void AnimationCallbackHandler::setupCallbacks() {
     // Sprint aura callback - use SPRINT(143) animation when sprint-type buff is active
     gameHandler_.setSprintAuraCallback([this](bool active) {
@@ -132,58 +56,6 @@ void AnimationCallbackHandler::setupCallbacks() {
 
     // A passenger is seen in its seat (stock hides one only on a seat with
     // flag 0x200): the seat placement is Application::syncVehiclePassengers'.
-
-    // Charge callback - warrior rushes toward target
-    gameHandler_.setChargeCallback([this](uint64_t targetGuid, float tx, float ty, float tz) {
-        if (!renderer_.getCameraController()) return;
-
-        // Get current player position in render coords
-        glm::vec3 startRender = renderer_.getCharacterPosition();
-        // Convert target from canonical to render
-        glm::vec3 targetRender = core::coords::canonicalToRender(glm::vec3(tx, ty, tz));
-
-        // Compute direction and stop 2.0 units short (melee reach)
-        glm::vec3 dir = targetRender - startRender;
-        float distSq = glm::dot(dir, dir);
-        if (distSq < 9.0f) return; // Too close, nothing to do
-        float invDist = glm::inversesqrt(distSq);
-        glm::vec3 dirNorm = dir * invDist;
-        glm::vec3 endRender = targetRender - dirNorm * 2.0f;
-
-        // Face toward target BEFORE starting charge
-        float yawRad = std::atan2(dirNorm.x, dirNorm.y);
-        float yawDeg = glm::degrees(yawRad);
-        renderer_.setCharacterYaw(yawDeg);
-        // Sync canonical orientation to server so it knows we turned
-        float canonicalYaw = core::coords::characterYawDegToCanonical(yawDeg);
-        gameHandler_.setOrientation(canonicalYaw);
-        gameHandler_.sendMovement(game::Opcode::MSG_MOVE_SET_FACING);
-
-        // Set charge state
-        chargeActive_ = true;
-        chargeTimer_ = 0.0f;
-        chargeDuration_ = std::max(std::sqrt(distSq) / 25.0f, 0.3f); // ~25 units/sec
-        chargeStartPos_ = startRender;
-        chargeEndPos_ = endRender;
-        chargeTargetGuid_ = targetGuid;
-
-        // Disable player input, play charge animation
-        renderer_.getCameraController()->setExternalFollow(true);
-        renderer_.getCameraController()->clearMovementInputs();
-        if (auto* ac = renderer_.getAnimationController()) ac->setCharging(true);
-
-        // No visual here either. Charge's cast kit (44) is the stock one:
-        // Spells\ChargeTrail (a ribbon on the chest) and DustCloud_Land at
-        // the feet, which the spell visual system attaches to the caster on
-        // SPELL_GO, the local player as anyone else. A hand-made red ribbon
-        // and dust drawn here as well put a second streak behind the local
-        // warrior that the stock client never shows.
-
-        // No sound here. Charge's visual (867) has cast kit 44, whose sound is
-        // SoundEntries 3330 ("HeroicLeap"), and the spell visual system plays
-        // it at the caster on SPELL_GO. Playing HeroricLeap.wav from here as
-        // well gave every charge two of it.
-    });
 
     // GUID → CharacterRenderer instance for bone-attached spell visuals:
     // local player uses the dedicated character instance, other units the
@@ -207,6 +79,8 @@ void AnimationCallbackHandler::setupCallbacks() {
     // one, and so replaced it; it no longer does.
     gameHandler_.setNpcDeathCallback([this](uint64_t guid) {
         const bool isLocal = guid == gameHandler_.getPlayerGuid();
+        // The caster's own death ends its cast pose and build-up.
+        if (auto* sh = gameHandler_.getSpellHandler()) sh->onCasterDied(guid);
         if (!isLocal) entitySpawner_.markCreatureDead(guid);
         auto* cr = renderer_.getCharacterRenderer();
         if (!cr) return;
@@ -801,7 +675,13 @@ void AnimationCallbackHandler::setupCallbacks() {
                 auto* ac = renderer_.getAnimationController();
                 if (ac) {
                     ac->setSeatedLoopAnimation(0);
-                    ac->stopSpellCast();
+                    // isChannel doubles as "hard stop", as for other units
+                    // below: a cast that did not go off (failed, interrupted,
+                    // cancelled), a channel's end, a death - the pose is put
+                    // away (0x7FEC00) with no release. Only a cast that went
+                    // off (SMSG_SPELL_GO) plays its release one-shot.
+                    if (isChannel) ac->cancelSpellCast();
+                    else ac->stopSpellCast();
                 }
             } else {
                 // Another unit leaving its cast hold. Only a cast animation is
@@ -1049,19 +929,26 @@ void AnimationCallbackHandler::playHitReaction(uint64_t victimGuid, uint8_t reac
     else                            animId = firstPlayable(has, {want});
     if (animId == 0) return;
 
+    // Which track (0x736640): the whole body only for a unit standing at
+    // ease - no attack target, not moving, not casting; a unit fighting
+    // something (CombatWound, a parry, a block), a crit, a moving or casting
+    // unit takes it on the upper-body track, over whatever its body plays.
+    // So a fighter's swing and stance go on under the flinch, and the next
+    // swing does not cut the flinch off: played on the whole body, each was
+    // cut by the other ("the animation doesn't finish") and a flinch over a
+    // swing was dropped.
+    const bool upperTrack = woundOnUpperBody(reaction == HR::CRIT_WOUND, victimAttacking, false, false);
+
     // For local player: use AnimationController state
     if (isLocalPlayer) {
-        if (ac) ac->triggerHitReaction(animId);
+        if (ac) ac->triggerHitReaction(animId, upperTrack);
         return;
     }
 
-    // Not over a swing, an ability, a cast or a death. Over a walk or a run
-    // the reaction goes on the upper body, the legs keeping their stride, as
-    // the stock client plays it on a moving unit (0x736640 takes the
-    // upper-body track); it used to be dropped.
     uint32_t cur = 0; float t = 0.0f, d = 0.0f;
     const bool haveState = cr->getAnimationState(instanceId, cur, t, d);
-    if (haveState && isLocomotionAnim(cur)) {
+    if (haveState && cur == DEATH) return;
+    if (haveState && (upperTrack || isLocomotionAnim(cur) || isSpellCastFamily(cur))) {
         if (playsOnUpperBody(animId)) cr->playUpperBodyAnimation(instanceId, animId, animId, animId);
         return;
     }
