@@ -162,6 +162,7 @@ public:
     /// camera at the first-person end, or pulled that close.
     [[nodiscard]] bool isFirstPersonView() const { return thirdPerson && playerModelAlpha_ <= 0.0f; }
     /// The stock camera fade of the player's model, 0..1 (1 out of third person).
+    [[nodiscard]] float debugLiquidDepth() const { return liquidDepthOverFeet_; }
     [[nodiscard]] float playerModelAlpha() const { return thirdPerson ? playerModelAlpha_ : 1.0f; }
     [[nodiscard]] bool isGrounded() const { return grounded; }
     [[nodiscard]] bool isJumping() const { return !grounded && verticalVelocity > 0.0f; }
@@ -365,6 +366,9 @@ public:
     /// -1 down, 0 none; while it is nonzero the server is told by
     /// START_PITCH_UP / DOWN rather than SET_PITCH.
     [[nodiscard]] int pitchKeysVote() const { return pitchVote_; }
+    /// Whether the mouse steered this frame (right button, both buttons, a
+    /// steering finger): the only way the pitch changes that SET_PITCH reports.
+    [[nodiscard]] bool mouseSteering() const { return mouseSteering_; }
     [[nodiscard]] bool isAscending() const { return wasAscending_; }
     [[nodiscard]] bool isDescending() const { return wasDescending_; }
     void setHoverActive(bool active) { hoverActive_ = active; }
@@ -1095,6 +1099,7 @@ private:
     float liquidDepthOverFeet_ = -1.0f; ///< liquid over the followed feet, -1 out of it
     stock_camera::WaterLine waterLine_ = stock_camera::WaterLine::None;
     int pitchVote_ = 0;       ///< this frame's PitchUp/PitchDown vote
+    bool mouseSteering_ = false;
     int sentPitchVote_ = 0;   ///< the one the last START/STOP_PITCH reported
     float pitchRateOverride_ = 0.0f;  ///< rad/s from the server; 0 = pi
     // Server-driven hover (HOVER flag): float at fixed height above ground.

@@ -586,6 +586,21 @@ also skips the cameraDive surface/submerge pitch limits (0x6023D0,
 | 40 | A fall that starts without a jump (walked off an edge) is reported at once: HEARTBEAT 0xEE with FALLING, v0 0, the leg's direction and speed (event 9, 0x988370(0)); keys in the air then go out pending, as in a jump | not reported (no FALLING went out), so its keys stayed latched and were sent at the landing, and its landing was a FALL_LAND by height alone | `MovementHandler::beginWalkOffFall` (from `CameraController`'s fall tracking once the fall has dropped 1/36; the fall time backdated to the edge), the jump's key rules from then on |
 | 41 | No FALL_LAND for a landing within 1/36 yd of the fall's apex (0x73D4A0), a jump onto a ledge at the top of its arc included; the landing still clears FALLING and applies the pending keys | a reported jump always sent FALL_LAND (it was what cleared FALLING here), and a jump that met a slope while still rising sent nothing and left FALLING set | `fallLandDue` for every reported fall, `MovementHandler::landWithoutPacket` otherwise; the landing is taken the frame the fall ends, rising or not |
 
+In game for rows 33-41 (lab, 2026-11-07, WPTEST7, human warrior, a
+`WOWEE_DEBUG_LUA` script, `WOWEE_INPUT_TRACE` for the packets): a 100-pixel
+mouse drag turned 28.649 degrees and a 40-pixel one tilted 9.693 at the
+window's 1.2688 aspect, both exactly the formula; MoveViewRight for 0.5 s
+turned +90.17, MoveViewUp for 0.2 s took the pitch down 18.04; SetView(1)
+faded the model to 0 and SetView(2) back to 1; dropped from 6 yd, HEARTBEAT
+with flags 0x1000 then FALL_LAND; a standing jump JUMP then FALL_LAND; in the
+open sea off Westfall, rising from the bottom to the float line eased the
+camera from -15 to -5, PitchDown held at the surface left the pitch at 0
+(START_PITCH_DOWN 0x200080 and STOP_PITCH still sent), swimming forward
+stayed on the surface, and submerged PitchDown for 0.25 s pitched to -46.2
+(pi rad/s); no SET_PITCH without steering. Charge: the spline, SPLINE_DONE at
+its end, START_FORWARD from the end point on the same frame with W held, then
+heartbeats - no correction.
+
 Still different (not changed here; each needs in-game checking):
 
 - **Step mechanics** (7.2, 7.3). Stock steps only when the move hits an

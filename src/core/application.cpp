@@ -3764,10 +3764,10 @@ void Application::applyServerMovementState(float deltaTime) {
             gameHandler->setMovementPitch(pitchRad);
             // A steered change goes out as MSG_MOVE_SET_PITCH (0x5FB3A0 ->
             // event 0x14) once it is 0.1 rad from the pitch the last movement
-            // packet carried (0x71AE80); held pitch keys are carried by
-            // START_PITCH_UP / DOWN instead.
+            // packet carried (0x71AE80) - steered only, as 0x5FB3A0 is the one
+            // sender; held pitch keys are carried by START_PITCH_UP / DOWN.
             auto* mh = gameHandler->getMovementHandler();
-            if (mh && cc->pitchKeysVote() == 0 && !game::isPreWotlk() &&
+            if (mh && cc->mouseSteering() && cc->pitchKeysVote() == 0 && !game::isPreWotlk() &&
                 mh->pitchChangeWorthSending(pitchRad)) {
                 gameHandler->sendMovement(game::Opcode::MSG_MOVE_SET_PITCH);
             }

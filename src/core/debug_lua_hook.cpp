@@ -255,7 +255,9 @@ int luaDebugCameraState(lua_State* L) {
     lua_pushnumber(L, glm::degrees(cc->getMovePitchRad()));
     lua_pushnumber(L, cc->getViewDistance());
     lua_pushnumber(L, cc->playerModelAlpha());
-    return 6;
+    lua_pushnumber(L, cc->debugLiquidDepth());
+    lua_pushnumber(L, cc->getPlayerCollider().height);
+    return 8;
 }
 
 /// WoweeDebug_TimeOfDay(hours) - the light and sky held at an hour, so a test
