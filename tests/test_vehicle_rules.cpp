@@ -176,6 +176,6 @@ TEST_CASE("A fading vehicle clears as the camera nears it (Vehicle.flags 0x80000
     CHECK(cameraFadeAlpha(v, 10.0f, 12.7f) == Catch::Approx(0.5f));
     CHECK(cameraFadeAlpha(v, 10.0f, 12.5f) < 0.5f);
     CHECK(cameraFadeAlpha(v, 10.0f, 12.5f, 0.0f) == Catch::Approx(0.5f));
-    CHECK(cameraFadeAlpha(v, 10.0f, 15.1f) == 1.0f);
+    CHECK(cameraFadeAlpha(v, 10.0f, 15.2f) == 1.0f);
     CHECK(cameraFadeAlpha(v, 10.0f, 15.15f) < 1.0f);
 }
