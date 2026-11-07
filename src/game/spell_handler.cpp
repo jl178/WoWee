@@ -10,6 +10,7 @@
 #include "game/spell_classification.hpp"
 #include "game/spell_targeting.hpp"
 #include "game/stock_cast_timing.hpp"
+#include "game/stock_aura_display.hpp"
 #include "game/pet_action.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_utils.hpp"
@@ -5130,7 +5131,9 @@ void SpellHandler::loadSpellNameCache() const {
     const uint32_t attrEx2Field = wotlkColumn("AttributesEx2", 6);
     const uint32_t attrEx3Field = wotlkColumn("AttributesEx3", 7);
     const uint32_t attrEx4Field = wotlkColumn("AttributesEx4", 8);
+    const uint32_t attrEx5Field = wotlkColumn("AttributesEx5", 9);
     const uint32_t attrEx6Field = wotlkColumn("AttributesEx6", 10);
+    const uint32_t auraVisionField = wotlkColumn("RequiredAuraVision", 221);
     const uint32_t attrEx7Field = wotlkColumn("AttributesEx7", 11);
     const uint32_t stackAmountField = wotlkColumn("StackAmount", 49);
     const uint32_t interruptFlagsField = wotlkColumn("InterruptFlags", 31);
@@ -5229,7 +5232,10 @@ void SpellHandler::loadSpellNameCache() const {
             if (attrEx2Field < fieldCount) entry.attrEx2 = dbc->getUInt32(i, attrEx2Field);
             if (attrEx3Field < fieldCount) entry.attrEx3 = dbc->getUInt32(i, attrEx3Field);
             if (attrEx4Field < fieldCount) entry.attrEx4 = dbc->getUInt32(i, attrEx4Field);
+            if (attrEx5Field < fieldCount) entry.attrEx5 = dbc->getUInt32(i, attrEx5Field);
             if (attrEx6Field < fieldCount) entry.attrEx6 = dbc->getUInt32(i, attrEx6Field);
+            if (auraVisionField < fieldCount)
+                entry.requiredAuraVision = dbc->getUInt32(i, auraVisionField);
             if (attrEx7Field < fieldCount) entry.attrEx7 = dbc->getUInt32(i, attrEx7Field);
             if (stackAmountField < fieldCount) entry.stackAmount = dbc->getUInt32(i, stackAmountField);
             if (interruptFlagsField < fieldCount)
@@ -5505,6 +5511,31 @@ uint8_t SpellHandler::getSpellDispelType(uint32_t spellId) const {
     loadSpellNameCache();
     auto it = owner_.spellNameCacheRef().find(spellId);
     return (it != owner_.spellNameCacheRef().end()) ? it->second.dispelType : 0;
+}
+
+bool SpellHandler::isAuraListed(const AuraSlot& aura, uint64_t unitGuid) const {
+    if (aura.isEmpty()) return false;
+    loadSpellNameCache();
+    stock_aura::AuraDisplayRow row;
+    auto it = owner_.spellNameCacheRef().find(aura.spellId);
+    if (it != owner_.spellNameCacheRef().end()) {
+        const auto& e = it->second;
+        row.hasRow = true;
+        row.attributes = e.attr;
+        row.attributesEx = e.attrEx;
+        row.attributesEx5 = e.attrEx5;
+        row.attributesEx6 = e.attrEx6;
+        for (int i = 0; i < 3; ++i) row.effects[i] = e.effectIds[i];
+        row.requiredAuraVision = e.requiredAuraVision;
+    }
+    // A self-cast aura comes with no caster guid (flag 0x08): its caster is
+    // the unit it is on.
+    const uint64_t caster = aura.casterGuid != 0
+        ? aura.casterGuid
+        : ((aura.flags & stock_aura::kAuraFlagSelfCast) ? unitGuid : 0);
+    const bool byPlayer = caster != 0 &&
+        (caster == owner_.getPlayerGuid() || caster == owner_.getPetGuid());
+    return stock_aura::listed(row, aura.flags, !isPreWotlk(), byPlayer);
 }
 
 bool SpellHandler::isSpellInterruptible(uint32_t spellId) const {

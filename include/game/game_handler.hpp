@@ -3987,6 +3987,11 @@ public:
     const std::string& getSkillLineName(uint32_t skillLineId) const;
     /// Returns the DispelType for a spell (0=none,1=magic,2=curse,3=disease,4=poison,5+=other)
     uint8_t getSpellDispelType(uint32_t spellId) const;
+    /// Whether the stock client lists this aura of `unitGuid` in its aura
+    /// list (Wow.exe 0x72C510, stock_aura::listed): no Spell.dbc row, a
+    /// hidden attribute or a passive without an area effect is not listed,
+    /// and does not take an index.
+    bool isAuraListed(const AuraSlot& aura, uint64_t unitGuid) const;
     /// Returns true if the spell can be interrupted by abilities like Kick/Counterspell.
     /// False for spells with SPELL_ATTR_EX_NOT_INTERRUPTIBLE (attrEx bit 4 = 0x10).
     bool isSpellInterruptible(uint32_t spellId) const;
@@ -4535,6 +4540,11 @@ public:
         uint32_t attrEx4 = 0;
         uint32_t attrEx6 = 0;
         uint32_t attrEx7 = 0;
+        /// AttributesEx5 (column 9) and RequiredAuraVision (221): with
+        /// Attributes, AttributesEx, AttributesEx6 and the effects, what
+        /// decides whether an aura is listed at all (stock_aura::listed).
+        uint32_t attrEx5 = 0;
+        uint32_t requiredAuraVision = 0;
         uint32_t stackAmount = 0;
         uint32_t interruptFlags = 0;
         uint32_t auraInterruptFlags = 0;

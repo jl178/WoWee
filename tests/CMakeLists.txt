@@ -1487,6 +1487,8 @@ register_test_target(test_nameplate_stacking)
 # text and chat bubbles (docs/re/world-ui.md). Header-only.
 wowee_add_test(test_world_ui_rules SOURCES test_world_ui_rules.cpp)
 
+wowee_add_test(test_stock_aura_display SOURCES test_stock_aura_display.cpp)
+
 # ── test_combat_text_filter ──────────────────────────────────
 add_executable(test_combat_text_filter
     test_combat_text_filter.cpp

@@ -414,6 +414,9 @@ public:
     /// The SpellItemEnchantment word `offset` from Src_ItemID (see the .cpp).
     [[nodiscard]] uint32_t enchantWordNearGem(uint32_t enchantId, int offset) const;
     [[nodiscard]] uint8_t getSpellDispelType(uint32_t spellId) const;
+    /// Whether the stock client lists this aura of `unitGuid` at all
+    /// (stock_aura::listed): what UnitAura/UnitBuff count into.
+    [[nodiscard]] bool isAuraListed(const AuraSlot& aura, uint64_t unitGuid) const;
     [[nodiscard]] bool isSpellInterruptible(uint32_t spellId) const;
     [[nodiscard]] bool isSpellPassive(uint32_t spellId) const;
     [[nodiscard]] uint32_t getSpellSchoolMask(uint32_t spellId) const;

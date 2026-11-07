@@ -4927,6 +4927,11 @@ uint8_t GameHandler::getSpellDispelType(uint32_t spellId) const {
     return 0;
 }
 
+bool GameHandler::isAuraListed(const AuraSlot& aura, uint64_t unitGuid) const {
+    if (spellHandler_) return spellHandler_->isAuraListed(aura, unitGuid);
+    return !aura.isEmpty();
+}
+
 bool GameHandler::isSpellInterruptible(uint32_t spellId) const {
     if (spellHandler_) return spellHandler_->isSpellInterruptible(spellId);
     return true;

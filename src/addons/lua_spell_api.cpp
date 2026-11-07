@@ -192,12 +192,13 @@ static int lua_UnitAura(lua_State* L, bool wantBuff) {
     toLowerInPlace(uidStr);
 
     const std::vector<game::AuraSlot>* auras = nullptr;
-    if (uidStr == "player")      auras = &gh->getPlayerAuras();
-    else if (uidStr == "target") auras = &gh->getTargetAuras();
+    uint64_t unitGuid = 0;
+    if (uidStr == "player")      { auras = &gh->getPlayerAuras(); unitGuid = gh->getPlayerGuid(); }
+    else if (uidStr == "target") { auras = &gh->getTargetAuras(); unitGuid = gh->getTargetGuid(); }
     else {
         // Try party/raid/focus via GUID lookup in unitAurasCache
-        uint64_t guid = resolveUnitGuid(gh, uidStr);
-        if (guid != 0) auras = gh->getUnitAuras(guid);
+        unitGuid = resolveUnitGuid(gh, uidStr);
+        if (unitGuid != 0) auras = gh->getUnitAuras(unitGuid);
     }
     if (!auras) { return luaReturnNil(L); }
 
@@ -220,6 +221,11 @@ static int lua_UnitAura(lua_State* L, bool wantBuff) {
         if (aura.isEmpty() || aura.spellId == 0) continue;
         bool isDebuff = (aura.flags & 0x80) != 0;
         if (wantBuff ? isDebuff : !isDebuff) continue;
+        // Only what the stock client lists (Wow.exe 0x72C510): an aura with
+        // no Spell.dbc row - a realm's own spell - or one its row hides is
+        // not there at all and takes no index, rather than an "Unknown" with
+        // no icon.
+        if (!gh->isAuraListed(aura, unitGuid)) continue;
         if (dispellableOnly &&
             !classCanDispel(playerClass, gh->getSpellDispelType(aura.spellId))) {
             continue;
@@ -228,20 +234,6 @@ static int lua_UnitAura(lua_State* L, bool wantBuff) {
         if (found == index) {
             // Return: name, rank, icon, count, debuffType, duration, expirationTime, ...spellId
             std::string name = gh->getSpellName(aura.spellId);
-            if (name.empty()) {
-                // An aura this client's Spell.dbc has no row for draws as
-                // "Unknown" with no icon, and nothing said which one it was.
-                // A realm's own spells are the usual cause - a server can put
-                // any id on a unit, and only a patched client knows its name.
-                static std::set<uint32_t> saidNoName;
-                if (saidNoName.insert(aura.spellId).second) {
-                    LOG_WARNING("Aura spell ", aura.spellId, " on ", uidStr,
-                                " has no Spell.dbc row, so it shows as 'Unknown' with no "
-                                "icon (", (aura.flags & 0x80) ? "debuff" : "buff",
-                                ", flags 0x", std::hex, static_cast<int>(aura.flags), std::dec,
-                                ", caster 0x", std::hex, aura.casterGuid, std::dec, ")");
-                }
-            }
             lua_pushstring(L, name.empty() ? "Unknown" : name.c_str()); // name
             lua_pushstring(L, "");           // rank
             std::string iconPath = gh->getSpellIconPath(aura.spellId);
@@ -378,6 +370,7 @@ static int lua_GetPlayerBuff(lua_State* L) {
             if (aura.isEmpty()) continue;
             const bool isDebuff = (aura.flags & 0x80) != 0;
             if (isDebuff != harmful) continue;
+            if (!gh->isAuraListed(aura, gh->getPlayerGuid())) continue;
             if (seen++ != wanted) continue;
             lua_pushnumber(L, static_cast<double>(i));
             // A buff with no duration is one the player dismisses rather than
@@ -1332,6 +1325,8 @@ static int lua_CancelUnitBuff(lua_State* L) {
     for (const auto& a : auras) {
         if (a.isEmpty()) continue;
         if ((a.flags & 0x80) != 0) continue;   // debuffs are not cancellable
+        // The index is UnitBuff's, which counts only listed auras.
+        if (!gh->isAuraListed(a, gh->getPlayerGuid())) continue;
         if (++buffCount == index) { gh->cancelAura(a.spellId); return 0; }
     }
     return 0;
