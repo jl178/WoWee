@@ -98,6 +98,12 @@ public:
     /// The camera is below the surface. Fades the underwater loop in or out.
     void setSubmerged(bool submerged);
 
+    /// "Rain heard indoors" (an enhancement, docs/enhancements-plan.md E30):
+    /// the weather's own loop kept on under a roof, at `volume`, alongside
+    /// the room's ambience. An empty path fades it out. The stock client
+    /// drops the weather's loop indoors (slot 8 is skipped) and plays none.
+    void setRoofRain(const std::string& path, float volume);
+
     // Time of day control (0-24 hours)
     void setGameTime(float hours);
 
@@ -243,6 +249,9 @@ private:
     uint32_t underwaterLoopId_ = 0;
     bool underwaterLoopTried_ = false;
     bool submerged_ = false;
+    std::string roofRainPath_;
+    float roofRainVolume_ = 0.0f;
+    uint32_t roofRainId_ = 0;
     void updateBellTolls(float deltaTime);
     bool loadSound(const std::string& path, AmbientSample& sample, pipeline::AssetManager* assets);
 

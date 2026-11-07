@@ -108,6 +108,42 @@ struct Enhancements {
     /// E15). Stock water lights nothing beneath it.
     bool  caustics = false;
 
+    // ---- Weather (the "Enhancements: Weather" page; weather_fx.hpp) -------
+    /// How much rain, snow and sand to draw, as a multiple of the stock count:
+    /// 1 is stock, 2.5 the most. The mist sheets and splashes follow on the
+    /// square root.
+    float weatherIntensity = 1.0f;
+    /// Raindrops of every size, most fine, a few heavy on longer streaks;
+    /// splashes on the move and further out (Weather::Style::variedRain).
+    bool  variedRain = false;
+    /// Flakes from a speck to a clump that turn as they fall and ride slow
+    /// eddies (Weather::Style::softSnow).
+    bool  softSnow = false;
+    /// Distant sheets of rain, snow or dust in the fog colour, as the stock
+    /// mist (SnowMist01, past half the weather's level) which Wowee did not
+    /// draw (Weather::Style::mistSheets).
+    bool  weatherSheets = false;
+    /// Snow settles on the upward faces of the ground and outside walls over
+    /// a few minutes of snowfall, and melts slowly after (wet_surface.glsli).
+    bool  snowCover = false;
+    /// Lightning lights the land in a thunderstorm and its thunder follows
+    /// at the speed of sound.
+    bool  stormLightning = false;
+    /// The server's sandstorms (Weather.dbc EffectType 3) blow grains and
+    /// dust and close the fog in. Stock Wowee draws nothing for them.
+    bool  sandstorms = false;
+    /// A breath of mist from players and creatures near the camera in the
+    /// snowfields, on cold nights, and in snow.
+    bool  coldBreath = false;
+    /// Fireflies drift and glow in woods and meadows at night.
+    bool  fireflies = false;
+    /// The rain is heard faintly under a roof instead of not at all (the
+    /// stock ambience drops the weather's loop indoors).
+    bool  rainIndoors = false;
+    /// A client-only weather to look at the rows with, in place of the
+    /// server's (weather_fx::previewWeather): 0 off. Never sent.
+    int   weatherPreview = 0;
+
     // ---- Motion ------------------------------------------------------------
     /// How hard the wind moves trees and cloth. 0 is stock: nothing sways.
     float foliageWind = 0.0f;

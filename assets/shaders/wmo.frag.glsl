@@ -411,6 +411,11 @@ void main() {
     // or with the setting off.
     float wet = (lightModeA == 1 && lightModeB < 0) ? wetSurfaceAmount(vertexNormal) : 0.0;
     vec3 albedo = wet > 0.0 ? wetSurfaceAlbedo(texColor.rgb, wet) : texColor.rgb;
+    // Settled snow on roofs and paving, outdoor-lit surfaces only, as the wet.
+    if (localLightTileScale.w > 0.0 && lightModeA == 1 && lightModeB < 0) {
+        float snowed = snowCoverAmount(vertexNormal, albedo, FragPos);
+        if (snowed > 0.0) albedo = snowCoverAlbedo(albedo, snowed);
+    }
     vec3 result = albedo * light;
     // MapObjEnv adds texture alpha times the env map, MapObjEnvMetal texture
     // colour times its alpha times the env map; neither lit.

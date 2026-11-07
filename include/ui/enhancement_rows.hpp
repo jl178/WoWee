@@ -64,6 +64,7 @@ using rendering::Enhancements;
 inline constexpr const char* kEnhPage      = "Enhancements";
 inline constexpr const char* kEnhPageSky   = "Enhancements: Sky";
 inline constexpr const char* kEnhPageWater = "Enhancements: Motion";
+inline constexpr const char* kEnhPageWeather = "Enhancements: Weather";
 
 inline constexpr EnhancementRow kEnhancementRows[] = {
     // ------------------------------------------------------- Light and shadow
@@ -314,13 +315,6 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "shoreline_foam",
      .controls = "the scene depth copy and the foam term in water.frag",
      .asBool = &Enhancements::shorelineFoam},
-    {.key = "wetground", .label = "Wet ground in rain", .kind = SettingKind::Bool,
-     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
-     .tooltip = "Ground and outside walls darken and catch a faint sheen while\n"
-                "it rains, and dry off slowly after. Never indoors.",
-     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "wet_ground",
-     .controls = "the wet factor (rtParams.w) and wet_surface.glsli",
-     .asBool = &Enhancements::wetGround},
     {.key = "watersplashes", .label = "Splashes and wakes", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
      .tooltip = "Spray and froth where you swim or wade, and bubbles under\n"
@@ -343,28 +337,6 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "water_reflections",
      .controls = "the reflection sky draw and its term in water.frag",
      .asBool = &Enhancements::waterReflections},
-    {.key = "rainripples", .label = "Rain ripples", .kind = SettingKind::Bool,
-     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
-     .tooltip = "While it rains, drops ring the surface of lakes and rivers and\n"
-                "the puddled ground, harder in a downpour. The original rain\n"
-                "leaves the water as it was.",
-     // Measured in docs/enhancements-plan.md (E5): nothing while dry - the
-     // shaders skip the block on a zero strength - and a few tenths of a
-     // millisecond on water-heavy views in rain.
-     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "rain_ripples",
-     .controls = "the rain strength (rtParams.z, the water push) and the ring "
-                 "block in water.frag and wet_surface.glsli; zero while dry",
-     .asBool = &Enhancements::rainRipples},
-    {.key = "weatherwind", .label = "Rain and snow in the wind", .kind = SettingKind::Bool,
-     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
-     .tooltip = "Rain slants and snow drifts with the same wind that moves the\n"
-                "trees, harder in a storm and in the gusts that roll across the\n"
-                "land. Off is the original's fixed drift. Needs foliage wind.",
-     // Measured in docs/enhancements-plan.md (E19).
-     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "weather_wind",
-     .controls = "Weather::setWind: the wind added to each drop and flake as it "
-                 "moves; off adds nothing",
-     .asBool = &Enhancements::weatherWind},
 
     // ----------------------------------------------------------------- Motion
     {.key = "foliagewind", .label = "Foliage and cloth wind", .kind = SettingKind::Float,
@@ -508,6 +480,149 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "after the scene that reads its depth) and the soft particle "
                  "pipelines; off draws every particle in the scene pass as stock",
      .asBool = &Enhancements::softParticles},
+
+    // ---------------------------------------------------------------- Weather
+    // The "Enhancements: Weather" page (docs/enhancements-plan.md E23-E31,
+    // rendering/weather_fx.hpp for the rules). The first three moved here
+    // from the Motion page; their keys did not change.
+    {.key = "weatherintensity", .label = "Weather intensity", .kind = SettingKind::Float,
+     .minValue = 1.0f, .maxValue = 2.5f, .step = 0.25f, .category = kEnhPageWeather,
+     .section = "Rain and snow",
+     .tooltip = "How heavily rain, snow and sand fall, against the original's\n"
+                "count. 1 is the original; higher fills the air more, and the\n"
+                "distant sheets and splashes a little more with it. The server\n"
+                "still decides when it rains and how hard.",
+     .choices = "", .stockValue = 1, .recommendedValue = 1.5f, .saveKey = "weather_intensity",
+     .controls = "Weather::Style::intensity: the drop/flake target times countScale (1-2.5) "
+                 "and the splash cap; the vertex buffer grows on first need",
+     .asFloat = &Enhancements::weatherIntensity},
+    {.key = "variedrain", .label = "Varied raindrops", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "",
+     .tooltip = "Raindrops of every size: most fine, a few heavy ones falling\n"
+                "faster on longer streaks, and splashes on the ground and roofs\n"
+                "while you move and further out. The original's drops are all\n"
+                "alike and splash only near you while you stand still.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "varied_rain",
+     .controls = "Weather::Style::variedRain: per-drop size, streak length and opacity "
+                 "at spawn; the splash gate and radius",
+     .asBool = &Enhancements::variedRain},
+    {.key = "softsnow", .label = "Softer snow", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "",
+     .tooltip = "Snowflakes from a speck to a clump that turn as they fall and\n"
+                "ride slow eddies. The original's flakes are all one size and\n"
+                "sway on their own.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "soft_snow",
+     .controls = "Weather::Style::softSnow: per-flake size, opacity and spin at spawn; "
+                 "a shared eddy field in the update",
+     .asBool = &Enhancements::softSnow},
+    {.key = "weathersheets", .label = "Distant rain and snow", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "",
+     .tooltip = "Sheets of rain, snow or blowing dust drift across the middle\n"
+                "distance in a heavy fall, in the colour of the fog. The\n"
+                "original game draws a mist like this; it was missing here.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "weather_sheets",
+     .controls = "Weather::Style::mistSheets: up to 40 camera-facing SnowMist01 sheets "
+                 "16-70 yd out past half the weather's level (sand: any level), "
+                 "loaded on first use",
+     .asBool = &Enhancements::weatherSheets},
+    {.key = "wetground", .label = "Wet ground in rain", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "",
+     .tooltip = "Ground and outside walls darken and catch a faint sheen while\n"
+                "it rains, and dry off slowly after. Never indoors.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "wet_ground",
+     .controls = "the wet factor (rtParams.w) and wet_surface.glsli",
+     .asBool = &Enhancements::wetGround},
+    {.key = "rainripples", .label = "Rain ripples", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "",
+     .tooltip = "While it rains, drops ring the surface of lakes and rivers and\n"
+                "the puddled ground, harder in a downpour. The original rain\n"
+                "leaves the water as it was.",
+     // Measured in docs/enhancements-plan.md (E5): nothing while dry - the
+     // shaders skip the block on a zero strength - and a few tenths of a
+     // millisecond on water-heavy views in rain.
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "rain_ripples",
+     .controls = "the rain strength (rtParams.z, the water push) and the ring "
+                 "block in water.frag and wet_surface.glsli; zero while dry",
+     .asBool = &Enhancements::rainRipples},
+    {.key = "weatherwind", .label = "Rain and snow in the wind", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "",
+     .tooltip = "Rain slants and snow drifts with the same wind that moves the\n"
+                "trees, harder in a storm and in the gusts that roll across the\n"
+                "land. Off is the original's fixed drift. Needs foliage wind.",
+     // Measured in docs/enhancements-plan.md (E19).
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "weather_wind",
+     .controls = "Weather::setWind: the wind added to each drop and flake as it "
+                 "moves; off adds nothing",
+     .asBool = &Enhancements::weatherWind},
+    {.key = "snowcover", .label = "Snow settles", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "",
+     .tooltip = "While it snows, a thin white settles on the ground and on\n"
+                "roofs and ledges over a few minutes, and melts away slowly\n"
+                "after. Already white ground stays as it is. Never indoors.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "snow_cover",
+     .controls = "the snow cover (localLightTileScale.w), eased over minutes, and "
+                 "snowCover* in wet_surface.glsli (terrain, exterior WMO groups); "
+                 "zero without snow",
+     .asBool = &Enhancements::snowCover},
+    {.key = "stormlightning", .label = "Lightning and thunder", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "Storms and the air",
+     .tooltip = "In a thunderstorm, lightning lights up the land now and then,\n"
+                "and its thunder rolls in a moment later - sooner the closer\n"
+                "the strike. The original's storms are rain alone.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "storm_lightning",
+     .controls = "a strike timer in thunderstorms only; the flash lifts the frame's "
+                 "sun, ambient and fog colours for under a second; the thunder is "
+                 "a stock Blasted Lands bolt sample, delayed by the distance",
+     .asBool = &Enhancements::stormLightning},
+    {.key = "sandstorms", .label = "Sandstorms", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "",
+     .tooltip = "When the server sends a sandstorm (Tanaris, Silithus and the\n"
+                "like), sand blows past in the wind and the haze closes in.\n"
+                "Off, this client draws nothing for one.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "sandstorms",
+     .controls = "Weather::Type::SAND (blowing grains in a low box around the eye, "
+                 "fog-coloured) and the fog pulled in by up to 40%, eased",
+     .asBool = &Enhancements::sandstorms},
+    {.key = "coldbreath", .label = "Breath in the cold", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "",
+     .tooltip = "Players and creatures near you breathe a little mist in the\n"
+                "snowfields (Northrend, Dun Morogh, Winterspring), on cold\n"
+                "nights in Grizzly Hills, and wherever it snows.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "cold_breath",
+     .controls = "a second FootfallDust (built on first use) fed a puff at each nearby "
+                 "unit's breath attachment every few seconds in cold air; nothing "
+                 "elsewhere",
+     .asBool = &Enhancements::coldBreath},
+    {.key = "fireflies", .label = "Fireflies at night", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "",
+     .tooltip = "Fireflies drift and glow among the trees and meadows of the\n"
+                "green zones at night, out of doors and out of the rain. Not\n"
+                "in the original game.",
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "fireflies",
+     .controls = "up to 40 additive glows within 16 yd in the weather's draw, night "
+                 "only, in the zones weather_fx::climateForZone marks",
+     .asBool = &Enhancements::fireflies},
+    {.key = "rainindoors", .label = "Rain heard indoors", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWeather, .section = "",
+     .tooltip = "Under a roof you still hear the rain or the storm outside,\n"
+                "faintly. The original falls silent on the weather the moment\n"
+                "you step in.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "rain_indoors",
+     .controls = "AmbientSoundManager's roof loop: the weather's own loop at a quarter "
+                 "of its level while the room drops it",
+     .asBool = &Enhancements::rainIndoors},
+    {.key = "weatherpreview", .label = "Preview weather (this client only)", .kind = SettingKind::Enum,
+     .minValue = 0, .maxValue = 9, .step = 1, .category = kEnhPageWeather, .section = "Preview",
+     .tooltip = "Shows a weather here, on this client only, to see the options\n"
+                "above without waiting for it. The server and everyone else\n"
+                "keep the real weather. Set it back to Off when done.",
+     .choices = "Off (the server's weather)|Light rain|Rain|Heavy rain|Thunderstorm|"
+                "Light snow|Snow|Heavy snow|Light sandstorm|Sandstorm",
+     .stockValue = 0, .recommendedValue = 0, .saveKey = "weather_preview",
+     .controls = "Renderer::effectiveWeather: the preview's Weather.dbc row and grade "
+                 "in place of SMSG_WEATHER's for the picture, the storm light and the "
+                 "weather loop; nothing is sent",
+     .asInt = &Enhancements::weatherPreview},
 
     // ------------------------------------------------------------ Experimental
     {.key = "grassenabled", .label = "Grass (experimental)", .kind = SettingKind::Bool,

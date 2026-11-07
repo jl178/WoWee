@@ -1019,6 +1019,7 @@ set(WOWEE_SOURCES
     src/rendering/world_map/layers/subzone_tooltip_layer.cpp
     src/rendering/swim_effects.cpp
     src/rendering/footfall_dust.cpp
+    src/rendering/renderer_weather_fx.cpp
     src/rendering/levelup_effect.cpp
     src/rendering/spell_visual_system.cpp
     src/rendering/spell_chain_effect.cpp
@@ -1208,6 +1209,7 @@ set(WOWEE_HEADERS
     include/rendering/clouds.hpp
     include/rendering/lens_flare.hpp
     include/rendering/weather.hpp
+    include/rendering/weather_fx.hpp
     include/rendering/lightning.hpp
     include/rendering/swim_effects.hpp
     include/rendering/world_map.hpp

@@ -68,6 +68,17 @@ E14 contact shadows (`contactshadows`), each a row, stock off, both
 recommended on. Costs in 3.14, status under each entry; `test_phase2_light`
 holds the probe bake and lookup and the contact ray's limits.
 
+Done (2026-11-06, weather): an "Enhancements: Weather" page - E23 weather
+intensity (`weatherintensity`, a 1-2.5 slider, recommended 1.5), E24 varied
+raindrops (`variedrain`), E25 softer snow (`softsnow`), E26 distant rain and
+snow (`weathersheets`, the stock mist Wowee lacked), E6 snow settles
+(`snowcover`), E27 lightning and thunder (`stormlightning`), E28 sandstorms
+(`sandstorms`), E29 breath in the cold (`coldbreath`), E22 fireflies
+(`fireflies`, off), E30 rain heard indoors (`rainindoors`) and E31 a
+client-only weather preview (`weatherpreview`). Each stock off; costs in
+3.17, rules in `rendering/weather_fx.hpp` and `test_weather_fx`, further
+ideas after E31.
+
 ## 1. Goal and rules
 
 The client now draws close to stock 3.3.5a (build 12340). Phase 2 adds
@@ -121,7 +132,7 @@ The reasons follow the table.
 | 12 | Sky reflection on water | `water.frag`, reflection pass | `waterreflections` | off | **not set** | off; stays an option (Jered, Nov 6) |
 | 13 | Swim spray, wake froth, bubbles, reed midges | `swim_effects.cpp`, `water_renderer` wake | `watersplashes` | off | **not set** | split: wakes and spray on, midges off (note) |
 | 14 | GPU grass blades | `grass_renderer.cpp` | `grassenabled` + 3 sliders | off | off | off (experimental) |
-| 15 | Ray traced sun shadow, occlusion, bounce | `rt_lighting.cpp`, `rt_*.comp` | `raytracedlighting` | off | **not set** | off |
+| 15 | Ray traced sun shadow, occlusion, bounce | `rt_lighting.cpp`, `rt_*.comp` | `raytracedlighting` | off | **not set** | off; stays off on integrated GPUs without ray tracing hardware (3.16) |
 | 16 | Fog thickness and fog sky blend | `LightingManager` | `fogstrength`, `fogskyblend` | 1, 0 | 1, 0 | 1, 0 (stock) |
 | 17 | Grass/clutter density above 100% | terrain manager | `groundclutter` | 70 | 100 | stock value (note) |
 | 18 | View distance beyond the stock far clip (stock UI 177-1277, clamped to 791.7 on maps below 530) | terrain, M2, WMO | `viewdistance` | 1900 | 1900 | 1900, with the WDL horizon (E11); a 400-2400 slider under every preset (Jered, Nov 6) |
@@ -1063,6 +1074,148 @@ tint), `L3base_*` and `L3new_*` (before and after, the clock frozen),
 `BA_*.png` (before | after | shadows off, side by side), `k_dusk1.png` (the
 mist with shadows on and off at dusk).
 
+### 3.16 Ray traced sun shadows on the Iris Xe (2026-11-06)
+
+Jered turned on Ray traced lighting (Sun shadows) and found the shadows
+terrible, the client very slow, and things in the distance black. His
+client: the Iris Xe, 2560x1080, FSR2 at native scale (jitter every frame),
+the 500 yd shadow distance, 2400 yd view distance. Reproduced with his
+`settings.cfg` in a test home (scratch `rt/`), RT off and on, in Goldshire,
+the Trade District, an Elwynn forest path and Kharanos looking at Dun
+Morogh's mountains (`rt/run/base1_*`, before; `new3_*`, after;
+`rt/run/sbs/` side by side).
+
+**Black.** Every WMO wall the rays found shadowed was pure black, and so
+were whole buildings and trees in the distance (`base1_gs1_rt1.png`,
+`base1_gs2_rt1.png`). Two causes:
+
+- `rtShadow` took the traced 0..1 as the shadow, where each surface shader
+  had mixed the shadow map's 0..1 toward 1 by the shadow strength first
+  (Light.dbc's shadow band x the Shadow darkness setting; the stock
+  0.7..1 for WMOs). The WMO shader scales its *whole* colour by the shadow
+  (the stock shadow-map programs do), so a traced 0 was black; on terrain
+  and doodads it was a shadow far darker than the map's. `rtShadow` now
+  takes the shader's strength (`rt_lighting.glsli`; `wmo`, `m2`,
+  `character`, `terrain.frag`), so a traced shadow is exactly as dark as a
+  mapped one.
+- Far surfaces were traced at all. With a 0.5 yd near plane and 24 bits of
+  depth, a surface 1000 yd out is placed to about 0.1 yd, 2000 yd out to
+  half a yard; the normal rebuilt from neighbouring depths turns to noise,
+  the ray starts under its own surface (the distance was also kept in a
+  half float, a yard per step past 2048), and the surface reads shadowed.
+  The trace now covers 100 yd from the camera (`kTraceRange`), the
+  surfaces fade from the traced shadow to the map's over the last quarter
+  (`rtParams.y`), and pixels past it cost nothing. The WDL horizon was
+  never traced (its shaders do not read the result), and neither is
+  anything else out there now.
+
+**Looks terrible.** Beyond the black: the trace gated the sun on the
+normal rebuilt from depth (`dot(n, L) > 0`), which on leaf cards, grass
+and edges is noise, so a random part of the foliage went into shadow each
+frame. Now only what plainly faces away (n.L below -0.25) skips the ray;
+the rest is decided by the ray, which crosses a back-facing surface on its
+own, and a sun-facing start is lifted toward the sun so grazing rays clear
+their triangles. The temporal filter and the 3-pass a-trous filter were
+already there and work under FSR2's jitter (the history test is by
+distance and normal, not by pixel). After the fixes (`new3_*`), the traced
+shadow differs from the shadow map's mostly in contact detail - under a
+window ledge, the barrels on Goldshire's inn steps, the eaves - and is
+otherwise the same picture (mean brightness within 1-4 of RT off in every
+view); nothing is black and the distance is untouched.
+
+**Slow.** See performance.md, "Ray traced lighting on the Iris Xe". The
+scene held the whole loaded world (60k meshes, 18 million triangles),
+built into BVHs at 150k triangles a frame - 50-100 ms frames for tens of
+seconds after switching on - and every placement was in a top level
+rebuilt on the CPU whenever any of them changed; the M2 sync hashed all
+70k placements a frame (7.4 ms); shadow rays were 1500 yd. Now
+`RtScene::setFocus` keeps 350 yd around the camera (`RtFocus`, unit
+tested in `test_rt_bvh.cpp`), builds only the meshes placed there,
+ignores changes outside it, and the M2 sync drops far placements before
+any lookup; rays are 250 yd, the shadow map covering far casters.
+
+**Cost** (Goldshire's road view, 1251x986 test window - the compositor
+would not give the test client 2560x1080 - Jered's settings, the iGPU at
+1.0-1.1 GHz with another client and compiles on the machine, so read the
+GPU figures to +-30%):
+
+| | Before | After |
+|---|---|---|
+| `rt_lighting` GPU pass | 5.7-6.8 ms | 8.5 ms |
+| CPU, M2/WMO sync | 7.4 ms | 2.6 ms |
+| CPU, scene upkeep, first seconds after switching on | 52-62 ms a frame, for tens of seconds | under 0.1 ms after six frames |
+| CPU, scene upkeep, steady | 3.3-4.8 ms (top level rebuilt every frame) | 0.04 ms (no rebuild with the camera still) |
+| Frame, RT off -> on | 24 -> 36-38 ms | 24-27 -> 30-34 ms |
+
+The GPU pass is dearer than before because the pixels the old gate
+skipped (and wrongly shadowed) now trace. At 2560x1080, 2.2 times the
+pixels, the pass alone is about 19 ms - six times the whole set's budget.
+
+**Decision.** Even with the CPU side fixed, the trace on this iGPU costs
+several times the whole set's 3 ms budget at Jered's window and gives a
+picture about like the improved shadow map's (3.15). So without ray
+tracing hardware on an integrated GPU the row **stays off**:
+`Renderer::setRtLightingMode` refuses it there (one log line;
+`WOWEE_RT_ALLOW_SOFTWARE=1` overrides) and the tooltip says so. It stays
+off in Original and in the recommended set (both 0); on a discrete GPU,
+or one with ray queries, it is still offered as highly experimental.
+
+### 3.17 The weather page (2026-11-06)
+
+E23-E31 and E6 (snow settling), on the new "Enhancements: Weather" page
+(`kEnhPageWeather`; `wetground`, `rainripples` and `weatherwind` moved
+there, keys unchanged). Measured with `WOWEE_ENHANCE_AB=<row>:4` and
+`WOWEE_FRAME_PROFILE=1`, the weather forced with the new preview row
+(`weatherpreview`) since the lab server sent none, everything else at the
+recommended set, seven to twenty-three adjacent on/off pairs per row, the
+median of the pair differences. The window was the tiling compositor's
+1251x986 (a client cannot size itself there, and full screen would have
+taken Jered's 2560x1080 display while he played); the GPU numbers scale
+roughly with pixels, x2.2 at 2560x1080 before FSR2's lower internal
+resolution takes most of that back. The machine was loaded (load average
+15-20: Jered's client and other agents' builds), the frame vsync-bound at
+16.7 ms, so GPU differences under about 0.3 ms are noise; "wx cpu" is the
+main-thread stage `update/pre/sky+weather+water+fx`, which is steady.
+
+| Row | Place, weather | GPU ms (median, range) | wx cpu ms |
+|---|---|---|---|
+| `weatherintensity` 1.5 vs 1 | Goldshire, heavy rain | +0.02 (-0.04..+0.11) | +0.17 |
+| `weatherintensity` | Stranglethorn, thunderstorm | ~0 (-1.5..0) | +0.17 |
+| `weatherintensity` | Kharanos, heavy snow | +0.12 (-0.37..+0.87) | +0.22 |
+| `variedrain` | Goldshire, heavy rain | +0.01 | +0.00 |
+| `softsnow` | Kharanos / Grizzly Hills, heavy snow | +0.18 / +0.07 (noisy) | +0.18 / +0.21 |
+| `weathersheets` | Goldshire / Stranglethorn / Kharanos / Silithus | +0.06 / ~0 / ~0 / ~0 | +0.01 |
+| `snowcover` (one-octave noise) | Grizzly Hills, heavy snow, brown ground | ~0 (-0.20, n23, -4.4..+2.2) | +0.01 |
+| `stormlightning` | Stranglethorn, thunderstorm | ~0 | ~0 |
+| `sandstorms` | Silithus, sandstorm | +0.13 (-0.45..+0.52) | +0.11 |
+| `coldbreath` | Kharanos, 8-24 units near | +0.10 (noisy) | ~0 |
+| `fireflies` (recommended off) | Goldshire at 23:00 | +0.03 | +0.01 |
+| `rainindoors` | Goldshire (outdoors: nothing to do) | ~0 | ~0 |
+
+Every recommended-on row is under 0.3 ms on both sides; the slider's CPU
+(about 0.17-0.22 ms at 1.5, the half again as many drops built on the CPU)
+and soft snow's turning flakes (about 0.2 ms) are the largest. The first
+snow cover (two noise octaves) read +0.2 to +1.0 ms on a full screen of
+ground; one octave reads nothing measurable, and is what ships. No row costs
+anything while dry: the style only acts on particles that exist, the snow
+cover and haze are 0, and the lightning's timer, the breath's scan and the
+fireflies are skipped outside their weather, climate and hour.
+
+Shots (scratch `wx/shots/`): `a_*`, `b_*`, `c_*` are `<place>_stock`
+(every weather row off, the preview's weather) and `<place>_enh` (the rows
+on), with `_seq1-3` 0.12 s apart: Goldshire heavy rain (`a_goldshire_*`),
+Stranglethorn thunderstorm (`b_stv_*`), Grizzly Hills rain (`b_grizzly_*`)
+and heavy snow with the cover after 90 s (`c_grizzlysnow_*`, `b_` has the
+first, too strong, cover), Kharanos (`a_dunmorogh_*`), Winterspring
+(`a_winterspring_*`), the Storm Peaks (`c_stormpeaks_*`), Tanaris and
+Silithus sandstorms (`c_tanaris_*`, `a_silithus_*`), Goldshire at night with
+fireflies (`c_elwynnnight_*`). Thunder was seen in the sound trace
+(`wx/logs/shots1/sound.txt`: the crack 0.7 s and a rumble 2.6 s after
+their flashes). Seen on the way: in Gadgetzan and at K3 the weather is
+switched off (`Renderer`'s `insideWmoArea` puts the camera "inside" those
+towns' WMO areas out of doors), so neither the stock rain nor these rows
+draw there; not changed here.
+
 ## 4. Proposed enhancements
 
 Ranked by feel gained over cost and risk. "Cost" is implementation effort
@@ -1092,7 +1245,16 @@ the classic look or the stock behaviour.
 | 19 | E16 | Cliff texture stretch fix | medium | M | high | off by cost (3.13) |
 | 20 | E18 | Highlight roll-off (on the glow composite) | low | S | low | on (3.13) |
 | 21 | E17 | Upscaled texture pack | varies | M | high | off |
-| 22 | E22 | Ambient life from stock assets | low | M | high | off |
+| 22 | E22 | Ambient life from stock assets (fireflies) | low | M | high | off |
+| 23 | E23 | Weather intensity | medium | S | low | 1.5 |
+| 24 | E24 | Varied raindrops | medium | S | low | on |
+| 25 | E25 | Softer snow | medium | S | low | on |
+| 26 | E26 | Distant rain and snow (the stock mist) | medium | S | low | on |
+| 27 | E27 | Lightning and thunder | medium | S | medium | on |
+| 28 | E28 | Sandstorms | medium | S | low | on |
+| 29 | E29 | Breath in the cold | low | S | medium | on |
+| 30 | E30 | Rain heard indoors | low | S | low | on |
+| 31 | E31 | Weather preview (client only) | tool | S | none | off |
 
 Each entry below gives what it looks like, the engine area, how off stays
 stock, the budget, and how to verify.
@@ -1334,6 +1496,19 @@ stock, the budget, and how to verify.
 - **Budget.** Same as wet ground: under 0.1 ms.
 - **Verify.** Dun Morogh edges and Grizzly Hills in server snow. Make sure
   Winterspring and Storm Peaks do not change (already white).
+- **Status (2026-11-06): done, row `snowcover` "Snow settles", on the
+  weather page (E23-E31), recommended on.** Not the wet path's factor but
+  its own: `weather_fx::snowCoverTarget` (0.45-1 by the stock particle level
+  while it snows) eased by `easeSnowCover` (time constant 90 s settling,
+  200 s melting; a minute of heavy snow is about half), carried in
+  `localLightTileScale.w` (free; 0 in the character preview's block),
+  read by `snowCoverAmount`/`snowCoverAlbedo` in `wet_surface.glsli`:
+  faces with `normal.z` past 0.55-0.9, albedo luminance under 0.5-0.75
+  (so a snowfield's own texture is left alone), spreading from patches a
+  two-octave noise picks as the cover grows, at most 70% toward a cold
+  off-white that the scene then lights. Terrain and outdoor-lit WMO groups
+  only, as the wet ground. Off: the factor is 0 and both shaders skip on
+  the uniform. Cost: 3.17.
 
 ### E7. Capes, tails and hair: secondary motion
 
@@ -2046,6 +2221,177 @@ Done (2026-11-04): the row `highlightrolloff`, "Soft highlights"; costs in
 - **Off = stock.** Nothing spawned.
 - **Risk.** High: this adds content to zones, which is the line between
   "enhanced" and "different". Default off. Do last, or not at all.
+- **Status (2026-11-06): fireflies only, row `fireflies` "Fireflies at
+  night", recommended off (E22's own risk).** Not a stock model: up to 40
+  additive glows (SnowFlake01 tinted yellow-green) within 16 yd, each
+  wandering about a spot 0.4-2.4 yd over the ground and pulsing on its own
+  clock; only in the zones `weather_fx::climateForZone` marks as woods,
+  meadows or marsh, between 19:30-21:00 dusk and 5:00-6:30 dawn, out of
+  doors, out of the water and with nothing falling. Drawn in the weather's
+  pass (Weather::updateFireflies). Moths at lamps and anything placed per
+  doodad were not done.
+
+### E23. Weather intensity
+
+- **Looks like.** A slider, 1 (stock) to 2.5: more drops, flakes or grains
+  in the air for the same server weather, the mist sheets and splashes a
+  little more (on the square root). It never makes weather where the server
+  sends none, and nothing falls below the stock quarter grade.
+- **Engine.** `Weather::Style::intensity`; `weather_fx::particleTarget` is
+  the stock count expression times `countScale`. The vertex buffers grow on
+  first need (`Weather::ensureVertexCapacity`, the old ones retired after
+  the frames in flight).
+- **Off = stock.** At 1 the target is the stock expression, bit for bit
+  (`test_weather_fx`).
+- **Status (2026-11-06): done, row `weatherintensity`, recommended 1.5.**
+  Cost: 3.17.
+
+### E24. Varied raindrops
+
+- **Looks like.** Most drops fine and faint, a few heavy ones falling faster
+  on longer, wider streaks; splashes on the ground and roofs whether or not
+  the camera moves, out to 30 yd.
+- **Engine.** `Weather::Style::variedRain`: at spawn a drop's size (0.55 +
+  r^3), its speed (0.85 + 0.2 size), its streak length and opacity; splash
+  size follows the drop. Stock: one size band, splashes within 22 yd and
+  only while the camera's averaged speed squared is under 2 (0xa4040c).
+- **Status (2026-11-06): done, row `variedrain`, recommended on.** The
+  splashes land where the ground query lands them: the terrain and WMO
+  floors and roofs, not M2 doodads (rocks, M2 houses). Cost: 3.17.
+
+### E25. Softer snow
+
+- **Looks like.** Flakes from a speck to a clump (0.45-1.9 of the stock
+  size, most small), each turning slowly, riding a shared field of slow
+  eddies with a lift and drop, the large ones drifting slower.
+- **Engine.** `Weather::Style::softSnow`, at spawn and in the update; the
+  quad is turned about the view axis by its own spin.
+- **Status (2026-11-06): done, row `softsnow`, recommended on.** Cost: 3.17.
+
+### E26. Distant rain and snow (the stock mist)
+
+- **Looks like.** In a heavy fall, soft sheets of rain or snow drift across
+  the middle distance (16-70 yd) in the fog colour; in a sandstorm, low
+  dust clouds closer in.
+- **Engine.** `Weather::Style::mistSheets`: up to 40 camera-facing (about
+  the vertical) `SnowMist01.blp` sheets 12-18 yd wide and 20-34 tall,
+  standing on the ground under them, living 6-11 s with a sine fade, drifting
+  with the weather's drift and the foliage wind; alpha-blended in Light.dbc's
+  fog colour, faded by the stock mist rule (none inside 6 yd, all past 18).
+  Count by `weather_fx::mistSheetTarget`: rain and snow past half their
+  level, as the stock spawn rate (level - 0.5) x 2 (world-lighting.md 8),
+  sand at any level.
+- **Off = stock Wowee.** No sheet and the texture not loaded. Note: the
+  stock client does draw a mist (`SnowMist01`, 0x78c420, 0x786e10) that
+  Wowee never drew (world-lighting.md "Gap table": "not done"); this row is
+  that mist with Wowee's sizes and lifetimes, since the stock sheets' motion
+  and life were not traced. When they are, the stock part belongs on the
+  stock path and the row should keep only what goes beyond it.
+- **Status (2026-11-06): done, row `weathersheets`, recommended on.**
+  Cost: 3.17.
+
+### E27. Lightning and thunder
+
+- **Looks like.** In a thunderstorm (Weather.dbc 86, past the quarter
+  grade), a strike every 4-36 s (by the grade): the land, the haze and the
+  units flash cold white in a stroke and a return stroke, then the thunder
+  rolls in at the speed of sound - a crack within 700 yd, one of three low
+  rumbles beyond, quieter the farther. Indoors the flash is 15%, the
+  thunder 60%.
+- **Engine.** `weather_fx` strike interval, distance (250-3000 yd, mostly
+  far), flash envelope, delay (375 yd/s) and level;
+  `Renderer::updateWeatherFx` keeps the timer and the queued thunder;
+  `applyWeatherFxLight` lifts the frame's sun, ambient and fog colours. The
+  samples are the stock `BlastedLandsLightningBolt01Stand-Bolt*.wav`
+  (the Blasted Lands strike doodads' own), played 2D in the Ambience
+  category at pitch 0.85-1.05.
+- **Off = stock.** No timer runs, nothing is added. The old `Lightning`
+  bolt renderer (U17) stays forced off: bolts across the sky read as a
+  newer game.
+- **Gaps.** The sky dome does not flash (its colours come from the sky
+  system, not the frame's light); a flash on the clouds would want the
+  sky's own params.
+- **Status (2026-11-06): done, row `stormlightning`, recommended on.**
+  Cost: 3.17.
+
+### E28. Sandstorms
+
+- **Looks like.** When the server sends a sandstorm (states 22, 41, 42),
+  fine grains blow level past the eye along the wind in a low box around
+  it, dust clouds roll by (with E26) and the fog closes in by up to 40%
+  (55% at the top of E23).
+- **Engine.** `Weather::Type::SAND` (only asked for with the row on),
+  grains as short dashes of the drop texture in the fog colour, as the
+  stock sand.bls is drawn; `weather_fx::sandFogScale` on the frame's fog
+  start and end, eased over 3 s; the foliage and cloth wind takes 1.2-1.8
+  and the volumetric mist (if on) thickens.
+- **Off = stock Wowee.** No sand. The stock client has a sand emitter
+  (0x784580, 32000 a second, 20 x 12.5 yd, sand.bls) that Wowee never
+  drew; as with E26, the stock part should move to the stock path once its
+  texture and motion are traced (Weather.dbc names no texture on the sand
+  rows).
+- **Status (2026-11-06): done, row `sandstorms`, recommended on.** Cost: 3.17.
+
+### E29. Breath in the cold
+
+- **Looks like.** Every three and a half to five seconds a small puff of
+  mist leaves the mouth of each player and creature within 32 yd and drifts
+  forward and up: always in the snowfields (Dun Morogh, Alterac,
+  Winterspring, Northrend but Sholazar), at night in Grizzly Hills, and
+  anywhere it is snowing.
+- **Engine.** A second `FootfallDust` (built on first use) fed by
+  `Renderer::updateBreath` from the units' attachment 17 (Breath; the head,
+  11, as a fallback) four times a second.
+- **Note.** The stock client has a breath of its own: the M2 event `$BTH`
+  spawns effect 3, the cold breath, at attachment 17 (0x732650, 0x6F9260;
+  world-lighting.md "Drunk"). What makes a place cold for it was not traced
+  and Wowee does not play it. Once it is, this row should step aside where
+  the stock breath shows.
+- **Status (2026-11-06): done, row `coldbreath`, recommended on.** Cost: 3.17.
+
+### E30. Rain heard indoors
+
+- **Looks like.** Inside a building whose room drops the weather's loop
+  (the stock rule: the group lacks the exterior flag), the same loop goes on
+  at a quarter of its level beside the room's own.
+- **Engine.** `AudioCoordinator::updateTableAmbience` ->
+  `AmbientSoundManager::setRoofRain`, a second looped 2D sound faded in and
+  out over the stock 5 s. No low-pass: the engine has none per sound, so
+  "muffled" is only quieter.
+- **Status (2026-11-06): done, row `rainindoors`, recommended on.** Cost: 3.17.
+
+### E31. Weather preview (this client only)
+
+- **What.** A choice on the weather page - Off, light/medium/heavy rain,
+  thunderstorm, light/medium/heavy snow, light/heavy sandstorm - that this
+  client draws and sounds in place of the server's weather
+  (`Renderer::effectiveWeather`): the particles, the storm light, the
+  weather loop, everything that reads the weather. Nothing is sent; the
+  server and other players keep the real weather. Stock and recommended
+  Off; it is saved like any row, so the tooltip asks to set it back.
+- **Status (2026-11-06): done, row `weatherpreview`.**
+
+### Further weather ideas (not done)
+
+- **The stock mist and sand on the stock path** (E26, E28): trace the mist
+  sheets' life and motion (0x78c420, 0x786e10) and the sand emitter's
+  texture (0x784580) and draw them with the rows off.
+- **The stock breath** (E29): trace what makes a place cold for `$BTH`.
+- **Weather.dbc's own textures**: rows 90 and 21/83/91/96-100/108 name
+  `Particles\LeafBrown.blp`, a red rain and others; Wowee draws every rain
+  as RainDrop01. Falling leaves would then come from the data (row 90),
+  not invention.
+- **Sky flash**: hand the lightning to the sky system so the clouds light.
+- **Drips from eaves** under WMO roof edges after rain (needs the roof
+  edges; the WMO's MOPY/normals could give them).
+- **Low-pass on indoor rain and thunder** once the audio engine has a per-sound filter.
+- **Puddles that stay** a while after rain on level ground (the wet factor
+  and the ripple mask already know where).
+- **Snow on branches and M2 roofs** (m2.frag; the cover only reaches
+  terrain and WMOs).
+- **Dust motes in sunbeams** indoors, by the light shafts' volume.
+- Set aside: camera-local rain on the screen edge, distant birds, falling
+  leaves without data - each reads as a different game.
 
 ### Considered and set aside
 

@@ -17,6 +17,7 @@
 #include "rendering/pass_ablation.hpp"
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/shadow_cache.hpp"
+#include "rendering/weather_fx.hpp"
 #include "rendering/enhancements.hpp"
 #include "rendering/vk_utils.hpp"
 #include "rendering/sky_system.hpp"
@@ -678,6 +679,19 @@ private:
     /// fed this frame's dry-ground footfalls, stepped, released a few frames
     /// after it goes off.
     void updateFootfallDust(float fxDt);
+    /// The "Enhancements: Weather" rows (renderer_weather_fx.cpp,
+    /// weather_fx.hpp): the weather's style, the mist sheets' colour, the
+    /// fireflies, snow settling, lightning and its thunder, cold breath.
+    /// With every row at its stock value it does nothing and holds nothing.
+    void updateWeatherFx(float fxDt);
+    /// The client-only weather preview, or nothing (the server's weather).
+    [[nodiscard]] weather_fx::Forced weatherPreview() const;
+    /// The server's weather state and grade, or the preview's in its place.
+    void effectiveWeather(uint32_t& state, float& grade) const;
+    /// The lightning flash and the sandstorm's haze on this frame's light and
+    /// fog (updatePerFrameUBO); nothing while neither is happening.
+    void applyWeatherFxLight();
+    void updateBreath(float fxDt, uint8_t climate, bool snowing, float hours);
     /// The "Corpses settle to the slope" and "Feet on the ground" enhancements
     /// (CharacterRenderer::updateCorpseSettle, updateFootPlacement), which
     /// read the same floors.
@@ -751,6 +765,21 @@ private:
     bool wetGroundEnabled_ = true;        // the "Wet ground in rain" setting
     float wetness_ = 0.0f;                // 0 dry .. 1 soaked, eased (WetGround); rtParams.w
     float rainRipple_ = 0.0f;             // rain ripples: how hard it rains, eased (rain_ripples.hpp); rtParams.z
+    // The weather rows (updateWeatherFx); all at rest with the rows off.
+    float snowCover_ = 0.0f;              // "Snow settles": 0 bare .. 1, eased; localLightTileScale.w
+    float sandHaze_ = 0.0f;               // "Sandstorms": the haze's level, eased
+    float lightningFlash_ = 0.0f;         // this frame's flash, 0-1
+    float strikeClock_ = -1.0f;           // seconds since the last strike, <0 none
+    float strikeStrength_ = 0.0f;
+    float strikeSeed_ = 0.0f;
+    float nextStrikeIn_ = 0.0f;
+    struct PendingThunder { float delay; float volume; bool crack; };
+    std::vector<PendingThunder> pendingThunder_;
+    std::unique_ptr<FootfallDust> breathPuffs_;
+    uint32_t breathIdleFrames_ = 0;
+    bool breathFailed_ = false;
+    float breathScanClock_ = 0.0f;
+    std::unordered_map<uint32_t, float> nextBreath_;   // instance -> seconds to its next breath
     /// The clock "Fade in new scenery" stamps and reads (stream_fade.hpp):
     /// drawn time, each frame's step held to a tenth of a second. A tile
     /// that loads during a hitch - a teleport's reload draws nothing for

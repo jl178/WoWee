@@ -1,5 +1,6 @@
 #include "rendering/weather.hpp"
 #include "rendering/weather_wind.hpp"
+#include "rendering/weather_fx.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_shader.hpp"
@@ -40,7 +41,12 @@ constexpr const char* kSpritePaths[] = {
     "Textures\\Weather\\RainDrop01.blp",        // 16x128 streak
     "Textures\\Weather\\RainDropSplash01.blp",  // 256x256, 4x4 sheet
     "Textures\\Weather\\SnowFlake01.blp",       // 64x64 flake
+    // Loaded only for the mist sheets and the fireflies: the stock rain
+    // and snow mist's sheet, a soft white puff (MapWeather 0x78c420).
+    "Textures\\Weather\\SnowMist01.blp",        // 256x256 puff
 };
+// The sprites the stock weather draws, loaded with it; the rest on first use.
+constexpr uint32_t kStockSpriteCount = 3;
 
 // The column of air the weather fills around the camera, in yards.
 struct Volume {
@@ -50,6 +56,9 @@ struct Volume {
 };
 constexpr Volume kRainVolume{32.0f, 36.0f, 40.0f};
 constexpr Volume kSnowVolume{26.0f, 26.0f, 30.0f};
+// A sandstorm's grains blow level through a low box around the eye (the
+// stock sand box is 20 x 12.5 yd, world-lighting.md 8).
+constexpr Volume kSandVolume{20.0f, 3.0f, 8.0f};
 
 // Rain: a streak about a yard and a half long, as wide as the texture's 1:8
 // aspect makes it, falling at some twenty-six yards a second.
@@ -75,8 +84,18 @@ constexpr float kSplashApexV      = 0.04296875f;   // 0xa3ebcc: apex v in the ce
 constexpr float kSplashMaxSpeedSq = 2.0f;
 
 const Volume& volumeFor(Weather::Type type) {
+    if (type == Weather::Type::SAND) return kSandVolume;
     return type == Weather::Type::SNOW ? kSnowVolume : kRainVolume;
 }
+
+// Varied rain: how far out splashes are made (the stock 22 yd otherwise).
+constexpr float kVariedSplashRadius = 30.0f;
+// Mist sheets: at most this many (the stock mist's cap is 128, its sheets
+// living a few seconds; these live longer and are larger).
+constexpr int kMaxSheets = 40;
+// Fireflies: at most this many, within this radius of the camera.
+constexpr int kMaxFireflies = 40;
+constexpr float kFireflyRadius = 16.0f;
 
 } // namespace
 
@@ -139,6 +158,20 @@ void Weather::buildPipelines(VkDevice device,
         .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
         .setDepthTest(true, false, VK_COMPARE_OP_LESS)
         .setColorBlendAttachment(mod2x)
+        .setMultisample(samples)
+        .setLayout(pipelineLayout)
+        .setRenderPass(pass)
+        .setDynamicStates(viewportAndScissorDynamic())
+        .build(device, vkCtx->getPipelineCache());
+
+    // Fireflies glow: what is behind them plus the sprite times its alpha.
+    addPipeline_ = PipelineBuilder()
+        .setShaders(vertStage, fragStage)
+        .setVertexInput({binding}, attrs)
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setDepthTest(true, false, VK_COMPARE_OP_LESS)
+        .setColorBlendAttachment(PipelineBuilder::blendAdditive())
         .setMultisample(samples)
         .setLayout(pipelineLayout)
         .setRenderPass(pass)
@@ -209,6 +242,7 @@ void Weather::recreatePipelines() {
 
     destroy(device, pipeline);
     destroy(device, mod2xPipeline_);
+    destroy(device, addPipeline_);
 
     auto shaders = loadShaderPair(device, "assets/shaders/weather.vert.spv",
                                   "assets/shaders/weather.frag.spv", "weather");
@@ -221,11 +255,22 @@ void Weather::recreatePipelines() {
 }
 
 void Weather::loadTextures(pipeline::AssetManager* assetManager) {
-    if (texturesAttempted_ || !assetManager || !vkCtx || !descriptorPool_) return;
-    texturesAttempted_ = true;
+    if (!assetManager || !vkCtx || !descriptorPool_) return;
+    // The stock sprites at once; the mist sheet only once a style asks for it.
+    uint32_t first = 0, last = 0;
+    if (!texturesAttempted_) {
+        texturesAttempted_ = true;
+        last = kStockSpriteCount;
+    } else if (!extraTexturesAttempted_ && (style_.mistSheets || fireflyAmount_ > 0.0f)) {
+        extraTexturesAttempted_ = true;
+        first = kStockSpriteCount;
+        last = SPRITE_COUNT;
+    } else {
+        return;
+    }
 
     VkDevice device = vkCtx->getDevice();
-    for (uint32_t i = 0; i < SPRITE_COUNT; ++i) {
+    for (uint32_t i = first; i < last; ++i) {
         pipeline::BLPImage image = assetManager->loadTexture(kSpritePaths[i]);
         if (!image.isValid() ||
             !textures_[i].upload(*vkCtx, image.data.data(), image.width, image.height,
@@ -260,19 +305,26 @@ float Weather::resolveGround(const glm::vec3& at, const glm::vec3& cameraPos) co
     const float fallback = cameraPos.z - vol.below;
     if (!groundQuery_) return fallback;
     const glm::vec2 d(at.x - cameraPos.x, at.y - cameraPos.y);
-    if (glm::dot(d, d) > kSplashRadius * kSplashRadius) return fallback;
+    const float radius = style_.variedRain ? kVariedSplashRadius : kSplashRadius;
+    if (glm::dot(d, d) > radius * radius) return fallback;
     if (auto ground = groundQuery_(at.x, at.y, cameraPos.z + vol.above)) return *ground;
     return fallback;
 }
 
 void Weather::spawnParticle(Particle& p, const glm::vec3& cameraPos, bool anywhereInColumn) {
     const Volume& vol = volumeFor(particlesType_);
+    // A sandstorm's grains blow level and fill their low box anywhere.
+    if (particlesType_ == Type::SAND) anywhereInColumn = true;
     p.position.x = cameraPos.x + weatherRandRange(-vol.radius, vol.radius);
     p.position.y = cameraPos.y + weatherRandRange(-vol.radius, vol.radius);
     p.position.z = anywhereInColumn
         ? cameraPos.z + weatherRandRange(-vol.below * 0.5f, vol.above)
         : cameraPos.z + vol.above + weatherRandRange(0.0f, 4.0f);
     p.phase = weatherRandRange(0.0f, 6.2831853f);
+    // The style's own; the stock values unless a style below sets them.
+    p.length = 1.0f;
+    p.alpha = 1.0f;
+    p.spin = 0.0f;
 
     switch (particlesType_) {
         case Type::SNOW:
@@ -283,10 +335,45 @@ void Weather::spawnParticle(Particle& p, const glm::vec3& cameraPos, bool anywhe
             p.velocity = glm::vec3(7.0f, 3.5f, -kStormFallSpeed * weatherRandRange(0.9f, 1.1f));
             p.size = weatherRandRange(0.85f, 1.2f);
             break;
+        case Type::SAND: {
+            // Blown along the prevailing wind (weather_wind's direction), a
+            // little up or down.
+            const glm::vec2 dir = weather_wind::direction();
+            const float speed = weatherRandRange(7.0f, 13.0f);
+            p.velocity = glm::vec3(dir * speed, weatherRandRange(-0.6f, 0.6f));
+            p.size = weatherRandRange(0.6f, 1.4f);
+            p.alpha = weatherRandRange(0.35f, 1.0f);
+            break;
+        }
         default:
             p.velocity = glm::vec3(1.5f, 0.8f, -kRainFallSpeed * weatherRandRange(0.9f, 1.1f));
             p.size = weatherRandRange(0.8f, 1.15f);
             break;
+    }
+
+    // Style: drops of every size, most of them fine, a few heavy and falling
+    // faster on longer streaks; flakes from a speck to a clump, the large ones
+    // drifting slower and turning.
+    const bool rain = particlesType_ == Type::RAIN || particlesType_ == Type::STORM;
+    if (rain && style_.variedRain) {
+        const float r = weatherRandFloat();
+        p.size = 0.55f + 1.0f * r * r * r;
+        p.velocity.z *= 0.85f + 0.2f * p.size;
+        p.length = p.size * weatherRandRange(0.8f, 1.4f);
+        p.alpha = 0.5f + 0.5f * std::min(1.0f, p.size);
+    } else if (particlesType_ == Type::SNOW && style_.softSnow) {
+        const float r = weatherRandFloat();
+        p.size = 0.45f + 1.45f * std::pow(r, 2.2f);
+        p.velocity.z *= 1.1f - 0.3f * r;
+        p.alpha = 0.55f + 0.45f * (1.0f - r * 0.5f) * weatherRandFloat();
+        p.alpha = std::max(p.alpha, 0.45f);
+        p.spin = weatherRandRange(-0.9f, 0.9f);
+    }
+
+    if (particlesType_ == Type::SAND) {
+        p.groundZ = cameraPos.z - vol.below;
+        p.lands = false;
+        return;
     }
 
     // Where it will come down: below the spot it reaches the camera's height,
@@ -306,19 +393,126 @@ void Weather::spawnParticle(Particle& p, const glm::vec3& cameraPos, bool anywhe
     if (p.position.z < p.groundZ) p.position.z = cameraPos.z + vol.above;
 }
 
+void Weather::spawnSheet(MistSheet& s, const glm::vec3& cameraPos) {
+    const bool sand = particlesType_ == Type::SAND;
+    const float bearing = weatherRandRange(0.0f, 6.2831853f);
+    const float dist = sand ? weatherRandRange(8.0f, 45.0f) : weatherRandRange(16.0f, 70.0f);
+    const glm::vec2 at = glm::vec2(cameraPos) + glm::vec2(std::cos(bearing), std::sin(bearing)) * dist;
+    float ground = cameraPos.z - 6.0f;
+    if (groundQuery_) {
+        if (auto g = groundQuery_(at.x, at.y, cameraPos.z + 60.0f)) ground = *g;
+    }
+    s.base = glm::vec3(at, ground - 1.5f);
+    s.age = 0.0f;
+    s.life = weatherRandRange(6.0f, 11.0f);
+    s.halfWidth = weatherRandRange(6.0f, 9.0f);
+    s.flipU = weatherRandFloat() < 0.5f;
+    // The sheet drifts as the weather does: the type's stock drift, and the
+    // foliage's wind where that is on (E19), at about half the drops' speed.
+    glm::vec2 drift;
+    switch (particlesType_) {
+        case Type::SNOW:  drift = glm::vec2(0.6f, 0.3f); break;
+        case Type::STORM: drift = glm::vec2(7.0f, 3.5f); break;
+        case Type::SAND:  drift = weather_wind::direction() * 8.0f; break;
+        default:          drift = glm::vec2(1.5f, 0.8f); break;
+    }
+    if (windStrength_ > 0.0f) {
+        drift += weather_wind::push(windStrength_, at, windClock_, particlesType_ == Type::SNOW, bearing);
+    }
+    s.velocity = glm::vec3(drift * 0.5f, 0.0f);
+    switch (particlesType_) {
+        case Type::SNOW:  s.height = weatherRandRange(20.0f, 30.0f); s.peak = 0.55f; break;
+        case Type::STORM: s.height = weatherRandRange(24.0f, 34.0f); s.peak = 0.70f; break;
+        case Type::SAND:  s.height = weatherRandRange(9.0f, 16.0f);  s.peak = 0.85f; break;
+        default:          s.height = weatherRandRange(22.0f, 32.0f); s.peak = 0.50f; break;
+    }
+}
+
+void Weather::updateSheets(const glm::vec3& cameraPos, float level, float deltaTime) {
+    if (!style_.mistSheets || level <= 0.0f) {
+        sheets_.clear();
+        return;
+    }
+    const int target = std::min(kMaxSheets,
+        weather_fx::mistSheetTarget(particlesType_ == Type::SAND, level, style_.intensity, kMaxSheets));
+    for (auto& s : sheets_) {
+        s.age += deltaTime;
+        s.base += s.velocity * deltaTime;
+    }
+    std::erase_if(sheets_, [&](const MistSheet& s) {
+        const glm::vec2 d = glm::vec2(s.base) - glm::vec2(cameraPos);
+        return s.age >= s.life || glm::dot(d, d) > 95.0f * 95.0f;
+    });
+    // A few a second at most, so a change of weather gathers rather than
+    // appears; the first fill is staggered in age so they do not all fade
+    // together.
+    const bool filling = sheets_.empty();
+    int spawns = filling ? target : std::max(1, static_cast<int>(target * deltaTime / 4.0f + weatherRandFloat()));
+    while (static_cast<int>(sheets_.size()) < target && spawns-- > 0) {
+        MistSheet s;
+        spawnSheet(s, cameraPos);
+        if (filling) s.age = weatherRandRange(0.0f, s.life * 0.8f);
+        sheets_.push_back(s);
+    }
+    if (static_cast<int>(sheets_.size()) > target) sheets_.resize(std::max(target, 0));
+}
+
+void Weather::updateFireflies(const glm::vec3& cameraPos, float deltaTime) {
+    if (fireflyAmount_ <= 0.0f) {
+        fireflies_.clear();
+        return;
+    }
+    const int target = static_cast<int>(kMaxFireflies * fireflyAmount_);
+    auto place = [&](Firefly& f) {
+        const float a = weatherRandRange(0.0f, 6.2831853f);
+        const float r = kFireflyRadius * std::sqrt(weatherRandFloat());
+        const glm::vec2 at = glm::vec2(cameraPos) + glm::vec2(std::cos(a), std::sin(a)) * r;
+        float ground = cameraPos.z - 1.6f;
+        if (groundQuery_) {
+            if (auto g = groundQuery_(at.x, at.y, cameraPos.z + 8.0f)) ground = *g;
+        }
+        f.home = glm::vec3(at, ground + weatherRandRange(0.4f, 2.4f));
+        f.position = f.home;
+        f.phase = weatherRandRange(0.0f, 6.2831853f);
+        f.rate = weatherRandRange(0.6f, 1.4f);
+        f.age = 0.0f;
+    };
+    while (static_cast<int>(fireflies_.size()) < target) {
+        Firefly f;
+        place(f);
+        fireflies_.push_back(f);
+    }
+    if (static_cast<int>(fireflies_.size()) > target) fireflies_.resize(std::max(target, 0));
+    for (auto& f : fireflies_) {
+        f.age += deltaTime;
+        // A slow, looping wander about its spot.
+        const float t = time_ * 0.35f * f.rate + f.phase;
+        f.position = f.home + glm::vec3(std::sin(t) * 1.1f + std::sin(t * 2.3f) * 0.3f,
+                                        std::cos(t * 0.8f) * 1.1f,
+                                        std::sin(t * 1.7f) * 0.35f);
+        const glm::vec2 d = glm::vec2(f.home) - glm::vec2(cameraPos);
+        if (glm::dot(d, d) > kFireflyRadius * kFireflyRadius * 1.3f) place(f);
+    }
+}
+
 void Weather::update(const Camera& camera, float deltaTime) {
     loadTextures(core::Application::getInstance().getAssetManager());
 
     vertices_.clear();
+    sheetVertexCount_ = 0;
     particleVertexCount_ = 0;
     splashVertexCount_ = 0;
+    fireflyVertexCount_ = 0;
     time_ += deltaTime;
 
     const glm::vec3 cameraPos = camera.getPosition();
+    updateFireflies(cameraPos, deltaTime);
     if (!enabled || weatherType == Type::NONE) {
         particles.clear();
         splashes_.clear();
+        sheets_.clear();
         particlesType_ = Type::NONE;
+        if (!fireflies_.empty()) buildVertices(camera);
         return;
     }
 
@@ -326,16 +520,20 @@ void Weather::update(const Camera& camera, float deltaTime) {
     if (particlesType_ != weatherType) {
         particles.clear();
         splashes_.clear();
+        sheets_.clear();
         particlesType_ = weatherType;
     }
     const Volume& vol = volumeFor(particlesType_);
 
     // How many: the server's grade as the stock emitters take it - nothing
     // below a quarter, all of it at one (stock_screen_fx::particleLevel,
-    // 0x784850) - times the Weather Detail setting.
-    const float typeScale = particlesType_ == Type::SNOW ? 0.7f : 1.0f;
+    // 0x784850) - times the Weather Detail setting, times the "Weather
+    // intensity" slider (1, stock, adds nothing).
+    const float typeScale = particlesType_ == Type::SNOW ? 0.7f
+                          : particlesType_ == Type::SAND ? 0.8f : 1.0f;
     const float level = stock_screen_fx::particleLevel(intensity);
-    const int target = static_cast<int>(MAX_PARTICLES * typeScale * level * densityScale_);
+    const int target = weather_fx::particleTarget(MAX_PARTICLES, typeScale, level, densityScale_,
+                                                  style_.intensity);
     const bool filling = particles.empty();
     while (static_cast<int>(particles.size()) < target) {
         Particle p;
@@ -348,6 +546,7 @@ void Weather::update(const Camera& camera, float deltaTime) {
     if (haveLastCamera_ && glm::length(cameraPos - lastCameraPos_) > vol.radius * 2.0f) {
         for (auto& p : particles) spawnParticle(p, cameraPos, true);
         splashes_.clear();
+        sheets_.clear();
     } else if (haveLastCamera_ && deltaTime > 0.0f) {
         // The camera's velocity, averaged over a fraction of a second as the
         // client averages its recent moves: splashes only when nearly still.
@@ -357,16 +556,34 @@ void Weather::update(const Camera& camera, float deltaTime) {
     }
     lastCameraPos_ = cameraPos;
     haveLastCamera_ = true;
-    const bool splashesAllowed = glm::dot(cameraVelocity_, cameraVelocity_) <= kSplashMaxSpeedSq;
+    // Varied rain splashes whether or not the eye is moving.
+    const bool splashesAllowed = style_.variedRain ||
+        glm::dot(cameraVelocity_, cameraVelocity_) <= kSplashMaxSpeedSq;
+    const int maxSplashes = static_cast<int>(MAX_SPLASHES * weather_fx::countScale(style_.intensity));
 
     // Storm gusts.
     const float gust = particlesType_ == Type::STORM ? 1.0f + 0.35f * std::sin(time_ * 0.7f) : 1.0f;
+    const bool softSnow = particlesType_ == Type::SNOW && style_.softSnow;
+    const bool sand = particlesType_ == Type::SAND;
 
     for (auto& p : particles) {
         glm::vec3 v = p.velocity;
         if (particlesType_ == Type::SNOW) {
             v.x += std::sin(time_ * 1.3f + p.phase) * 0.5f;
             v.y += std::cos(time_ * 1.1f + p.phase * 1.7f) * 0.5f;
+            if (softSnow) {
+                // Slow eddies the flakes ride through together: a field over
+                // the box, turning with time, and a lift and drop on it.
+                v.x += std::sin(p.position.y * 0.21f + time_ * 0.5f) * 0.7f;
+                v.y += std::cos(p.position.x * 0.17f - time_ * 0.43f) * 0.7f;
+                v.z += std::sin(time_ * 0.9f + p.phase * 3.0f) * 0.3f;
+            }
+        } else if (sand) {
+            // Grains skip and swirl in the gusts.
+            const float g = 0.75f + 0.45f * std::sin(time_ * 1.1f + p.position.x * 0.05f);
+            v.x *= g;
+            v.y *= g;
+            v.z += std::sin(time_ * 2.0f + p.phase) * 0.8f;
         } else {
             v.x *= gust;
             v.y *= gust;
@@ -386,6 +603,13 @@ void Weather::update(const Camera& camera, float deltaTime) {
             if (d > vol.radius)  { p.position[axis] -= 2.0f * vol.radius; wrapped = true; }
             if (d < -vol.radius) { p.position[axis] += 2.0f * vol.radius; wrapped = true; }
         }
+        if (sand) {
+            // Level grains: the box's top and bottom wrap too.
+            const float dz = p.position.z - cameraPos.z;
+            if (dz > vol.above) p.position.z -= vol.above + vol.below;
+            if (dz < -vol.below) p.position.z += vol.above + vol.below;
+            continue;
+        }
         if (wrapped) {
             const float fallback = cameraPos.z - vol.below;
             p.groundZ = resolveGround(p.position, cameraPos);
@@ -394,9 +618,10 @@ void Weather::update(const Camera& camera, float deltaTime) {
 
         if (p.position.z <= p.groundZ || p.position.z < cameraPos.z - vol.below) {
             if (p.lands && splashesAllowed && p.position.z <= p.groundZ &&
-                static_cast<int>(splashes_.size()) < MAX_SPLASHES) {
+                static_cast<int>(splashes_.size()) < maxSplashes) {
                 splashes_.push_back({.position = glm::vec3(p.position.x, p.position.y, p.groundZ),
-                                     .age = 0.0f});
+                                     .age = 0.0f,
+                                     .size = style_.variedRain ? std::clamp(p.size, 0.7f, 1.4f) : 1.0f});
             }
             spawnParticle(p, cameraPos, false);
         }
@@ -404,6 +629,8 @@ void Weather::update(const Camera& camera, float deltaTime) {
 
     for (auto& s : splashes_) s.age += deltaTime;
     std::erase_if(splashes_, [](const Splash& s) { return s.age >= kSplashLife; });
+
+    updateSheets(cameraPos, level, deltaTime);
 
     buildVertices(camera);
 }
@@ -414,6 +641,7 @@ void Weather::buildVertices(const Camera& camera) {
     const glm::vec3 camUp = camera.getUp();
     const Volume& vol = volumeFor(particlesType_);
     const bool snow = particlesType_ == Type::SNOW;
+    const bool sand = particlesType_ == Type::SAND;
 
     auto quad = [&](const glm::vec3& a, const glm::vec3& b, const glm::vec3& c, const glm::vec3& d,
                     const glm::vec2& uv0, const glm::vec2& uv1, float alpha) {
@@ -427,6 +655,27 @@ void Weather::buildVertices(const Camera& camera) {
         vertices_.push_back({d, {uv0.x, uv1.y}, alpha});
     };
 
+    // Distant sheets first: they are behind the drops.
+    if (!sheets_.empty() && textureReady_[MIST_SHEET]) {
+        const float side = weather_fx::sideScale(style_.intensity);
+        for (const auto& s : sheets_) {
+            const glm::vec2 toCam2 = glm::vec2(cameraPos) - glm::vec2(s.base);
+            const float dist = glm::length(toCam2);
+            if (dist < 1e-3f) continue;
+            const float life = std::sin(3.14159265f * std::clamp(s.age / s.life, 0.0f, 1.0f));
+            const float alpha = std::min(1.0f, s.peak * side) * life * weather_fx::mistDistanceFade(dist);
+            if (alpha <= 0.01f) continue;
+            // Turned about the vertical to face the eye.
+            const glm::vec2 n = toCam2 / dist;
+            const glm::vec3 r = glm::vec3(-n.y, n.x, 0.0f) * s.halfWidth;
+            const glm::vec3 up(0.0f, 0.0f, s.height);
+            const float u0 = s.flipU ? 1.0f : 0.0f;
+            quad(s.base - r + up, s.base + r + up, s.base + r, s.base - r,
+                 {u0, 0.0f}, {1.0f - u0, 1.0f}, alpha);
+        }
+    }
+    sheetVertexCount_ = static_cast<uint32_t>(vertices_.size());
+
     // Streaks or flakes.
     const bool haveParticleSprite = textureReady_[snow ? SNOW_FLAKE : RAIN_STREAK];
     if (haveParticleSprite) {
@@ -435,13 +684,23 @@ void Weather::buildVertices(const Camera& camera) {
             const float dist = glm::length(toCam);
             // Not in the lens, and not past the box's edge where it wraps.
             const float horiz = glm::length(glm::vec2(toCam));
-            float alpha = glm::smoothstep(0.6f, 2.5f, dist) *
+            // Sand grains this close would streak across the lens.
+            float alpha = (sand ? glm::smoothstep(2.0f, 6.0f, dist) : glm::smoothstep(0.6f, 2.5f, dist)) *
                           (1.0f - glm::smoothstep(vol.radius * 0.7f, vol.radius, horiz));
             if (alpha <= 0.01f) continue;
+            alpha *= p.alpha;  // 1 unless a style varied it
 
             if (snow) {
-                const glm::vec3 r = camRight * (kSnowHalfSize * p.size);
-                const glm::vec3 u = camUp * (kSnowHalfSize * p.size);
+                glm::vec3 r = camRight * (kSnowHalfSize * p.size);
+                glm::vec3 u = camUp * (kSnowHalfSize * p.size);
+                if (p.spin != 0.0f) {
+                    // Soft snow: each flake turns on its own.
+                    const float a = p.phase + time_ * p.spin;
+                    const float c = std::cos(a), sn = std::sin(a);
+                    const glm::vec3 r2 = r * c + u * sn;
+                    u = u * c - r * sn;
+                    r = r2;
+                }
                 quad(p.position - r + u, p.position + r + u, p.position + r - u, p.position - r - u,
                      {0.0f, 0.0f}, {1.0f, 1.0f}, alpha);
             } else {
@@ -456,8 +715,18 @@ void Weather::buildVertices(const Camera& camera) {
                 glm::vec3 side = glm::cross(axis, toCam);
                 const float sideLen = glm::length(side);
                 if (sideLen < 1e-4f) continue;
-                side *= (kRainHalfWidth * p.size) / sideLen;
-                const glm::vec3 half = axis * (kRainHalfLength * p.size);
+                if (sand) {
+                    // Fine grains in short dashes.
+                    side *= (0.03f * p.size) / sideLen;
+                    const glm::vec3 half = axis * (0.35f * p.size);
+                    quad(p.position - half - side, p.position - half + side,
+                         p.position + half + side, p.position + half - side,
+                         {0.0f, 0.0f}, {1.0f, 1.0f}, alpha);
+                    continue;
+                }
+                const float widthScale = p.length != 1.0f ? 0.8f + 0.4f * std::min(p.size, 1.3f) : 1.0f;
+                side *= (kRainHalfWidth * p.size * widthScale) / sideLen;
+                const glm::vec3 half = axis * (kRainHalfLength * p.size * p.length);
                 const glm::vec3 top = p.position - half;
                 const glm::vec3 bottom = p.position + half;
                 quad(top - side, top + side, bottom + side, bottom - side,
@@ -465,7 +734,7 @@ void Weather::buildVertices(const Camera& camera) {
             }
         }
     }
-    particleVertexCount_ = static_cast<uint32_t>(vertices_.size());
+    particleVertexCount_ = static_cast<uint32_t>(vertices_.size()) - sheetVertexCount_;
 
     // Splashes, as the client draws them: one triangle facing the camera,
     // base on the impact and apex above it. Looking down on one, it slides
@@ -473,16 +742,16 @@ void Weather::buildVertices(const Camera& camera) {
     // of a yard, so it stays centred on the impact. The sheet's columns are
     // the four frames; its rows are the view, from straight down (row 0) to
     // level (row 3). No fade: a splash shows whole until it ends.
-    if (!snow && textureReady_[RAIN_SPLASH]) {
-        const glm::vec3 right = camRight * kSplashHalfWidth;
-        const glm::vec3 up = camUp * kSplashHeight;
+    if (!snow && !sand && textureReady_[RAIN_SPLASH]) {
         for (const auto& s : splashes_) {
+            const glm::vec3 right = camRight * (kSplashHalfWidth * s.size);
+            const glm::vec3 up = camUp * (kSplashHeight * s.size);
             const glm::vec3 fromCam = s.position - cameraPos;
             const float len = glm::length(fromCam);
             if (len < 1e-3f) continue;
             const float down = std::max(0.0f, -fromCam.z / len);
             const glm::vec3 base = s.position - up * (0.5f * down) +
-                                   glm::vec3(0.0f, 0.0f, down * kSplashHalfWidth + 0.02f);
+                                   glm::vec3(0.0f, 0.0f, down * kSplashHalfWidth * s.size + 0.02f);
             const int frame = std::min(3, static_cast<int>(s.age * 4.0f * 3.99f));
             const int row = std::min(3, static_cast<int>((1.0f - down) * 3.99f));
             const float u0 = frame * 0.25f;
@@ -492,15 +761,64 @@ void Weather::buildVertices(const Camera& camera) {
             vertices_.push_back({base + right, {u0 + 0.25f, v0 + 0.25f}, 1.0f});
         }
     }
-    splashVertexCount_ = static_cast<uint32_t>(vertices_.size()) - particleVertexCount_;
+    splashVertexCount_ = static_cast<uint32_t>(vertices_.size()) - sheetVertexCount_ - particleVertexCount_;
+
+    // Fireflies: small glows that pulse slowly, fading out toward the edge
+    // of their ring.
+    if (!fireflies_.empty() && textureReady_[MIST_SHEET]) {
+        for (const auto& f : fireflies_) {
+            const glm::vec3 toCam = cameraPos - f.position;
+            const float dist = glm::length(toCam);
+            const float blink = std::pow(std::max(0.0f, std::sin(time_ * 0.9f * f.rate + f.phase)), 3.0f);
+            const float alpha = blink * std::min(1.0f, f.age / 1.5f) * glm::smoothstep(0.8f, 2.0f, dist) *
+                                (1.0f - glm::smoothstep(kFireflyRadius * 0.75f, kFireflyRadius, dist));
+            if (alpha <= 0.02f) continue;
+            // The soft round mist puff, small: a point of light with a glow.
+            const glm::vec3 r = camRight * 0.07f;
+            const glm::vec3 u = camUp * 0.07f;
+            quad(f.position - r + u, f.position + r + u, f.position + r - u, f.position - r - u,
+                 {0.0f, 0.0f}, {1.0f, 1.0f}, alpha);
+        }
+    }
+    fireflyVertexCount_ = static_cast<uint32_t>(vertices_.size()) - sheetVertexCount_ -
+                          particleVertexCount_ - splashVertexCount_;
     builtType_ = particlesType_;
 }
 
-void Weather::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    if (!enabled || weatherType == Type::NONE || vertices_.empty() ||
-        pipeline == VK_NULL_HANDLE || frameBuffers_.empty()) {
-        return;
+bool Weather::ensureVertexCapacity(size_t vertexCount) {
+    const VkDeviceSize need = static_cast<VkDeviceSize>(vertexCount) * sizeof(Vertex);
+    if (need <= frameBufferSize_) return true;
+    if (!vkCtx) return false;
+    // Retire the old buffers once every frame in flight is done with them.
+    std::vector<FrameBuffer> old = std::move(frameBuffers_);
+    frameBuffers_.clear();
+    VmaAllocator allocator = vkCtx->getAllocator();
+    vkCtx->deferAfterAllFrameFences([allocator, old]() mutable {
+        for (auto& fb : old) destroy(allocator, fb.buffer, fb.alloc);
+    });
+    frameBufferSize_ = need + need / 4;
+    frameBuffers_.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& fb : frameBuffers_) {
+        AllocatedBuffer buf = createBuffer(allocator, frameBufferSize_,
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        fb.buffer = buf.buffer;
+        fb.alloc = buf.allocation;
+        fb.info = buf.info;
+        if (fb.buffer == VK_NULL_HANDLE || !fb.info.pMappedData) {
+            LOG_ERROR("Weather: failed to grow the vertex buffer");
+            for (auto& b : frameBuffers_) destroy(allocator, b.buffer, b.alloc);
+            frameBuffers_.clear();
+            frameBufferSize_ = 0;
+            return false;
+        }
     }
+    return true;
+}
+
+void Weather::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
+    // Nothing built this frame (no weather, indoors, no fireflies) draws nothing.
+    if (vertices_.empty() || pipeline == VK_NULL_HANDLE) return;
+    if (!ensureVertexCapacity(vertices_.size()) || frameBuffers_.empty()) return;
 
     const FrameBuffer& fb = frameBuffers_[vkCtx->getCurrentFrame() % frameBuffers_.size()];
     const VkDeviceSize bytes = std::min<VkDeviceSize>(vertices_.size() * sizeof(Vertex),
@@ -515,11 +833,14 @@ void Weather::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     vkCmdBindVertexBuffers(cmd, 0, 1, &fb.buffer, &offset);
 
     VkPipeline bound = pipeline;
-    auto draw = [&](Sprite sprite, uint32_t first, uint32_t count, const glm::vec4& tint) {
+    auto draw = [&](Sprite sprite, uint32_t first, uint32_t count, const glm::vec4& tint,
+                    bool additive = false) {
         if (count == 0 || !textureReady_[sprite] || first >= vertexLimit) return;
         count = std::min(count, vertexLimit - first);
         // tint.a < 0 asks for the stock Mod2x (see weather.frag).
         VkPipeline want = (tint.a < 0.0f && mod2xPipeline_) ? mod2xPipeline_ : pipeline;
+        if (additive) want = addPipeline_;
+        if (want == VK_NULL_HANDLE) return;
         if (want != bound) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want);
             bound = want;
@@ -532,6 +853,12 @@ void Weather::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
         vkCmdDraw(cmd, count, 1, first, 0);
     };
 
+    // The mist sheets in the fog colour, alpha-blended, as the stock mist.
+    const uint32_t particleFirst = sheetVertexCount_;
+    const uint32_t splashFirst = particleFirst + particleVertexCount_;
+    const uint32_t fireflyFirst = splashFirst + splashVertexCount_;
+    draw(MIST_SHEET, 0, sheetVertexCount_, glm::vec4(fogColour_, 1.0f));
+
     // As the stock client draws them (MapWeather.cpp): snow alpha-blended in
     // the Weather.dbc colour (white on every row), neither lit nor fogged
     // (snowpoint.bls writes no fog); rain and splashes in Mod2x, the drop's
@@ -539,12 +866,23 @@ void Weather::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
     // grey (0x80808080) rather than the fog colour. Neither is lit by the
     // scene: the rain darkens and brightens what is behind it instead.
     if (builtType_ == Type::SNOW) {
-        draw(SNOW_FLAKE, 0, particleVertexCount_, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
-    } else {
-        draw(RAIN_STREAK, 0, particleVertexCount_, glm::vec4(1.0f, 1.0f, 1.0f, -1.0f));
-        draw(RAIN_SPLASH, particleVertexCount_, splashVertexCount_,
+        draw(SNOW_FLAKE, particleFirst, particleVertexCount_, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+    } else if (builtType_ == Type::SAND) {
+        // Sand in the fog colour, as the stock sand.bls (the drop texture is
+        // grey 128, so twice the colour).
+        // A little lighter than the haze, as sunlit dust: against the sky a
+        // grain in the fog colour itself read as a dark scratch.
+        const glm::vec3 grain = glm::mix(fogColour_, glm::vec3(1.0f), 0.3f);
+        draw(RAIN_STREAK, particleFirst, particleVertexCount_,
+             glm::vec4(glm::min(grain * 2.0f, glm::vec3(2.0f)), 0.4f));
+    } else if (builtType_ != Type::NONE) {
+        draw(RAIN_STREAK, particleFirst, particleVertexCount_, glm::vec4(1.0f, 1.0f, 1.0f, -1.0f));
+        draw(RAIN_SPLASH, splashFirst, splashVertexCount_,
              glm::vec4(1.0f, 1.0f, 1.0f, -1.0f));
     }
+    // Fireflies: a warm yellow-green, added (the puff's alpha peaks near
+    // half, hence the strength).
+    draw(MIST_SHEET, fireflyFirst, fireflyVertexCount_, glm::vec4(1.3f, 1.7f, 0.6f, 1.0f), true);
 }
 
 void Weather::easeGrade(float target, float deltaTime) {
@@ -590,16 +928,20 @@ void Weather::shutdown() {
         for (auto& fb : frameBuffers_) destroy(allocator, fb.buffer, fb.alloc);
         frameBuffers_.clear();
         destroy(device, mod2xPipeline_);
+        destroy(device, addPipeline_);
         destroyPipeline(device, pipeline, pipelineLayout);
         destroy(device, descriptorPool_);
         destroy(device, textureSetLayout_);
         textureSets_.fill(VK_NULL_HANDLE);
         texturesAttempted_ = false;
+        extraTexturesAttempted_ = false;
     }
 
     vkCtx = nullptr;
     particles.clear();
     splashes_.clear();
+    sheets_.clear();
+    fireflies_.clear();
     vertices_.clear();
 }
 

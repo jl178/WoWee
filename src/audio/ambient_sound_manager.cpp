@@ -259,6 +259,11 @@ void AmbientSoundManager::shutdown() {
         AudioEngine::instance().stopSound(areaLoopId_);
         areaLoopId_ = 0;
     }
+    if (roofRainId_ != 0) {
+        AudioEngine::instance().stopSound(roofRainId_);
+        roofRainId_ = 0;
+    }
+    roofRainPath_.clear();
     areaLoopPath_.clear();
     areaSamples_.clear();
     emitters_.clear();
@@ -1019,3 +1024,42 @@ void AmbientSoundManager::updateBellTolls(float deltaTime) {
 
 } // namespace audio
 } // namespace wowee
+
+namespace wowee {
+namespace audio {
+
+void AmbientSoundManager::setRoofRain(const std::string& path, float volume) {
+    if (path == roofRainPath_) {
+        if (roofRainId_ != 0 && volume != roofRainVolume_) {
+            AudioEngine::instance().setSoundVolume(roofRainId_, volume);
+            roofRainVolume_ = volume;
+        }
+        return;
+    }
+    // In and out over the stock ambience crossfade, as the room's loop does.
+    const float fadeMs = stock::kAmbienceFadeSeconds * 1000.0f;
+    if (roofRainId_ != 0) {
+        AudioEngine::instance().fadeOutSound(roofRainId_, fadeMs);
+        roofRainId_ = 0;
+    }
+    roofRainPath_ = path;
+    roofRainVolume_ = volume;
+    if (path.empty() || !assets_) return;
+    auto it = areaSamples_.find(path);
+    if (it == areaSamples_.end()) {
+        if (areaSamples_.size() >= 6) areaSamples_.clear();
+        AmbientSample sample;
+        loadSound(path, sample, assets_);
+        it = areaSamples_.emplace(path, std::move(sample)).first;
+    }
+    if (!it->second.loaded) return;
+    SoundOptions opts;
+    opts.priority = stock::kPriorityZone;
+    opts.category = stock::Category::Ambience;
+    opts.randomStart = true;
+    roofRainId_ = AudioEngine::instance().playSound2DStoppable(it->second.data, volume, /*loop=*/true, fadeMs,
+                                                               SoundBus::World, opts);
+}
+
+}  // namespace audio
+}  // namespace wowee

@@ -1670,6 +1670,13 @@ wowee_add_test(test_phase2_surfaces
 wowee_add_test(test_phase2_light
     SOURCES test_phase2_light.cpp)
 
+# ── test_weather_fx ─────────────────────────────────────────
+# The weather page (E23-E31, rendering/weather_fx.hpp): the intensity slider
+# is the stock count at 1, the preview's rows, the zones' climates, the
+# lightning's timing and thunder, snow settling, the sandstorm's haze.
+wowee_add_test(test_weather_fx
+    SOURCES test_weather_fx.cpp)
+
 # ── test_zone_ambience ─────────────────────────────────────────
 wowee_add_test(test_zone_ambience
     SOURCES test_zone_ambience.cpp

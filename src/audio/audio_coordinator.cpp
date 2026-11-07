@@ -204,6 +204,24 @@ void AudioCoordinator::setScreenEffectSounds(uint32_t soundAmbienceId, uint32_t 
 
 void AudioCoordinator::updateTableAmbience(const ZoneAudioContext& ctx) {
     if (!ambientSoundManager_) return;
+    // "Rain heard indoors": under a roof, where slot 8 is passed over, the
+    // weather's own loop at a quarter of its level beside the room's. Not
+    // under water or in the ghost world, which replace every other loop.
+    {
+        std::string roofPath;
+        float roofVolume = 0.0f;
+        const bool roofed = ctx.rainIndoors && ctx.wmoRootId != 0 && ctx.wmoSoundIndoors &&
+                            !ctx.cameraUnderwater && screenEffectAmbience_ == 0;
+        if (roofed) {
+            if (const uint32_t weather = soundData_.weatherSound(ctx.weatherState)) {
+                if (const SoundEntry* e = soundData_.sound(weather); e && !e->files.empty()) {
+                    roofPath = e->files.front();
+                    roofVolume = e->volume * 0.25f;
+                }
+            }
+        }
+        ambientSoundManager_->setRoofRain(roofPath, roofVolume);
+    }
     // The screen effect's loop is the top slot (0x4c86f0 walks 10 down to
     // 0): the ghost world sounds like GhostState wherever it is.
     if (screenEffectAmbience_ != 0) {

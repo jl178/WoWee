@@ -69,6 +69,9 @@ struct ZoneAudioContext {
     // The camera is below the water's surface (not merely swimming at it):
     // the world goes muffled and the underwater loop plays.
     bool cameraUnderwater = false;
+    // "Rain heard indoors" (an enhancement): keep the weather's loop on,
+    // faintly, where the stock client drops it under a roof.
+    bool rainIndoors = false;
     // The map the world is on, for SoundEmitters.dbc; 0xFFFFFFFF = unknown.
     uint32_t mapId = 0xFFFFFFFFu;
     // Zone manager pointer (for zone info and music queries)
