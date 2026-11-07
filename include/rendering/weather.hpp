@@ -240,7 +240,9 @@ private:
         float accel = 0.0f;        ///< on every axis, yd/s^2 (0x128)
         float age = 0.0f;
         float life = 2.7f;
-        glm::vec3 groundAt[3];     ///< the ground under its path: start, middle, end (x, y, ground z)
+        /// The ground along its way, every 2 yd (0x786330), and how many.
+        std::array<float, 64> ground{};
+        int samples = 0;
     };
     /// One stock sand grain: where it was born, its velocity, and when its
     /// path ends (it dies where it meets the ground). Written as it is into

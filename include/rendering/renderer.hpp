@@ -700,6 +700,16 @@ private:
     /// The Weather.dbc row for a weather state (read once), null when the
     /// file or the row is missing.
     const stock_weather::WeatherRow* weatherRowFor(uint32_t state);
+    /// The Weather.dbc light scale eased to `target` (0x784850: over
+    /// (|change| * 4 + 0.001) * 5 s), at once while nothing falls.
+    float easeWeatherLightScale(float target, bool snap, float dt);
+    /// ScreenEffect.dbc type 2 (nether, 0x4f7020 -> 0x7ed870): the fog
+    /// taken over by the nether's (0xff4c4c63, 105-150 yd); and the post
+    /// pass's nether fade, which climbs to 0.75 at one a second (0x7e8c80).
+    void applyScreenEffectFog();
+    float netherFade_ = 0.0f;
+    float lightScaleFrom_ = 1.0f, lightScaleTo_ = 1.0f, lightScale_ = 1.0f;
+    float lightScaleElapsed_ = 0.0f, lightScaleSeconds_ = 0.0f;
     /// The lightning flash and the sandstorm's haze on this frame's light and
     /// fog (updatePerFrameUBO); nothing while neither is happening.
     void applyWeatherFxLight();
@@ -791,7 +801,7 @@ private:
     std::vector<PendingThunder> pendingThunder_;
     /// Per unit instance: whether its area is cold, and when to ask again
     /// (stock asks every 10 s, 0x71FA90).
-    struct BreathArea { float recheckAt = 0.0f; bool cold = false; };
+    struct BreathArea { float recheckAt = 0.0f; bool cold = false; bool underwater = false; };
     std::unordered_map<uint32_t, stock_weather::WeatherRow> weatherRows_;
     bool weatherRowsLoaded_ = false;
     std::unordered_map<uint32_t, BreathArea> breathAreas_;

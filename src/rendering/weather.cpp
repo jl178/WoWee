@@ -578,18 +578,31 @@ void Weather::spawnStockMist(StockMist& m, const glm::vec3& cameraPos) {
     m.accel = centred() * sw::kMistAccel;
     m.age = 0.0f;
     m.life = centred() * sw::kMistLifeSpread + sw::kMistLife;
-    // The ground under its path (0x786330 samples it all along; three
-    // points here), kept as (x, y, height).
+    // Stood on the ground (0x786560), half its size over it.
     const float queryZ = cameraPos.z + 60.0f;
-    for (int i = 0; i < 3; ++i) {
-        const glm::vec3 at = m.position + m.velocity * (m.life * 0.5f * static_cast<float>(i));
-        float g = -1.0e9f;
-        if (groundQuery_) {
-            if (auto q = groundQuery_(at.x, at.y, queryZ)) g = *q;
-        }
-        m.groundAt[i] = glm::vec3(at.x, at.y, g);
+    if (auto g = sandGround(m.position.x, m.position.y, queryZ)) {
+        m.position.z = std::max(*g, m.position.z);
     }
-    m.position.z = std::max(m.groundAt[0].z, m.position.z) + sw::kMistSize * 0.5f;
+    m.position.z += sw::kMistSize * 0.5f;
+    // The ground along the way it will go (0x786330): a sample every 2 yd,
+    // at most 63; where it rises too steeply the sheet's life ends there.
+    const float run = glm::length(glm::vec2(m.velocity)) * m.life;
+    m.samples = std::clamp(static_cast<int>(std::lround(run / sw::kMistPathStep)), 0, sw::kMistPathSamples);
+    const glm::vec2 dir = run > 1e-3f ? glm::normalize(glm::vec2(m.velocity)) : glm::vec2(1.0f, 0.0f);
+    for (int i = 0; i < m.samples; ++i) {
+        const glm::vec2 at = glm::vec2(m.position) + dir * (sw::kMistPathStep * static_cast<float>(i));
+        const auto g = sandGround(at.x, at.y, queryZ);
+        m.ground[static_cast<size_t>(i)] = g ? *g : -1.0e9f;
+    }
+    const int cut = sw::mistSteepCut(m.ground.data(), m.samples);
+    if (cut >= 0) {
+        if (cut == 0) {
+            m.life = 0.0f;   // stock drops it (birth and death 0)
+        } else {
+            m.life *= static_cast<float>(cut + 1) / static_cast<float>(m.samples);
+            m.samples = cut;
+        }
+    }
 }
 
 void Weather::updateStockMist(const glm::vec3& cameraPos, float level, float deltaTime) {
@@ -603,9 +616,12 @@ void Weather::updateStockMist(const glm::vec3& cameraPos, float level, float del
         m.position += m.velocity * deltaTime + glm::vec3(push);
         // Kept half its size over the ground along its path: lifted by at
         // most a quarter of its size a frame, and pushed up (0xa0b634).
-        const float f = std::clamp(m.age / std::max(m.life, 0.01f), 0.0f, 1.0f) * 2.0f;
-        const int i = std::min(1, static_cast<int>(f));
-        const float ground = glm::mix(m.groundAt[i].z, m.groundAt[i + 1].z, f - static_cast<float>(i));
+        if (m.samples < 2) continue;
+        const float f = std::clamp(m.age / std::max(m.life, 0.01f), 0.0f, 1.0f) *
+                        static_cast<float>(m.samples - 1);
+        const int i = std::min(m.samples - 2, static_cast<int>(f));
+        const float ground = glm::mix(m.ground[static_cast<size_t>(i)], m.ground[static_cast<size_t>(i) + 1],
+                                      f - static_cast<float>(i));
         const float floor = ground + sw::kMistSize * 0.5f;
         if (m.position.z < floor) {
             m.accel += 1.666667f;
@@ -619,7 +635,7 @@ void Weather::updateStockMist(const glm::vec3& cameraPos, float level, float del
         if (static_cast<int>(mist_.size()) >= sw::kMistCap) continue;
         StockMist m;
         spawnStockMist(m, cameraPos);
-        mist_.push_back(m);
+        if (m.life > 0.0f) mist_.push_back(m);
     }
 }
 

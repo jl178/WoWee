@@ -176,6 +176,11 @@ public:
         glowAmount_ = glm::clamp(amount, 0.0f, 1.0f);
         glowBlend_ = glm::clamp(blend, 0.0f, 1.0f);
     }
+    /// ScreenEffect type 2, the nether world (0x7ea470): its combine's fade,
+    /// 0 off (0x7e8c80 climbs it to 0.75); it takes the glow's place.
+    void setNether(float fade) { nether_ = glm::clamp(fade, 0.0f, 1.0f); }
+    /// Under liquid the glow's last pass is ffxglowwave (0x8c2ce0).
+    void setUnderwaterWave(bool on) { underwaterWave_ = on; }
     /// The ffxGlow switch (stock default on).
     void setGlowEnabled(bool enabled) { glowEnabled_ = enabled; }
     /// Soft highlights (E18): the glow composite's channels past 1 eased onto
@@ -207,12 +212,15 @@ private:
     bool highlightRollOff_ = false;
     float glowAmount_ = 0.0f;
     float glowBlend_ = 0.0f;
+    float nether_ = 0.0f;
+    bool underwaterWave_ = false;
     [[nodiscard]] bool glowWanted() const {
         return glowEnabled_ && !(fsr_.enabled && !fsr2_.enabled);
     }
 
     [[nodiscard]] bool needsFXAAPass() const {
-        return fxaa_.enabled || drawnIntoxication() > 0.001f || ghost_ > 0.001f || glowWanted();
+        return fxaa_.enabled || drawnIntoxication() > 0.001f || ghost_ > 0.001f || glowWanted() ||
+               nether_ > 0.0f;
     }
 
     // FSR 1.0 upscaling state

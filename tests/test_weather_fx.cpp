@@ -280,3 +280,22 @@ TEST_CASE("stock: Weather.dbc picks the emitter, WMOAreaTable forces indoors", "
     CHECK_FALSE(sw::playerOutdoors(true, false, 0, 0x2u));
     CHECK(sw::playerOutdoors(true, false, 0, 0));
 }
+
+TEST_CASE("stock: light scale easing, the mist's steep cut, which breath", "[weather_fx][stock_weather]") {
+    // (|change| * 4 + 0.001) * 5 s: a full change takes 20 s.
+    CHECK(sw::lightScaleSeconds(1.0f, 0.0f) == Catch::Approx(20.005f));
+    CHECK(sw::lightScaleSeconds(0.5f, 0.5f) == Catch::Approx(0.005f));
+    // Level ground: no cut. A step of more than half a yard: cut there.
+    const float flat[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    CHECK(sw::mistSteepCut(flat, 8) == -1);
+    const float step[8] = {0, 0, 0, 0.6f, 0.6f, 0.6f, 0.6f, 0.6f};
+    CHECK(sw::mistSteepCut(step, 8) == 2);   // the half-yard step is the one sample ahead of 2
+    const float slope[8] = {0, 0.3f, 0.6f, 0.9f, 1.2f, 1.5f, 1.8f, 2.1f};
+    CHECK(sw::mistSteepCut(slope, 8) == -1);  // 0.3 a sample, 0.9 over three
+    const float wall[8] = {0, 0, 0, 0, 0, 2.0f, 2.0f, 2.0f};
+    CHECK(sw::mistSteepCut(wall, 8) == 2);
+    CHECK(sw::breathFor(true, 0.6f, true, true) == sw::Breath::DRUNK);
+    CHECK(sw::breathFor(false, 0.9f, true, true) == sw::Breath::UNDERWATER);
+    CHECK(sw::breathFor(true, 0.4f, false, true) == sw::Breath::COLD);
+    CHECK(sw::breathFor(false, 0.0f, false, false) == sw::Breath::NONE);
+}
