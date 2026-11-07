@@ -338,3 +338,93 @@ The real ones:
   `WoweeDebug_PadCommand` does. Test-hook only.
 - **Logout went to the login screen**, not character select (stock goes to
   character select). Long-standing; noted, not changed.
+
+## AddressSanitizer + UBSan soak (2026-11-04 to 11-06)
+
+A search for any other memory error like the one 72a11c3 fixed, before Friday.
+The client was built with `-fsanitize=address,undefined -fno-omit-frame-pointer`
+(RelWithDebInfo, LTO off, every in-tree library sanitized too) in a clean
+worktree of HEAD, first 72a11c3 and then bcb6e03, and run as its own client
+under `ASAN_OPTIONS=detect_leaks=0` (Mesa's Vulkan driver leaks), with reports
+written to `log_path` files.
+
+| Run | HEAD | halt_on_error | What | Length | Result |
+|-----|------|---------------|------|--------|--------|
+| t1 | 72a11c3 | 1 | the tour above plus the extras below, logout, relog, pass 2 | 46 min | clean, exit 0 |
+| l1 | 72a11c3 | 1 | teleport loop (`crash/lua/loop.lua`), Stormwind/Dalaran/Ironforge/Undercity at 0.4-6 s intervals, logout and relog | 90 min, 170 teleports | clean (stopped by its timeout) |
+| t2 | bcb6e03 | 0 | the tour | 3 min | cut short: another client logged in on the same account and the server dropped this one (see below) |
+| t3 | bcb6e03 | 0 | the tour plus extras, logout, relog, pass 2 | 46 min | clean, exit 0 |
+| l2 | bcb6e03 | 0 | teleport loop, logout, relog, pass 2 | 64 min, 103 teleports | clean; pass 2 ended when the window was closed from outside (main loop ended, exit 0) |
+
+About four hours under the sanitizers, 300 or so map loads. **No ASan or
+UBSan report from the client in any run**, no Lua error from it, and no crash.
+
+What the tour added for this (scratchpad `asan/lua/extra.lua`):
+
+- **Every settings row**, from `WoweeSettingList()`: 243 rows (the
+  Enhancements rows included), each set to every other choice of an enum, both
+  ends of a range or the other state of a switch, then restored, 1-2 s apart.
+  This is 325 changes. Left out: fullscreen, the map window, update checks,
+  content packs, gamepad, and the two preset rows, which `settingsSweep` changes on its own.
+- **Spell visuals**: 39 harmful, 43 self and 6 ground-targeted spells from
+  every class (Fireball, Blizzard, Death and Decay, Moonfire, Starfall, the druid forms, Shadowform,
+  Divine Shield, Mind Flay and others), each cast with `.cast <id> triggered` on a training dummy in
+  Nagrand, twice, plus the mage's own spells through `CastSpellByName`. About 180 casts.
+- **Multi-seat and flying mounts**: Traveler's Tundra Mammoth, Mechano-hog,
+  Mekgineer's Chopper, Grand Ice Mammoth, Swift Purple Gryphon, Red
+  Proto-Drake: mount, ride, dismount. A real vehicle (vehicle UI) was not
+  reached; that needs a quest or battleground.
+- Also, as in the tour: panels, the three options frames, the quality presets,
+  window resolution changes, bank and auction house, combat in Fargodeep Mine
+  and the Deadmines, riding, GM flight, swimming, eight cities, a battleground
+  queue, a teleport chain, logout, and relog by `WOWEE_AUTO_RELOG`.
+
+### Found and fixed: use after free in the replay test harness
+
+The client was clean, so the unit tests were run under the same sanitizers too
+(`ctest` in the ASan build, 304 tests). One report:
+
+```
+ERROR: AddressSanitizer: heap-use-after-free ... READ of size 8
+  #2 replay::SentPackets::of(LogicalOpcode) const   tests/game_replay.hpp:152
+  #3 CATCH2_INTERNAL_TEST_65                         tests/test_game_replay.cpp:655
+freed by:
+  #4 GameHandler::disconnect()                       src/game/game_handler.cpp:193
+  #5 GameHandler::returnToCharacterSelect()          src/game/game_handler.cpp:206
+allocated by:
+  #2 replay::Session::Session(const char*)           tests/game_replay.hpp:180
+```
+
+Cause: `replay::Session` handed its `SentPackets` socket to the handler as a
+`unique_ptr` and kept a raw pointer to it to read what was sent. The handler
+frees its socket on a disconnect, so the 72a11c3 test "a logout whose session has gone ends at the login
+screen" read the packet list out of a freed socket. Without a sanitizer it
+passed by luck, and any other test that read `sent()` after a disconnect would
+have done the same. The bug is in the tests only. The client does the same hand-off, and
+its socket callback only queues packets (`enqueueIncomingPacket`), so a
+disconnect never frees the socket under one of its own calls. No other test fixture keeps
+a raw `.get()` of something it gave away.
+
+Fix (`tests/game_replay.hpp`): the record of what was sent, and the
+connected flag, moved into a `SentLog` that the Session owns and the socket
+shares (`shared_ptr`). It outlives the socket, and `sent()` and `socket()` stay
+valid after any disconnect. The existing logout test covers it, and under the
+ASan build `game_replay` now passes.
+
+Everything else in the ASan `ctest` passed, with no UBSan "runtime error" anywhere. The exceptions:
+`clang_warning_check` hit its 900 s timeout (a source scan that is slow
+under `-j2` on a loaded machine, not a sanitizer finding), and the two
+FrameXML compile checks were skipped as usual.
+
+### Test accounts
+
+On 11-06 another agent's test client used the same HOME and character
+(`testhome`, Wptester on WPTEST). Each login kicked the other (`World server
+connection closed by peer`), which is what ended t2. For this soak there is now a third lab account
+on the local lab server only (127.0.0.1): **WPTEST3** (GM 3, all realms), with
+**Wptestc**, a copy of Wptester (level 80 human mage) made with
+`.pdump write` / `.pdump load`, and HOME `scratchpad/testhome3`. `.account
+create` needs the console (GM 3 gets the `.account` help), so the account row
+was written into `acore_auth` with an SRP6 salt and verifier, as AccountMgr
+writes them. Other agents use WPTEST3 only by arrangement. WPTEST and Wptester
+stay the shared test character, and WPTEST2 is Wptestb's.
