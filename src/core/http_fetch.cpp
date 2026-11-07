@@ -4,6 +4,7 @@
 #include <openssl/evp.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
+#include <zlib.h>
 
 #include <algorithm>
 #include <array>
@@ -212,9 +213,11 @@ std::string headerValue(const std::string& headers, const std::string& name) {
 /// Feeds body bytes through the hash, the cap, the sink and the progress.
 class BodyWriter {
 public:
-    BodyWriter(const FetchOptions& opts, const FetchSink& sink, const FetchProgress& progress,
-               std::uint64_t total, bool deliver)
-        : opts_(opts), sink_(sink), progress_(progress), total_(total), deliver_(deliver) {
+    /// `cap` is the most bytes accepted, zero for none. `what` names the body
+    /// in the error when the cap is passed.
+    BodyWriter(std::uint64_t cap, const char* what, const FetchSink& sink,
+               const FetchProgress& progress, std::uint64_t total, bool deliver)
+        : cap_(cap), what_(what), sink_(sink), progress_(progress), total_(total), deliver_(deliver) {
         md_ = EVP_MD_CTX_new();
         EVP_DigestInit_ex(md_, EVP_sha256(), nullptr);
     }
@@ -223,8 +226,8 @@ public:
     /// False when the caller cancelled or the cap was hit; `error` says which.
     bool write(const char* data, std::size_t size, std::string* error) {
         bytes_ += size;
-        if (opts_.maxBytes != 0 && bytes_ > opts_.maxBytes) {
-            *error = "reply is larger than " + std::to_string(opts_.maxBytes) + " bytes";
+        if (cap_ != 0 && bytes_ > cap_) {
+            *error = std::string(what_) + " is larger than " + std::to_string(cap_) + " bytes";
             return false;
         }
         if (!deliver_) return true;
@@ -256,7 +259,8 @@ public:
     }
 
 private:
-    const FetchOptions& opts_;
+    std::uint64_t cap_;
+    const char* what_;
     const FetchSink& sink_;
     const FetchProgress& progress_;
     std::uint64_t total_;
@@ -265,11 +269,101 @@ private:
     EVP_MD_CTX* md_ = nullptr;
 };
 
+/// Content-Encoding: gzip inflated as the bytes arrive, or the body passed
+/// through as it came. Sits between the transfer framing (Content-Length or
+/// chunked) and the BodyWriter, so the hash and the cap see the inflated
+/// bytes and the framing sees the compressed ones.
+class ContentDecoder {
+public:
+    /// `wireCap` bounds the compressed bytes, zero for none.
+    ContentDecoder(BodyWriter& out, bool gzip, std::uint64_t wireCap)
+        : out_(out), gzip_(gzip), wireCap_(wireCap) {}
+    ~ContentDecoder() {
+        if (zReady_) inflateEnd(&z_);
+    }
+    ContentDecoder(const ContentDecoder&) = delete;
+    ContentDecoder& operator=(const ContentDecoder&) = delete;
+
+    bool start(std::string* error) {
+        if (!gzip_) return true;
+        // 16 + MAX_WBITS: a gzip wrapper, not a zlib one or raw deflate.
+        if (inflateInit2(&z_, 16 + MAX_WBITS) != Z_OK) {
+            *error = "cannot start inflating the reply";
+            return false;
+        }
+        zReady_ = true;
+        return true;
+    }
+
+    bool write(const char* data, std::size_t size, std::string* error) {
+        wire_ += size;
+        if (!gzip_) return out_.write(data, size, error);
+        if (wireCap_ != 0 && wire_ > wireCap_) {
+            *error = "compressed reply is larger than " + std::to_string(wireCap_) + " bytes";
+            return false;
+        }
+        z_.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(data));
+        z_.avail_in = static_cast<uInt>(size);
+        // Inflate until the input is used up and the last call left room in
+        // the output, which is when zlib holds nothing more to give.
+        do {
+            if (ended_) {
+                // RFC 1952 allows several gzip members back to back; the body
+                // is their concatenation. Nothing left means nothing follows yet.
+                if (z_.avail_in == 0) break;
+                if (inflateReset(&z_) != Z_OK) {
+                    *error = "cannot restart inflating the reply";
+                    return false;
+                }
+                ended_ = false;
+            }
+            z_.next_out = reinterpret_cast<Bytef*>(chunk_);
+            z_.avail_out = sizeof(chunk_);
+            const int rc = inflate(&z_, Z_NO_FLUSH);
+            if (rc != Z_OK && rc != Z_STREAM_END && rc != Z_BUF_ERROR) {
+                *error = std::string("corrupt gzip body: ") +
+                         (z_.msg != nullptr ? z_.msg : "inflate failed");
+                return false;
+            }
+            const std::size_t produced = sizeof(chunk_) - z_.avail_out;
+            if (produced != 0 && !out_.write(chunk_, produced, error)) return false;
+            if (rc == Z_STREAM_END) {
+                ended_ = true;
+                continue;
+            }
+            if (rc == Z_BUF_ERROR) break;   // no progress possible without more input
+        } while (z_.avail_in > 0 || z_.avail_out == 0);
+        return true;
+    }
+
+    /// At the end of the body: a gzip stream must have reached its trailer,
+    /// which is also where zlib checked its CRC and length.
+    bool finish(std::string* error) const {
+        if (gzip_ && wire_ != 0 && !ended_) {
+            *error = "gzip body ended before its trailer";
+            return false;
+        }
+        return true;
+    }
+
+    std::uint64_t wireBytes() const { return wire_; }
+
+private:
+    BodyWriter& out_;
+    bool gzip_;
+    std::uint64_t wireCap_;
+    std::uint64_t wire_ = 0;
+    z_stream z_{};
+    bool zReady_ = false;
+    bool ended_ = false;
+    char chunk_[65536];
+};
+
 /// Transfer-Encoding: chunked, decoded as the bytes arrive.
 class ChunkedDecoder {
 public:
     /// Returns false on malformed input. Sets done when the last chunk ended.
-    bool feed(const char* data, std::size_t size, BodyWriter& out, std::string* error, bool* done) {
+    bool feed(const char* data, std::size_t size, ContentDecoder& out, std::string* error, bool* done) {
         for (std::size_t i = 0; i < size;) {
             if (remaining_ == 0) {
                 line_.push_back(data[i++]);
@@ -348,7 +442,8 @@ FetchResult fetchOnce(const std::string& url, const FetchOptions& opts, const Fe
         "GET " + parsed.path + " HTTP/1.1\r\n"
         "Host: " + hostHeader + "\r\n"
         "User-Agent: " + opts.userAgent + "\r\n"
-        "Accept: " + opts.accept + "\r\n"
+        "Accept: " + opts.accept + "\r\n" +
+        (opts.acceptGzip ? "Accept-Encoding: gzip\r\n" : "") +
         "Connection: close\r\n"
         "\r\n";
     if (!conn.writeAll(request)) {
@@ -421,14 +516,34 @@ FetchResult fetchOnce(const std::string& url, const FetchOptions& opts, const Fe
     const std::string lengthText = headerValue(headers, "Content-Length");
     if (!chunked && !lengthText.empty()) total = std::strtoull(lengthText.c_str(), nullptr, 10);
 
-    BodyWriter body(opts, sink, progress, total, deliver);
+    // Only gzip is asked for, so only gzip is undone. Anything else would
+    // land in the file still encoded and fail its hash for a reason nobody
+    // could see, so it is refused by name. An error body that is dropped
+    // unread needs no decoding.
+    const std::string encoding = lower(headerValue(headers, "Content-Encoding"));
+    const bool gzip = deliver && (encoding == "gzip" || encoding == "x-gzip");
+    if (deliver && !gzip && !encoding.empty() && encoding != "identity") {
+        result.error = "unsupported content encoding " + encoding;
+        return result;
+    }
+    // The cap counts inflated bytes. A compressed body with no cap of its own
+    // still gets one, and the compressed side may not pass the cap by more
+    // than gzip's overhead on bytes that do not compress (stored blocks cost
+    // five bytes in 64 KB, plus the header and trailer).
+    const std::uint64_t cap = gzip && opts.maxBytes == 0 ? kMaxInflatedBytes : opts.maxBytes;
+    const std::uint64_t wireCap = gzip ? cap + cap / 1024 + 4096 : 0;
+
+    BodyWriter body(cap, gzip ? "inflated reply" : "reply", sink, progress, gzip ? 0 : total,
+                    deliver);
+    ContentDecoder decoded(body, gzip, wireCap);
+    if (!decoded.start(&result.error)) return result;
     ChunkedDecoder chunks;
     bool done = false;
 
     auto consume = [&](const char* data, std::size_t size) -> bool {
-        if (chunked) return chunks.feed(data, size, body, &result.error, &done);
-        if (!body.write(data, size, &result.error)) return false;
-        if (total != 0 && body.bytes() >= total) done = true;
+        if (chunked) return chunks.feed(data, size, decoded, &result.error, &done);
+        if (!decoded.write(data, size, &result.error)) return false;
+        if (total != 0 && decoded.wireBytes() >= total) done = true;
         return true;
     };
 
@@ -448,14 +563,17 @@ FetchResult fetchOnce(const std::string& url, const FetchOptions& opts, const Fe
         result.error = "connection closed inside a chunked body";
         return result;
     }
-    if (!chunked && total != 0 && body.bytes() < total) {
-        result.error = "connection closed after " + std::to_string(body.bytes()) + " of " +
+    if (!chunked && total != 0 && decoded.wireBytes() < total) {
+        result.error = "connection closed after " + std::to_string(decoded.wireBytes()) + " of " +
                        std::to_string(total) + " bytes";
         return result;
     }
+    if (!decoded.finish(&result.error)) return result;
 
     result.ok = true;
     result.bytes = body.bytes();
+    result.wireBytes = decoded.wireBytes();
+    if (gzip) result.contentEncoding = "gzip";
     result.sha256 = body.hexDigest();
     return result;
 }

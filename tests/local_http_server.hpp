@@ -6,11 +6,14 @@
 /// the client ever sends.
 
 #include <atomic>
+#include <cctype>
 #include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
 #include <thread>
+
+#include <zlib.h>
 
 #include "network/net_platform.hpp"
 
@@ -24,7 +27,26 @@ public:
         std::string headers;
         /// Lie about the length: send this many fewer bytes than declared.
         std::size_t truncate = 0;
+        /// Gzip the body for a request that sent Accept-Encoding: gzip, the
+        /// way `wowpack serve` does; send it as is otherwise. `truncate`
+        /// then applies to the compressed bytes.
+        bool gzip = false;
     };
+
+    /// One gzip member of `data`, as `wowpack serve` would send it.
+    static std::string gzipBytes(const std::string& data, int level = Z_BEST_COMPRESSION) {
+        z_stream z{};
+        deflateInit2(&z, level, Z_DEFLATED, 16 + MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
+        std::string out(deflateBound(&z, static_cast<uLong>(data.size())) + 64, '\0');
+        z.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(data.data()));
+        z.avail_in = static_cast<uInt>(data.size());
+        z.next_out = reinterpret_cast<Bytef*>(out.data());
+        z.avail_out = static_cast<uInt>(out.size());
+        deflate(&z, Z_FINISH);
+        out.resize(z.total_out);
+        deflateEnd(&z);
+        return out;
+    }
 
     LocalHttpServer() {
         wowee::net::ensureInit();
@@ -66,6 +88,12 @@ public:
 
     int requests() const { return requests_.load(); }
 
+    /// The request line and headers of the most recent request.
+    std::string lastRequest() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lastRequest_;
+    }
+
 private:
     void loop() {
         while (!stop_.load()) {
@@ -95,6 +123,7 @@ private:
         Reply reply;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            lastRequest_ = req.substr(0, req.find("\r\n\r\n") + 2);
             const auto it = replies_.find(path);
             if (it == replies_.end()) {
                 reply.status = 404;
@@ -102,6 +131,12 @@ private:
             } else {
                 reply = it->second;
             }
+        }
+        std::string lowerReq = req;
+        for (char& ch : lowerReq) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (reply.gzip && lowerReq.find("\r\naccept-encoding: gzip") != std::string::npos) {
+            reply.body = gzipBytes(reply.body);
+            reply.headers += "Content-Encoding: gzip\r\n";
         }
         std::string out = "HTTP/1.1 " + std::to_string(reply.status) + " X\r\n" + reply.headers;
         if (reply.chunked) {
@@ -133,6 +168,7 @@ private:
     std::thread thread_;
     std::atomic<bool> stop_{false};
     std::atomic<int> requests_{0};
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::map<std::string, Reply> replies_;
+    std::string lastRequest_;
 };

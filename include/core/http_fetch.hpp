@@ -9,6 +9,12 @@
 /// can cancel, one redirect, and a running SHA-256 so the caller can verify
 /// what landed without reading it back.
 ///
+/// It asks for gzip (`Accept-Encoding: gzip`) and inflates a gzip reply as it
+/// streams. Everything a caller sees, the sink, the cap, the hash, `bytes`
+/// and the progress count, is about the inflated body, so a pack index that
+/// lists sizes and hashes of the files themselves checks the same way
+/// whether or not the server compressed them.
+///
 /// Still not a general HTTP client: no keep-alive, no POST, no cookies, no
 /// proxy. Call it off the render thread; it blocks on every socket operation.
 
@@ -34,14 +40,21 @@ bool parseHttpUrl(const std::string& url, HttpUrl* out, std::string* error);
 /// of a pack names its files relative to where the index itself was fetched.
 std::string httpUrlDirectory(const std::string& url);
 
+/// Ceiling on an inflated gzip body when the caller set no cap of its own,
+/// so a small compressed reply cannot expand into the disk or memory.
+constexpr std::uint64_t kMaxInflatedBytes = 2ull * 1024 * 1024 * 1024;
+
 struct FetchOptions {
     std::string userAgent = "WoWee";
     std::string accept = "*/*";
     /// Per socket operation, not for the whole exchange.
     int timeoutSeconds = 15;
-    /// The most body bytes accepted. Zero means no cap. Exceeding it is an
-    /// error, not a truncated success.
+    /// The most body bytes accepted, counted after inflating. Zero means no
+    /// cap, except that an inflated gzip body is still held to
+    /// kMaxInflatedBytes. Exceeding it is an error, not a truncated success.
     std::uint64_t maxBytes = 0;
+    /// Send `Accept-Encoding: gzip`. A server that ignores it still works.
+    bool acceptGzip = true;
     /// Plain http:// is refused unless the caller says it has decided the
     /// host can be trusted without TLS (a LAN address, a loopback).
     bool allowPlainHttp = false;
@@ -59,16 +72,23 @@ struct FetchResult {
     /// HTTP status of the final reply. 200 is the only success for a pack.
     int status = 0;
     std::string error;
-    /// Body bytes delivered.
+    /// Body bytes delivered, after inflating.
     std::uint64_t bytes = 0;
+    /// Body bytes as the server encoded them: the compressed size for gzip,
+    /// the same as `bytes` otherwise. Transfer framing is not counted.
+    std::uint64_t wireBytes = 0;
+    /// "gzip" when the reply was inflated, empty when it came as is.
+    std::string contentEncoding;
     /// Lower-case hex SHA-256 of the delivered body.
     std::string sha256;
 };
 
 /// Receives body bytes. Return false to cancel.
 using FetchSink = std::function<bool(const char* data, std::size_t size)>;
-/// Progress after each read: bytes so far and the Content-Length, or 0 when
-/// the server did not say. Return false to cancel.
+/// Progress after each read: inflated bytes so far and the Content-Length,
+/// or 0 when the server did not say or the body is compressed (the
+/// Content-Length of a gzip reply is not the size the count runs to).
+/// Return false to cancel.
 using FetchProgress = std::function<bool(std::uint64_t got, std::uint64_t total)>;
 
 FetchResult httpFetch(const std::string& url, const FetchOptions& opts,

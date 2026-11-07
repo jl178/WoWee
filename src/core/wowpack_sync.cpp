@@ -242,6 +242,10 @@ void WowpackSync::run(std::string url, std::string overrideDir, std::string expa
     result.files = plan.keep;
 
     std::uint64_t doneBefore = 0;
+    // What crossed the network for the files, compressed where the server
+    // gzipped them; doneBefore counts the same files as they land.
+    std::uint64_t wireBytes = 0;
+    std::size_t gzipped = 0;
     for (const wowpack::PackFile& f : plan.download) {
         if (cancel_.load()) {
             fail("cancelled");
@@ -285,6 +289,8 @@ void WowpackSync::run(std::string url, std::string overrideDir, std::string expa
             return;
         }
         result.files.push_back(f);
+        wireBytes += fr.wireBytes;
+        if (fr.contentEncoding == "gzip") ++gzipped;
         doneBefore += f.size;
         bytesDone_.store(doneBefore);
         filesDone_.fetch_add(1);
@@ -294,6 +300,11 @@ void WowpackSync::run(std::string url, std::string overrideDir, std::string expa
     if (!writeAtomically(stateDir / kInstalledFile, wowpack::serializeInstalled(result))) {
         fail("cannot write " + (stateDir / kInstalledFile).string());
         return;
+    }
+    if (!plan.download.empty()) {
+        LOG_INFO("Content pack ", index.name, " ", index.version, ": fetched ", plan.download.size(),
+                 " file(s), ", doneBefore, " bytes as ", wireBytes, " bytes transferred (",
+                 gzipped, " gzip)");
     }
     LOG_INFO("Content pack ", index.name, " ", index.version, " is up to date");
     changed_.store(!plan.download.empty() || !plan.remove.empty());
