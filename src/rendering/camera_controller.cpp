@@ -3748,18 +3748,20 @@ void CameraController::update(float deltaTime) {
             wasWalkMode_ = walking;
         }
 
-        // Fall landing, for a fall that actually happened: the stock rule
-        // (0x73D4A0) is a fall height - start z less the landing z, plus a
-        // jump's rise (0x986FB0) - over 1/36 yd. A bump at riding speed that
-        // breaks ground contact for a frame drops a few millimetres and sends
-        // nothing, so a mount crossing a field is not seen by everyone else
-        // as one landing after another. A reported jump always lands with
-        // FALL_LAND here, even onto a ledge near its apex: it is what clears
-        // FALLING and applies the keys pressed in the air in this client's
-        // copy of the flags.
-        if (wasFalling && grounded && followTarget &&
-            (fallJumped_ || sm::fallLandDue(fallApexZ_, followTarget->z))) {
-            movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_FALL_LAND));
+        // The landing of a fall the server was told of (a jump, a knockback,
+        // a walk off an edge - below): the stock rule (0x73D4A0) sends
+        // FALL_LAND for a fall height - start z less the landing z, plus a
+        // jump's rise (0x986FB0) - over 1/36 yd. Within that (a jump onto a
+        // ledge at its apex) nothing is sent; the landing still clears
+        // FALLING and applies the keys pressed in the air (0x988490) in this
+        // client's copy of the flags. The frame the fall ends, rising or not:
+        // a jump that meets a slope on the way up lands too.
+        if (fallTracking_ && fallJumped_ && grounded && !swimming && followTarget) {
+            if (sm::fallLandDue(fallApexZ_, followTarget->z)) {
+                movementCallback(static_cast<uint32_t>(game::Opcode::MSG_MOVE_FALL_LAND));
+            } else if (silentLandingCallback_) {
+                silentLandingCallback_();
+            }
         }
     }
 
@@ -3849,8 +3851,24 @@ void CameraController::update(float deltaTime) {
     if (!grounded && !swimming && !isFlightAirborne() && followTarget) {
         if (!fallTracking_) {
             fallTracking_ = true;
+            fallElapsed_ = 0.0f;
             const float up = std::max(verticalVelocity, 0.0f);
             fallApexZ_ = followTarget->z + up * up / (2.0f * sm::kGravity);
+        } else {
+            fallElapsed_ += deltaTime;
+        }
+        // A fall that began without a jump - walked off an edge, or the
+        // ground gone from under the feet (0x7620F0 -> 0x988370(0)): stock
+        // reports it at once, as a HEARTBEAT with FALLING (event 9), and the
+        // keys pressed from then on go out as pending ones. Reported here
+        // once it has dropped the 1/36 yd that makes its landing a FALL_LAND
+        // (a few frames, 54 ms from rest): a bump that loses the ground for a
+        // frame or two and drops less lands with nothing to say either way,
+        // so the server is not told of it at all.
+        if (!fallJumped_ && !externalFollow_ && fallReportCallback_ &&
+            fallApexZ_ - followTarget->z > sm::kFallLandMinHeight) {
+            fallJumped_ = true;
+            fallReportCallback_(static_cast<uint32_t>(fallElapsed_ * 1000.0f));
         }
     } else {
         fallTracking_ = false;

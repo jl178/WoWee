@@ -585,6 +585,65 @@ bool MovementHandler::inStockHeartbeatMotion() const {
     return (movementInfo.flags & stock_movement::kMovingMask) != 0;
 }
 
+void MovementHandler::setFallLeg() {
+    // Worked out in the wire's own frame (the stock facing), and laid down in
+    // the stock order: x first. The writers put jumpSinAngle first on the
+    // wire (AzerothCore's names for the two), so x goes there.
+    const sm::Dir2 dir = sm::moveDirection(
+        movementInfo.flags, core::coords::canonicalToServerYaw(movementInfo.orientation));
+    movementInfo.jumpSinAngle = dir.x;
+    movementInfo.jumpCosAngle = dir.y;
+    sm::Speeds sp;
+    sp.walk = serverWalkSpeed_;
+    sp.run = serverRunSpeed_;
+    sp.runBack = serverRunBackSpeed_;
+    sp.swim = serverSwimSpeed_;
+    sp.swimBack = serverSwimBackSpeed_;
+    sp.flight = serverFlightSpeed_;
+    sp.flightBack = serverFlightBackSpeed_;
+    movementInfo.jumpXYSpeed = sm::selectSpeed(movementInfo.flags, sp);
+}
+
+void MovementHandler::beginWalkOffFall(uint32_t msSinceEdge) {
+    // 0x7620F0 -> 0x988370(0) -> event 9: FALLING with a vertical speed of
+    // 0, the leg's direction and speed kept, fall time from the edge - and
+    // 0x6EF860 sends it as a HEARTBEAT (0xEE). The keys pressed from here on
+    // go out as pending ones, as in a jump.
+    if (owner_.getState() != WorldState::IN_WORLD || isWorldPortHeld() ||
+        playerOnServerSpline() || movingOtherUnit()) {
+        return;
+    }
+    if (movementInfo.flags & static_cast<uint32_t>(MovementFlags::FALLING)) return;
+    if (movementInfo.flags & (static_cast<uint32_t>(MovementFlags::SWIMMING) |
+                              static_cast<uint32_t>(MovementFlags::FLYING))) {
+        return;
+    }
+    movementInfo.flags |= static_cast<uint32_t>(MovementFlags::FALLING);
+    isFalling_ = true;
+    movementInfo.fallTime = 0;
+    movementInfo.jumpVelocity = 0.0f;
+    setFallLeg();
+    fallBackdateMs_ = std::max<uint32_t>(msSinceEdge, 1u);
+    sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+}
+
+void MovementHandler::landWithoutPacket() {
+    // A reported fall that lands within 1/36 yd of where it peaked (0x73D4A0
+    // sends no FALL_LAND for it): the landing 0x988490 still clears FALLING
+    // and applies the keys pressed in the air (0x6EB3B0), here; the next
+    // movement packet carries the result.
+    if (!(movementInfo.flags & static_cast<uint32_t>(MovementFlags::FALLING))) return;
+    movementInfo.flags = sm::landWithPendingKeys(movementInfo.flags);
+    isFalling_ = false;
+    fallStartMs_ = 0;
+    fallBackdateMs_ = 0;
+    movementInfo.fallTime = 0;
+    movementInfo.jumpVelocity = 0.0f;
+    movementInfo.jumpSinAngle = 0.0f;
+    movementInfo.jumpCosAngle = 0.0f;
+    movementInfo.jumpXYSpeed = 0.0f;
+}
+
 bool MovementHandler::pitchChangeWorthSending(float pitchRad) const {
     if (!hasLastPacketOrientation_) return false;
     return stock_movement::pitchChangeWorthSending(lastPacketPitch_, pitchRad, movementInfo.flags);
@@ -731,23 +790,7 @@ void MovementHandler::sendMovement(Opcode opcode) {
                 movementInfo.flags &= ~(static_cast<uint32_t>(MovementFlags::SWIMMING) |
                                         static_cast<uint32_t>(MovementFlags::ASCENDING) |
                                         static_cast<uint32_t>(MovementFlags::DESCENDING));
-                // Worked out in the wire's own frame (the stock facing), and
-                // laid down in the stock order: x first. The writers put
-                // jumpSinAngle first on the wire (AzerothCore's names for the
-                // two), so x goes there.
-                const sm::Dir2 dir = sm::moveDirection(
-                    movementInfo.flags, core::coords::canonicalToServerYaw(movementInfo.orientation));
-                movementInfo.jumpSinAngle = dir.x;
-                movementInfo.jumpCosAngle = dir.y;
-                sm::Speeds sp;
-                sp.walk = serverWalkSpeed_;
-                sp.run = serverRunSpeed_;
-                sp.runBack = serverRunBackSpeed_;
-                sp.swim = serverSwimSpeed_;
-                sp.swimBack = serverSwimBackSpeed_;
-                sp.flight = serverFlightSpeed_;
-                sp.flightBack = serverFlightBackSpeed_;
-                movementInfo.jumpXYSpeed = sm::selectSpeed(movementInfo.flags, sp);
+                setFallLeg();
             }
             break;
         case Opcode::MSG_MOVE_SET_WALK_MODE:
@@ -780,6 +823,12 @@ void MovementHandler::sendMovement(Opcode opcode) {
             break;
         case Opcode::MSG_MOVE_HEARTBEAT:
             timeSinceLastMoveHeartbeat_ = 0.0f;
+            // The walk-off fall's report (beginWalkOffFall): its time counts
+            // from the edge, not from this packet.
+            if (fallBackdateMs_ != 0) {
+                fallStartMs_ = movementTime > fallBackdateMs_ ? movementTime - fallBackdateMs_ : 0u;
+                fallBackdateMs_ = 0;
+            }
             break;
         case Opcode::MSG_MOVE_START_ASCEND:
             movementInfo.flags |= static_cast<uint32_t>(MovementFlags::ASCENDING);

@@ -233,7 +233,7 @@ not the path (the arc functions are only used when not falling).
 
 **Landing** (0x988490): clears FALLING, applies the pending flags (0x6EB3B0),
 recomputes direction and speed from what is held now.
-`MSG_MOVE_FALL_LAND` (0xC9) is sent when the fall height
+`MSG_MOVE_FALL_LAND` (0xC9) is sent only when the fall height
 (0x986FB0: start z - z, plus `v^2/2g` for a jump) is above **1/36 yd**
 (0xA3F854), which is every jump (0x73D4A0). Above 13 or 70 yd the landing also
 plays the fall sound and the hard-landing effect (0x73D3D0).
@@ -583,6 +583,8 @@ also skips the cameraDive surface/submerge pitch limits (0x6023D0,
 | 37 | At the surface a swimmer stays level unless the mouse steers it 18 degrees or more down (cameraDive, cameraSubmergePitch); crossing the water line eases the camera to 5 degrees down (section 10) | a swimmer at the surface followed the camera's 3D direction and a float spring pulled it back unless it looked 16 degrees down; the camera kept its pitch at the line | `stock_camera::waterLine / diveHoldsLevel / waterLineFinalPitch`: the dive holds `movePitchDeg_` level, the crossing starts the pitch ease |
 | 38 | The player's model fades by the drawn camera distance (1.83 yd to the near clip, cosine), is hidden at 0, and the mount with it | hidden only at a zoom target of 0.65 yd or less, never faded; SetView(1) (0.5 yd) still drew it in the in-game check | `stock_camera::playerModelAlpha` each frame, `isFirstPersonView` is alpha 0, the alpha multiplied into the player's presented alpha (stealth, ghost) and given to the mount (`EntitySpawner::syncUnitPresentation`) |
 | 39 | After running off what it stood on, the walker snaps down `move x 1.8494` (0x7620F0), so a walkable descent stays grounded at any speed and frame rate | the walking step-down reached a fixed 0.6: on a steep walkable slope a fast mount, or a low frame rate, lost the ground and fell | `max(0.6, stock_movement::walkOffSnapReach(move))`; the 0.6 floor is Wowee's (7.3) |
+| 40 | A fall that starts without a jump (walked off an edge) is reported at once: HEARTBEAT 0xEE with FALLING, v0 0, the leg's direction and speed (event 9, 0x988370(0)); keys in the air then go out pending, as in a jump | not reported (no FALLING went out), so its keys stayed latched and were sent at the landing, and its landing was a FALL_LAND by height alone | `MovementHandler::beginWalkOffFall` (from `CameraController`'s fall tracking once the fall has dropped 1/36; the fall time backdated to the edge), the jump's key rules from then on |
+| 41 | No FALL_LAND for a landing within 1/36 yd of the fall's apex (0x73D4A0), a jump onto a ledge at the top of its arc included; the landing still clears FALLING and applies the pending keys | a reported jump always sent FALL_LAND (it was what cleared FALLING here), and a jump that met a slope while still rising sent nothing and left FALLING set | `fallLandDue` for every reported fall, `MovementHandler::landWithoutPacket` otherwise; the landing is taken the frame the fall ends, rising or not |
 
 Still different (not changed here; each needs in-game checking):
 
@@ -613,13 +615,11 @@ Still different (not changed here; each needs in-game checking):
   changes collision for every swimmer and was not done here.
 - **Steep ground.** Stock is FALLING on it and the air step slides the box
   down; Wowee slides terrain only, with its own acceleration.
-- **Air keys after a walk off an edge**: stock sends HEARTBEAT with FALLING
-  there (event 9), so its keys go out pending too. Wowee does not report
-  such a fall as one (no FALLING goes out), so their keys stay latched and
-  are sent at the landing (#28 covers jumps only).
-- **FALL_LAND after a jump that lands within 1/36 yd of its apex** (onto a
-  ledge): stock sends none; Wowee sends it, as it is what clears FALLING in
-  its copy of the flags.
+- **When a walk-off fall is reported**: stock sends its HEARTBEAT the slice
+  the walker finds no ground (7.3); Wowee sends it once the fall has dropped
+  1/36 yd (54 ms from rest), so a frame's loss of contact that drops less -
+  which Wowee's floor pick has more of than the stock walker - says nothing.
+  The fall time it carries counts from the edge either way (#40).
 - Click-to-move was not traced.
 
 ## 12. Flight allowed, teleports and the world port

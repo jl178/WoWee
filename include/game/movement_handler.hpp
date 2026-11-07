@@ -232,6 +232,13 @@ public:
     /// MSG_MOVE_SET_PITCH due: swimming or flying, 0.1 rad from the pitch the
     /// last movement packet carried (stock_movement::pitchChangeWorthSending).
     [[nodiscard]] bool pitchChangeWorthSending(float pitchRad) const;
+    /// A fall that began by walking off an edge, reported as stock reports it
+    /// (event 9): FALLING with v0 0, the leg's direction and speed, a
+    /// HEARTBEAT sent with the fall time counted from the edge.
+    void beginWalkOffFall(uint32_t msSinceEdge);
+    /// A reported fall that lands without a FALL_LAND (within 1/36 yd of its
+    /// apex): FALLING cleared and the pending keys applied, nothing sent.
+    void landWithoutPacket();
     [[nodiscard]] float getMoveHeartbeatInterval() const { return moveHeartbeatInterval_; }
     [[nodiscard]] bool isServerMovementAllowed() const { return serverMovementAllowed_; }
     /// Whether the player is in the air on a flying mount, as the movement
@@ -372,6 +379,11 @@ private:
     /// by 0x71F0C0). Unset until the first packet.
     float lastPacketOrientation_ = 0.0f;
     float lastPacketPitch_ = 0.0f;
+    /// The fall time a walk-off fall's HEARTBEAT backdates to its edge.
+    uint32_t fallBackdateMs_ = 0;
+    /// The jump block's direction and speed (+0x70/+0x74, +0x8C) for the
+    /// current flags, as a jump or a fall from an edge starts them.
+    void setFallLeg();
     bool hasLastPacketOrientation_ = false;
 
     // The active mover (0: the player) and the player's own movement and

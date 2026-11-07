@@ -3088,6 +3088,14 @@ void Application::setState(AppState newState) {
                         gameHandler->sendMovement(static_cast<game::Opcode>(opcode));
                     }
                 });
+                cc->setFallReportCallback([this](uint32_t msSinceEdge) {
+                    if (gameHandler && gameHandler->getMovementHandler())
+                        gameHandler->getMovementHandler()->beginWalkOffFall(msSinceEdge);
+                });
+                cc->setSilentLandingCallback([this]() {
+                    if (gameHandler && gameHandler->getMovementHandler())
+                        gameHandler->getMovementHandler()->landWithoutPacket();
+                });
                 cc->setStandUpCallback([this]() {
                     if (gameHandler) {
                         gameHandler->setStandState(rendering::AnimationController::STAND_STATE_STAND);
