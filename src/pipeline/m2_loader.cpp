@@ -1105,6 +1105,32 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
             const bool isCastRelease = std::memcmp(m2Data.data() + base, "$CSL", 4) == 0 ||
                                        std::memcmp(m2Data.data() + base, "$CSR", 4) == 0 ||
                                        std::memcmp(m2Data.data() + base, "$CST", 4) == 0;
+            // Game object and doodad events, kept per sequence as well as in
+            // the lists below (doodadSounds, effectSounds) that read them
+            // their own way.
+            if (wotlkEvents && pipeline::isM2ObjectEventTag(rd32(base))) {
+                const uint32_t objTag = rd32(base);
+                glm::vec3 pos(0.0f);
+                std::memcpy(&pos, m2Data.data() + base + 12, sizeof(float) * 3);
+                if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z))
+                    pos = glm::vec3(0.0f);
+                const uint32_t nArrays = rd32(base + trackOfs + 4);
+                const uint32_t ofsArrays = rd32(base + trackOfs + 8);
+                const uint32_t count = std::min<uint32_t>(nArrays, model.sequences.size());
+                for (uint32_t s = 0; s < count; s++) {
+                    if (!(model.sequences[s].flags & kM2SeqFlagEmbeddedData)) continue;
+                    const uint32_t nTs = rd32(ofsArrays + s * 8);
+                    const uint32_t ofsTs = rd32(ofsArrays + s * 8 + 4);
+                    if (nTs == 0 || nTs > 64) continue;
+                    if (ofsTs + nTs * sizeof(uint32_t) > m2Data.size()) continue;
+                    if (model.objectEvents.size() < model.sequences.size())
+                        model.objectEvents.resize(model.sequences.size());
+                    for (uint32_t ts : readArray<uint32_t>(m2Data, ofsTs, nTs)) {
+                        model.objectEvents[s].push_back(
+                            {ts, objTag, rd32(base + 4), static_cast<uint16_t>(rd32(base + 8) & 0xFFFFu), pos});
+                    }
+                }
+            }
             // $WTB / $WTT: the ends of a weapon's swing trail.
             if (std::memcmp(m2Data.data() + base, "$WTB", 4) == 0 ||
                 std::memcmp(m2Data.data() + base, "$WTT", 4) == 0) {
@@ -1276,6 +1302,12 @@ M2Model M2Loader::load(const std::vector<uint8_t>& m2Data) {
                       [](const M2Model::SoundEvent& a, const M2Model::SoundEvent& b) {
                           return a.timeMs < b.timeMs;
                       });
+        }
+        for (auto& list : model.objectEvents) {
+            std::stable_sort(list.begin(), list.end(),
+                             [](const M2Model::ObjectEvent& a, const M2Model::ObjectEvent& b) {
+                                 return a.timeMs < b.timeMs;
+                             });
         }
         if (footfallStamps > 0) {
             core::Logger::getInstance().debug("  Footfall events: ", footfallStamps, " timestamps");

@@ -5328,6 +5328,11 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     runInGameStage("updateLootSparkles", [&] {
         updateLootSparkles();
     });
+    // Game objects' model sounds and freeze flag (EntitySpawner, after the
+    // renderer's update has fired their models' events).
+    runInGameStage("updateGameObjectPresentation", [&] {
+        if (entitySpawner_) entitySpawner_->updateGameObjectPresentation();
+    });
     runInGameStage("updateUnitHighlights", [&] {
         updateUnitHighlights();
         updateDrunkLevel();
@@ -7464,6 +7469,16 @@ void Application::updateLootSparkles() {
     for (auto it = corpseDeathSeenAt_.begin(); it != corpseDeathSeenAt_.end();) {
         if (!gameHandler->getEntityManager().getEntity(it->first)) it = corpseDeathSeenAt_.erase(it);
         else ++it;
+    }
+    // And the game objects a quest of the player's needs: GAMEOBJECT_DYNAMIC
+    // 0x8 brings up the same Loot Art (Wow.exe 0x711210 -> 0x70d080).
+    if (sparkles && entitySpawner_) {
+        const auto objects = entitySpawner_->sparklingGameObjects();
+        for (const auto& o : objects) corpses.push_back({o.guid, o.position, o.scale});
+        if (objects.size() != sparklingObjectCount_) {
+            sparklingObjectCount_ = objects.size();
+            LOG_INFO("Quest sparkle: ", sparklingObjectCount_, " game object(s)");
+        }
     }
     if (sparkles) sparkles->update(renderer->getM2Renderer(), assetManager.get(), corpses);
 }

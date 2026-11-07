@@ -17,6 +17,7 @@
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "audio/npc_voice_manager.hpp"
+#include "audio/game_object_sounds.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/wmo_group_path.hpp"
@@ -1105,13 +1106,21 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             m2Renderer->setSkipCollision(instanceId, true);
         }
 
-        // Transports are driven by the transport system rather than a looping idle.
+        // Transports are driven by the transport system rather than a looping
+        // idle. Everything else plays its default sequence until its state
+        // arrives (in the create block, applied below), as the stock model
+        // does before the handler's first kind; no freezing by type.
         bool isTransportGO = gameHandler_ && gameHandler_->isTransportGuid(guid);
-        if (!isTransportGO) {
-            applyGameObjectAnimationPolicy(guid, entry, instanceId);
-        }
 
         gameObjectInstances_[guid] = {.modelId = modelId, .instanceId = instanceId, .isWmo = false};
+        gameObjectInstances_[guid].displayId = displayId;
+        // Its model's events sound (0x70cac0 -> 0x70c050). A transport's
+        // handler fires nothing (types 11 and 15: 0x6b1b80).
+        if (!isTransportGO) {
+            ensureGameObjectSounds();
+            goSounds_->addObject(instanceId, displayId);
+            m2Renderer->setInstanceFiresObjectEvents(instanceId, true);
+        }
 
         // ...and the pose the server described before this model existed.
         if (auto pending = gameObjectPendingState_.find(guid);

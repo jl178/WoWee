@@ -4,6 +4,7 @@
 #include "rendering/m2_renderer.hpp"
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/m2_model_classifier.hpp"
+#include "rendering/animation/anim_selection.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_buffer.hpp"
 #include "rendering/vk_texture.hpp"
@@ -158,6 +159,8 @@ void M2Renderer::setInstanceAnimationFrozen(uint32_t instanceId, bool frozen) {
     if (frozen) {
         inst.animTime = 0.0f;  // Reset to bind pose
     }
+    inst.eventSeq = static_cast<int16_t>(inst.currentSequenceIndex);
+    inst.eventCursorMs = inst.animTime;
 }
 
 void M2Renderer::restartInstanceAnimation(uint32_t instanceId) {
@@ -171,6 +174,7 @@ void M2Renderer::restartInstanceAnimation(uint32_t instanceId) {
     inst.animTime = 0.0f;
     inst.animTimeAlt = 0.0f;
     inst.animDir = 1.0f;
+    inst.eventSeq = -1;  // its events fire again from the start
     if (inst.cachedModel) computeBoneMatrices(*inst.cachedModel, inst, &cachedCamPos_);
 }
 
@@ -181,14 +185,6 @@ void M2Renderer::holdInstanceAnimationAtEnd(uint32_t instanceId) {
     inst.holdAtEnd = true;
     inst.thenLoopSequence = -1;
     inst.playingVariation = false;
-}
-
-std::optional<uint32_t> M2Renderer::soleSequenceId(uint32_t instanceId) const {
-    auto idxIt = instanceIndexById.find(instanceId);
-    if (idxIt == instanceIndexById.end()) return std::nullopt;
-    const auto& inst = instances[idxIt->second];
-    if (!inst.cachedModel || inst.cachedModel->sequences.size() != 1) return std::nullopt;
-    return inst.cachedModel->sequences[0].id;
 }
 
 void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animationId,
@@ -218,6 +214,10 @@ void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animatio
         inst.playingVariation = false;
         inst.holdAtEnd = false;
         inst.thenLoopSequence = loopIdx;
+        inst.thenLoopMode = 0;
+        // A state seen, not a motion heard: none of its events from the start.
+        inst.eventSeq = static_cast<int16_t>(loopIdx);
+        inst.eventCursorMs = 0.0f;
         return;
     }
     for (int i = 0; i < static_cast<int>(seqs.size()); ++i) {
@@ -230,12 +230,16 @@ void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animatio
         inst.playingVariation = false;   // not a variation: it does not go back
         inst.holdAtEnd = true;
         inst.thenLoopSequence = loopIdx;
+        inst.thenLoopMode = 0;
         if (skipToEnd) {
             inst.animTime = inst.animDuration;
             inst.animSpeed = 0.0f;
+            inst.eventSeq = static_cast<int16_t>(i);
+            inst.eventCursorMs = inst.animTime;
         } else {
             inst.animTime = 0.0f;
             inst.animSpeed = 1.0f;
+            inst.eventSeq = -1;
         }
         return;
     }
@@ -263,9 +267,155 @@ void M2Renderer::setInstanceAnimation(uint32_t instanceId, uint32_t animationId,
             inst.playingVariation = !loop;
             inst.holdAtEnd = false;
             inst.thenLoopSequence = -1;
+            inst.eventSeq = -1;
             return;
         }
     }
+}
+
+bool M2Renderer::playInstanceSequence(uint32_t instanceId, uint32_t animationId, uint8_t mode,
+                                      uint32_t thenAnimationId, uint8_t thenMode,
+                                      float startFraction, bool blend, bool fireEvents) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return false;
+    auto& inst = instances[idxIt->second];
+    advanceClock(inst);
+    if (!inst.cachedModel) return false;
+    const auto& seqs = inst.cachedModel->sequences;
+    auto find = [&](uint32_t id) {
+        for (int i = 0; i < static_cast<int>(seqs.size()); ++i)
+            if (seqs[i].id == id) return i;
+        return -1;
+    };
+    const int idx = find(animationId);
+    if (idx < 0) return false;
+    const int loopIdx = thenAnimationId == UINT32_MAX ? -1 : find(thenAnimationId);
+
+    if (blend && idx != inst.currentSequenceIndex) beginM2SequenceBlend(*inst.cachedModel, inst, idx);
+    else if (!blend) inst.blendDurationMs = 0.0f;
+    inst.currentSequenceIndex = idx;
+    inst.animDuration = static_cast<float>(seqs[idx].duration);
+    inst.playingVariation = false;
+    inst.pausedDir = 0;
+    const float dur = inst.animDuration;
+    const float f = std::clamp(startFraction, 0.0f, 1.0f);
+    switch (static_cast<anim::PlayMode>(mode)) {
+        case anim::PlayMode::Reverse:
+            inst.animTime = dur * (1.0f - f);
+            inst.animSpeed = -1.0f;
+            break;
+        case anim::PlayMode::HoldFirst:
+            inst.animTime = 0.0f;
+            inst.animSpeed = 0.0f;
+            break;
+        case anim::PlayMode::HoldLast:
+            inst.animTime = dur;
+            inst.animSpeed = 0.0f;
+            break;
+        default:
+            inst.animTime = dur * f;
+            inst.animSpeed = 1.0f;
+            break;
+    }
+    if (loopIdx >= 0) {
+        // A one-shot into a loop (Open -> Opened). A held one-shot has nothing
+        // to play out: straight to the loop.
+        if (inst.animSpeed == 0.0f) {
+            return playInstanceSequence(instanceId, thenAnimationId, thenMode, UINT32_MAX, 0, 0.0f,
+                                        false, fireEvents);
+        }
+        inst.holdAtEnd = true;
+        inst.thenLoopSequence = loopIdx;
+        inst.thenLoopMode = thenMode;
+    } else {
+        // The state's own loop, or a held pose. thenLoopSequence names it so
+        // idle variations keep out of a state.
+        inst.holdAtEnd = false;
+        inst.thenLoopSequence = idx;
+        inst.thenLoopMode = mode;
+    }
+    if (fireEvents && inst.animSpeed != 0.0f && f == 0.0f) {
+        inst.eventSeq = -1;
+    } else {
+        inst.eventSeq = static_cast<int16_t>(idx);
+        inst.eventCursorMs = inst.animTime;
+    }
+    return true;
+}
+
+std::optional<float> M2Renderer::instanceOneShotProgress(uint32_t instanceId) const {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return std::nullopt;
+    const auto& inst = instances[idxIt->second];
+    if (!inst.holdAtEnd || inst.animDuration <= 0.0f) return std::nullopt;
+    const int dir = inst.pausedDir != 0 ? inst.pausedDir
+                  : inst.animSpeed > 0.0f ? 1 : inst.animSpeed < 0.0f ? -1 : 0;
+    if (dir == 0) return std::nullopt;
+    const float t = std::clamp(inst.animTime / inst.animDuration, 0.0f, 1.0f);
+    return dir > 0 ? t : 1.0f - t;
+}
+
+void M2Renderer::setInstanceAnimationPaused(uint32_t instanceId, bool paused) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return;
+    auto& inst = instances[idxIt->second];
+    advanceClock(inst);
+    if (paused) {
+        if (inst.pausedDir != 0 || inst.animSpeed == 0.0f) return;
+        inst.pausedDir = inst.animSpeed > 0.0f ? 1 : -1;
+        inst.animSpeed = 0.0f;
+    } else if (inst.pausedDir != 0) {
+        inst.animSpeed = static_cast<float>(inst.pausedDir);
+        inst.pausedDir = 0;
+    }
+}
+
+uint32_t M2Renderer::firstSequenceId(uint32_t instanceId) const {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return 0;
+    const auto& inst = instances[idxIt->second];
+    if (!inst.cachedModel || inst.cachedModel->sequences.empty()) return 0;
+    return inst.cachedModel->sequences[0].id;
+}
+
+std::optional<uint32_t> M2Renderer::currentSequenceId(uint32_t instanceId) const {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return std::nullopt;
+    const auto& inst = instances[idxIt->second];
+    if (!inst.cachedModel) return std::nullopt;
+    const int i = inst.currentSequenceIndex;
+    if (i < 0 || i >= static_cast<int>(inst.cachedModel->sequences.size())) return std::nullopt;
+    return inst.cachedModel->sequences[i].id;
+}
+
+void M2Renderer::setInstanceFiresObjectEvents(uint32_t instanceId, bool fires) {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return;
+    auto& inst = instances[idxIt->second];
+    inst.firesObjectEvents = fires;
+    if (fires && inst.cachedModel && !inst.cachedModel->objectEvents.empty()) {
+        objectEventInstances_.insert(instanceId);
+        // From now on: what the sequence passed before this is not heard.
+        advanceClock(inst);
+        inst.eventSeq = static_cast<int16_t>(inst.currentSequenceIndex);
+        inst.eventCursorMs = inst.animTime;
+    } else {
+        objectEventInstances_.erase(instanceId);
+    }
+}
+
+bool M2Renderer::instanceHasObjectEvents(uint32_t instanceId) const {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return false;
+    const auto& inst = instances[idxIt->second];
+    return inst.cachedModel && !inst.cachedModel->objectEvents.empty();
+}
+
+bool M2Renderer::getInstanceModelMatrix(uint32_t instanceId, glm::mat4& out) const {
+    auto idxIt = instanceIndexById.find(instanceId);
+    if (idxIt == instanceIndexById.end()) return false;
+    out = instances[idxIt->second].modelMatrix;
+    return true;
 }
 
 bool M2Renderer::hasAnimation(uint32_t instanceId, uint32_t animationId) const {
@@ -744,6 +894,8 @@ void M2Renderer::clear() {
     smokeInstanceIndices_.clear();
     portalInstanceIndices_.clear();
     animatedInstanceIndices_.clear();
+    objectEventInstances_.clear();
+    firedObjectEvents_.clear();
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
     boatInstanceIndices_.clear();
@@ -791,6 +943,8 @@ void M2Renderer::clearInstances() {
     smokeInstanceIndices_.clear();
     portalInstanceIndices_.clear();
     animatedInstanceIndices_.clear();
+    objectEventInstances_.clear();
+    firedObjectEvents_.clear();
     particleOnlyInstanceIndices_.clear();
     particleInstanceIndices_.clear();
     boatInstanceIndices_.clear();

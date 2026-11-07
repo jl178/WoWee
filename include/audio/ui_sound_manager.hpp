@@ -79,9 +79,6 @@ public:
     void playQuestComplete();
     /// igQuestFailed: every ERR_QUEST_FAILED_* / ERR_QUEST_LOG_FULL message.
     void playQuestFailed();
-    /// "Fishing Hooked": the bobber display's custom-animation sound
-    /// (GameObjectDisplayInfo 668, Sound[6]).
-    void playFishingBite();
 
     // Loot sounds
     /// LOOTWINDOWCOINSOUND, for AudioCoordinator::playCoinSound without tables.
@@ -119,7 +116,6 @@ private:
     std::vector<UISample> questActivateSounds_;
     std::vector<UISample> questCompleteSounds_;
     std::vector<UISample> questFailedSounds_;
-    std::vector<UISample> fishingBiteSounds_;
 
     std::vector<UISample> lootCoinSmallSounds_;
     std::vector<UISample> lootItemSounds_;

@@ -491,6 +491,8 @@ private:
     /// When each dead unit was first seen dead, for bodies the renderer
     /// never lays down (updateLootSparkles).
     std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> corpseDeathSeenAt_;
+    /// How many game objects glittered last frame (logged when it changes).
+    size_t sparklingObjectCount_ = 0;
     void updateUnitHighlights();   // Mouseover and target emissive (stock 0x743C70)
     /// The player's drunk level off PLAYER_BYTES_3, for the stock drunk look.
     void updateDrunkLevel();

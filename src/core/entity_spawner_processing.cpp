@@ -21,6 +21,8 @@
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/wmo_group_path.hpp"
 #include "rendering/animation/animation_ids.hpp"
+#include "rendering/animation/game_object_anim.hpp"
+#include "audio/game_object_sounds.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
@@ -1718,6 +1720,15 @@ void EntitySpawner::processPendingTransportDoodads() {
             // first sequence freezes the icebreaker paddle (its sequence 0 is
             // static) and can leave the Bravery's sail rig in its furled pose.
             m2Renderer->setInstanceAnimation(m2InstanceId, rendering::anim::SHIP_MOVING, true);
+            // A map object's doodad sounds from its own events (0x7bd5a0): the
+            // zeppelin's engines, the icebreaker's paddlewheel. Kept on the
+            // ship as it moves.
+            if (m2Renderer->instanceHasObjectEvents(m2InstanceId)) {
+                ensureGameObjectSounds();
+                goSounds_->addDoodad(m2InstanceId);
+                m2Renderer->setInstanceFiresObjectEvents(m2InstanceId, true);
+                transportSoundDoodads_[it->guid].push_back(m2InstanceId);
+            }
             std::string doodadPathLower = doodadTemplate.m2Path;
             std::transform(doodadPathLower.begin(), doodadPathLower.end(), doodadPathLower.begin(),
                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -2171,53 +2182,6 @@ uint32_t EntitySpawner::releaseCreatureInstance(uint64_t guid) {
     return instanceId;
 }
 
-namespace {
-
-// Game object types whose pose is server state rather than a looping idle: they
-// hold one frame until the server says otherwise (a door stands open or shut, a
-// chest sits closed until it is opened), so playing their sequence on a loop
-// would animate them open over and over. Every other type plays its idle
-// continuously, which is what retail does - fishing pools circle their fish,
-// braziers gutter, banners wave.
-bool gameObjectPoseIsStateDriven(uint32_t goType) {
-    switch (goType) {
-        case 0:   // DOOR
-        case 1:   // BUTTON
-        case 3:   // CHEST
-        case 6:   // TRAP
-        case 10:  // GOOBER
-        case 33:  // DESTRUCTIBLE_BUILDING
-        case 35:  // TRAPDOOR
-            return true;
-        default:
-            return false;
-    }
-}
-
-} // namespace
-
-void EntitySpawner::applyGameObjectAnimationPolicy(uint64_t guid, uint32_t entry,
-                                                   uint32_t instanceId) {
-    auto* m2Renderer = renderer_ ? renderer_->getM2Renderer() : nullptr;
-    if (!m2Renderer) return;
-
-    const game::GameObjectQueryResponseData* info =
-        (gameHandler_ && entry != 0) ? gameHandler_->getCachedGameObjectInfo(entry) : nullptr;
-    if (!info) {
-        // The type has not arrived yet. Freeze for now - a door caught mid-swing
-        // is worse than a pool of still fish - and revisit in
-        // onGameObjectInfoReceived once the query response lands.
-        m2Renderer->setInstanceAnimationFrozen(instanceId, true);
-        if (entry != 0) gameObjectPendingAnimPolicy_[entry].push_back(instanceId);
-        return;
-    }
-
-    const bool freeze = gameObjectPoseIsStateDriven(info->type);
-    m2Renderer->setInstanceAnimationFrozen(instanceId, freeze);
-    LOG_DEBUG("GO animation policy: guid=0x", std::hex, guid, std::dec,
-              " entry=", entry, " type=", info->type, " frozen=", freeze);
-}
-
 void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
     auto it = gameObjectInstances_.find(guid);
     if (it == gameObjectInstances_.end()) {
@@ -2285,71 +2249,15 @@ void EntitySpawner::applyGameObjectState(uint64_t guid, uint8_t goState) {
     // Transports are posed by the transport system, not by their state.
     if (gameHandler_ && gameHandler_->isTransportGuid(guid)) return;
 
-    // The game's state animations (AnimationData.dbc): a one-shot for the
-    // change and a loop for the state it leaves the object in.
-    //   0 ACTIVE             Open 148    -> Opened 149
-    //   1 READY              Close 146   -> Closed 147  (Rebuild 152 from 2)
-    //   2 ACTIVE_ALTERNATIVE Destroy 150 -> Destroyed 151
-    // A model with no Destroy sequences takes state 2 as open, the way
-    // AnimationData falls Destroy back to Open (and doors use 2 for the
-    // other-way open).
-    namespace anim = rendering::anim;
-    auto has = [&](uint32_t a) { return m2->hasAnimation(instanceId, a); };
-    uint32_t once = anim::OPEN, loop = anim::OPENED;
-    if (goState == 2 && (has(anim::DESTROY) || has(anim::DESTROYED))) {
-        once = anim::DESTROY; loop = anim::DESTROYED;
-    } else if (goState == 1) {
-        once = (prevState == 2 && !skipToEnd && has(anim::REBUILD)) ? anim::REBUILD
-                                                                     : anim::CLOSE;
-        loop = anim::CLOSED;
-    }
-    if (has(once)) {
-        m2->setInstanceAnimationHeld(instanceId, once, skipToEnd, loop);
-        return;
-    }
-    if (has(loop)) {
-        // Only the state's loop: no motion into it, just the state.
-        m2->setInstanceAnimationHeld(instanceId, loop, /*skipToEnd=*/true, loop);
-        return;
-    }
-    // No OPEN or CLOSE sequence of its own, but one animation that is the
-    // opening: Undercity's lift doors are one bone and one sequence, id 0,
-    // 3333ms. Held at its end the door stands open. Simply letting it run -
-    // which is what this did - swung it open and shut on a loop enhanced,
-    // and freezing it put it back to shut, so the door never opened at all.
-    const bool stateDriven = goType == 0xFFFFFFFFu || gameObjectPoseIsStateDriven(goType);
-    if (open && stateDriven) {
-        if (const auto only = m2->soleSequenceId(instanceId)) {
-            m2->setInstanceAnimationHeld(instanceId, *only, skipToEnd);
-            return;
-        }
-    }
-    // No state sequences at all. A brazier, a banner or a fishing pool (not a
-    // state-driven type) just keeps its Stand loop - READY is the normal state
-    // of every object, and freezing on it stopped them all.
-    if (!stateDriven) {
-        m2->setInstanceAnimationFrozen(instanceId, false);
-        return;
-    }
-    // The closed pose is the bind pose.
-    m2->setInstanceAnimationFrozen(instanceId, !open);
-}
-
-void EntitySpawner::onGameObjectInfoReceived(uint32_t entry) {
-    auto it = gameObjectPendingAnimPolicy_.find(entry);
-    if (it == gameObjectPendingAnimPolicy_.end()) return;
-    auto* m2Renderer = renderer_ ? renderer_->getM2Renderer() : nullptr;
-    const game::GameObjectQueryResponseData* info =
-        (gameHandler_ && m2Renderer) ? gameHandler_->getCachedGameObjectInfo(entry) : nullptr;
-    if (info && !gameObjectPoseIsStateDriven(info->type)) {
-        for (uint32_t instanceId : it->second) {
-            // No-op for instances that despawned while the query was in flight.
-            m2Renderer->setInstanceAnimationFrozen(instanceId, false);
-        }
-        LOG_DEBUG("GO animation policy resolved: entry=", entry,
-                  " type=", info->type, " unfroze ", it->second.size(), " instance(s)");
-    }
-    gameObjectPendingAnimPolicy_.erase(it);
+    // The stock handler (0x70d690): the object's loop stops, and the state
+    // change picks a kind - a motion from the state before, or the state's
+    // own loop when it was not seen before (0x70d600) - which plays the
+    // model's sequence for it (game_object_anim.hpp).
+    if (goSounds_) goSounds_->stopLoop(instanceId);
+    namespace goanim = rendering::anim::goanim;
+    const goanim::Kind kind = skipToEnd ? goanim::kindForState(goState)
+                                        : goanim::kindForStateChange(prevState, goState);
+    playGameObjectKind(it->second, static_cast<uint8_t>(kind), /*heard=*/true);
 }
 
 void EntitySpawner::despawnGameObject(uint64_t guid) {
@@ -2357,6 +2265,11 @@ void EntitySpawner::despawnGameObject(uint64_t guid) {
         std::remove_if(pendingTransportDoodadBatches_.begin(), pendingTransportDoodadBatches_.end(),
                        [guid](const PendingTransportDoodadBatch& b) { return b.guid == guid; }),
         pendingTransportDoodadBatches_.end());
+
+    if (auto doodads = transportSoundDoodads_.find(guid); doodads != transportSoundDoodads_.end()) {
+        if (goSounds_) for (uint32_t id : doodads->second) goSounds_->remove(id);
+        transportSoundDoodads_.erase(doodads);
+    }
 
     auto it = gameObjectInstances_.find(guid);
     if (it == gameObjectInstances_.end()) return;
@@ -2385,6 +2298,7 @@ void EntitySpawner::despawnGameObject(uint64_t guid) {
                 wmoRenderer->removeInstance(it->second.instanceId);
             }
         } else {
+            if (goSounds_) goSounds_->remove(it->second.instanceId);
             if (auto* m2Renderer = renderer_->getM2Renderer()) {
                 m2Renderer->removeInstance(it->second.instanceId);
             }

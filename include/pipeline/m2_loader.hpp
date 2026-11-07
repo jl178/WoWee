@@ -292,6 +292,31 @@ constexpr bool isM2SoundEventTag(uint32_t tag) {
     return false;
 }
 
+/// The events a game object's model or a map doodad acts on, as the stock
+/// client's object callbacks read them: 0x70c050 (every game object type with
+/// the default handler, through 0x70cac0) takes $GO0-$GO5, $GC0-$GC3, $DSL,
+/// $DSO, $SND and $SHK; 0x7bd5a0 (doodads of the map and of map objects)
+/// takes $DSL, $DSE and $DSO.
+constexpr bool isM2ObjectEventTag(uint32_t tag) {
+    const uint32_t stem = tag & 0x00FFFFFFu;
+    const uint32_t last = tag >> 24;
+    if (stem == (m2EventTag("$GO0") & 0x00FFFFFFu)) return last >= '0' && last <= '5';
+    if (stem == (m2EventTag("$GC0") & 0x00FFFFFFu)) return last >= '0' && last <= '3';
+    return tag == m2EventTag("$DSL") || tag == m2EventTag("$DSO") || tag == m2EventTag("$DSE") ||
+           tag == m2EventTag("$SND") || tag == m2EventTag("$SHK");
+}
+
+/// The GameObjectDisplayInfo Sound[] slot a game object event plays
+/// (0x70c050 -> 0x70bf70): $GO0..$GO5 slots 0-5, $GC0..$GC3 slots 6-9; -1
+/// for any other tag.
+constexpr int gameObjectSoundSlot(uint32_t tag) {
+    const uint32_t stem = tag & 0x00FFFFFFu;
+    const int last = static_cast<int>(tag >> 24);
+    if (stem == (m2EventTag("$GO0") & 0x00FFFFFFu) && last >= '0' && last <= '5') return last - '0';
+    if (stem == (m2EventTag("$GC0") & 0x00FFFFFFu) && last >= '0' && last <= '3') return 6 + last - '0';
+    return -1;
+}
+
 // Complete M2 model structure
 struct M2Model {
     // Model metadata
@@ -333,6 +358,22 @@ struct M2Model {
         uint32_t tag = 0x44534324u;  // '$CSD'
     };
     std::vector<std::vector<SoundEvent>> soundEvents;
+
+    // The object events (isM2ObjectEventTag) per sequence index, sorted by
+    // time, for the models that fire them at run time: game objects (door
+    // swings, chest lids, the bobber's bite) and doodads that move with a
+    // transport (a zeppelin's engines). The data field is a SoundEntries id
+    // for $DSL/$DSO/$SND, a SpellEffectCameraShakes id for $SHK, unused for
+    // $GOn/$GCn (the slot is in the tag). Position is on the bone, in its
+    // rest frame. Embedded sequences only.
+    struct ObjectEvent {
+        uint32_t timeMs = 0;
+        uint32_t tag = 0;
+        uint32_t data = 0;
+        uint16_t bone = 0;
+        glm::vec3 position{0.0f};
+    };
+    std::vector<std::vector<ObjectEvent>> objectEvents;
 
     // A doodad's own sounds: $DSL events (loop) and $DSO events (one-shot at
     // timeMs into the idle sequence, every periodMs - that sequence's length).

@@ -1582,6 +1582,16 @@ wowee_add_test(test_anim_selection SOURCES
     ${CMAKE_SOURCE_DIR}/src/rendering/animation/activity_fsm.cpp
     ${CMAKE_SOURCE_DIR}/src/rendering/animation/mount_fsm.cpp)
 
+# ── test_game_object_anim ────────────────────────────────────
+# A game object's animation kinds and model events, the stock way
+# (docs/re/interactions.md section 12): the states' kinds, the sequence a kind
+# plays on a model, which events a frame passes.
+wowee_add_test(test_game_object_anim SOURCES
+    test_game_object_anim.cpp
+    ${TEST_COMMON_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/rendering/animation/animation_ids.cpp
+    ${CMAKE_SOURCE_DIR}/src/pipeline/dbc_loader.cpp)
+
 # NPC animator tests removed - NpcAnimator replaced by generic CharacterAnimator
 
 # ── test_anim_capability ─────────────────────────────────────

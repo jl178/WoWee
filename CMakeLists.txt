@@ -633,6 +633,7 @@ set(WOWEE_SOURCES
     src/core/entity_spawner.cpp
     src/core/entity_spawner_player.cpp
     src/core/entity_spawner_processing.cpp
+    src/core/entity_spawner_gameobject.cpp
     src/core/appearance_composer.cpp
     src/core/helm_visual.cpp
     src/core/character_geosets.cpp
@@ -754,6 +755,7 @@ set(WOWEE_SOURCES
     src/audio/movement_sound_manager.cpp
     src/audio/sound_data.cpp
     src/audio/world_sound_emitters.cpp
+    src/audio/game_object_sounds.cpp
     src/audio/zone_music_controller.cpp
     src/audio/stock_sound_rules.cpp
     src/audio/stock_sound_advanced.cpp
@@ -1171,6 +1173,7 @@ set(WOWEE_HEADERS
     include/audio/spell_sound_manager.hpp
     include/audio/movement_sound_manager.hpp
     include/audio/world_sound_emitters.hpp
+    include/audio/game_object_sounds.hpp
 
     include/pipeline/blp_loader.hpp
     include/pipeline/asset_manifest.hpp

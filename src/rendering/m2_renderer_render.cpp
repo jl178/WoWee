@@ -5,6 +5,7 @@
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_glow_card.hpp"
 #include "rendering/animation/anim_selection.hpp"
+#include "rendering/m2_object_events.hpp"
 #include "rendering/animation/sequence_variation.hpp"
 #include "core/thread_pool.hpp"
 #include "rendering/m2_model_classifier.hpp"
@@ -641,19 +642,59 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
         if (instance.animDuration <= 0.0f && instance.cachedHasParticleEmitters) {
             instance.animDuration = rendering::M2_DEFAULT_PARTICLE_ANIM_MS;
         }
-        if (instance.animDuration > 0.0f && instance.animTime >= instance.animDuration) {
+        // A game object's sequence played backwards (an AnimationData
+        // fallback with flag 0x10: Close as Open run back) ends at its start.
+        if (instance.animSpeed < 0.0f && instance.animDuration > 0.0f && instance.animTime <= 0.0f) {
+            if (instance.holdAtEnd && instance.thenLoopSequence >= 0) {
+                // Its first frame was its last: the events there fire before
+                // the loop takes over (Open run back ends on Open's $GO1).
+                if (instance.firesObjectEvents) {
+                    instance.animTime = 0.0f;
+                    fireObjectEvents(instance);
+                }
+                instance.animTime = instance.animDuration;  // into the loop below
+                instance.animSpeed = 1.0f;
+            } else if (instance.holdAtEnd) {
+                instance.animTime = 0.0f;  // its last frame played is its first
+                instance.animSpeed = 0.0f;
+            } else {
+                const float duration = std::max(1.0f, instance.animDuration);
+                while (instance.animTime < 0.0f) instance.animTime += duration;
+            }
+        }
+        if (instance.animSpeed == 0.0f) {
+            // Held, frozen or paused: the pose stays where it was put.
+        } else if (instance.animDuration > 0.0f && instance.animTime >= instance.animDuration) {
             if (instance.holdAtEnd && instance.thenLoopSequence >= 0 &&
                 instance.thenLoopSequence < static_cast<int>(model.sequences.size())) {
                 // Open ran once; Opened loops from here (Close/Closed,
                 // Destroy/Destroyed). thenLoopSequence stays set while it
-                // loops so idle variations keep out of it.
+                // loops so idle variations keep out of it. Its mode is the
+                // AnimationData fallback's: a substitute may be held or
+                // played backwards.
                 instance.holdAtEnd = false;
                 beginM2SequenceBlend(model, instance, instance.thenLoopSequence);
                 instance.currentSequenceIndex = instance.thenLoopSequence;
                 instance.animDuration =
                     static_cast<float>(model.sequences[instance.thenLoopSequence].duration);
-                instance.animTime = 0.0f;
-                instance.animSpeed = 1.0f;
+                switch (static_cast<anim::PlayMode>(instance.thenLoopMode)) {
+                    case anim::PlayMode::Reverse:
+                        instance.animTime = instance.animDuration;
+                        instance.animSpeed = -1.0f;
+                        break;
+                    case anim::PlayMode::HoldFirst:
+                        instance.animTime = 0.0f;
+                        instance.animSpeed = 0.0f;
+                        break;
+                    case anim::PlayMode::HoldLast:
+                        instance.animTime = instance.animDuration;
+                        instance.animSpeed = 0.0f;
+                        break;
+                    default:
+                        instance.animTime = 0.0f;
+                        instance.animSpeed = 1.0f;
+                        break;
+                }
             } else if (instance.holdAtEnd) {
                 // Stay on the last frame. A door's open sequence ends with the
                 // door open, and that is the pose the server is describing.
@@ -820,6 +861,8 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
             }
         }
     }
+
+    stepObjectEvents();
 
     const profClock::time_point profParticlesStart = updateProfile ? profClock::now() : profClock::time_point{};
     // Particle update. Only iterate instances that have particle emitters
@@ -3766,6 +3809,75 @@ void M2Renderer::setInstanceParticleColors(uint32_t instanceId,
         curves = std::move(built);
     }
     inst.particleCurveOverride = curves;
+}
+
+void M2Renderer::stepObjectEvents() {
+    if (objectEventInstances_.empty()) return;
+    for (auto it = objectEventInstances_.begin(); it != objectEventInstances_.end();) {
+        auto idxIt = instanceIndexById.find(*it);
+        if (idxIt == instanceIndexById.end()) {
+            it = objectEventInstances_.erase(it);
+            continue;
+        }
+        auto& inst = instances[idxIt->second];
+        ++it;
+        if (!inst.firesObjectEvents || !inst.cachedModel) continue;
+        const M2ModelGPU& model = *inst.cachedModel;
+        if (!(inst.cachedHasAnimation && !inst.cachedDisableAnimation)) {
+            // Nothing moves on this model, so the animated pass does not run
+            // its clock; its sequences still pass their events (a brazier's
+            // loop, a lid with no bones of its own).
+            advanceClock(inst);
+            const float dur = inst.animDuration;
+            if (dur > 0.0f && inst.animSpeed != 0.0f &&
+                (inst.animTime >= dur || inst.animTime < 0.0f)) {
+                if (inst.holdAtEnd && inst.thenLoopSequence >= 0 &&
+                    inst.thenLoopSequence < static_cast<int>(model.sequences.size())) {
+                    // The one-shot's last stretch, then the loop.
+                    inst.animTime = inst.animSpeed < 0.0f ? 0.0f : dur;
+                    fireObjectEvents(inst);
+                    inst.holdAtEnd = false;
+                    inst.currentSequenceIndex = inst.thenLoopSequence;
+                    inst.animDuration = static_cast<float>(model.sequences[inst.thenLoopSequence].duration);
+                    const float loopDur = inst.animDuration;
+                    const auto mode = static_cast<anim::PlayMode>(inst.thenLoopMode);
+                    inst.animTime = (mode == anim::PlayMode::Reverse || mode == anim::PlayMode::HoldLast)
+                                        ? loopDur : 0.0f;
+                    inst.animSpeed = mode == anim::PlayMode::Reverse ? -1.0f
+                                   : mode == anim::PlayMode::Forward ? 1.0f : 0.0f;
+                } else if (inst.holdAtEnd) {
+                    inst.animTime = inst.animSpeed < 0.0f ? 0.0f : dur;
+                    inst.animSpeed = 0.0f;
+                } else {
+                    inst.animTime = std::fmod(inst.animTime, dur);
+                    if (inst.animTime < 0.0f) inst.animTime += dur;
+                }
+            }
+        }
+        fireObjectEvents(inst);
+    }
+}
+
+void M2Renderer::fireObjectEvents(M2Instance& inst) {
+    const M2ModelGPU& model = *inst.cachedModel;
+    const int seq = inst.currentSequenceIndex;
+    const bool fresh = inst.eventSeq != seq;
+    const float from = inst.eventCursorMs;
+    const float t = inst.animTime;
+    inst.eventSeq = static_cast<int16_t>(seq);
+    inst.eventCursorMs = t;
+    if (seq < 0 || seq >= static_cast<int>(model.objectEvents.size()) ||
+        seq >= static_cast<int>(model.sequences.size())) return;
+    const auto& events = model.objectEvents[seq];
+    if (events.empty()) return;
+    const float dur = std::max(1.0f, static_cast<float>(model.sequences[seq].duration));
+
+    auto fire = [&](const pipeline::M2Model::ObjectEvent& ev) {
+        glm::vec4 p(ev.position, 1.0f);
+        if (ev.bone < inst.boneMatrices.size()) p = inst.boneMatrices[ev.bone] * p;
+        firedObjectEvents_.push_back({inst.id, ev.tag, ev.data, glm::vec3(inst.modelMatrix * p)});
+    };
+    passObjectEvents(events, from, t, dur, fresh, inst.animSpeed, fire);
 }
 
 void M2Renderer::updatePosedEmitters(float deltaTime) {

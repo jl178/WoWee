@@ -18,8 +18,14 @@ class M2Renderer;
 /// player allowed to loot it) and taken off once it is emptied or gone.
 class LootSparkles {
 public:
-    /// A corpse with loot, and where it lies in render coordinates.
-    using Corpse = std::pair<uint64_t, glm::vec3>;
+    /// A corpse with loot, or a game object a quest needs (GAMEOBJECT_DYNAMIC
+    /// 0x8), where it lies in render coordinates, and the sparkle's scale.
+    struct Corpse {
+        Corpse(uint64_t g, const glm::vec3& p, float s = 1.0f) : first(g), second(p), scale(s) {}
+        uint64_t first = 0;
+        glm::vec3 second{0.0f};
+        float scale = 1.0f;
+    };
 
     /// Once a frame with every lootable corpse there is now. Starts the
     /// sparkle on new ones, keeps each on its body, and stops it on the rest.

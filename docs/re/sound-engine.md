@@ -727,12 +727,7 @@ of the build this audit started from, after is the trace with the fixes.
 
 ### 11.4 Not done
 
-- **Object sounds**: the `$GO0-5`/`$GC0-3` model events are not read or
-  fired for game objects (only character models fire events at run time),
-  so doors, chests, mailboxes and the like are silent except the fishing
-  bite, which is played at the bobber by hand. The fix is to keep those
-  events in `isM2SoundEventTag`, fire them from `M2Renderer` for GO
-  instances, and play GameObjectDisplayInfo.Sound[n] at the event.
+- ~~**Object sounds**~~: done in section 12.
 - **Swimming strokes and the water-entry splash**: the stock trigger was not
   found (SoundEntries 1090/1096/1097 "CharacterSplashSound*" have no
   reference in the code; LiquidType.SoundBank names the river/ocean loops
@@ -749,3 +744,48 @@ of the build this audit started from, after is the trace with the fixes.
 - The UChatScrollButton click as Blizzard_CombatLog loads (its ADDON_LOADED
   handler presses a quick button) is heard at world entry; whether the stock
   loading screen swallows it was not checked.
+
+## 12. Game object sounds, 2026-11-06
+
+The rules are in interactions.md section 12 (the handler, its kinds and its
+events); the sound half:
+
+- **Where they come from.** A game object's model events, through the type
+  handler's +0x40 (0x70d7b0 -> 0x70c050): `$GO0`-`$GO5` and `$GC0`-`$GC3` play
+  GameObjectDisplayInfo Sound[0-5] and Sound[6-9] (0x70bf70) at the event's
+  position on the model; `$DSL` loops its data's row, `$DSO` and `$SND` play
+  it once. A map doodad's (0x7bd5a0): `$DSL`, `$DSE` (stop), `$DSO`.
+  Transports' own models fire nothing.
+- **One-shots** (a row without 0x200): default properties (0x4c5990), placed,
+  category 0, the row's MinDistance and DistanceCutoff. The door's swing,
+  the chest's lid, the bobber's bite.
+- **Loops**: one handle per object (handler +0x1c; a doodad's +0x158). Not
+  started while that handle sounds (0x4c5be0) or while the same row plays
+  within 6 yards of the event (0x4cfe00: a scan of the playing sounds, 36 at
+  0x9e8cf8 squared). Props: loop (props[7] = 1), keep-alive (props[0xe] = 1),
+  props[0xc] = 0 and [0x12] = 1; a GO's `$DSL` fades in and out over 1 s
+  (props[4], [5]), a doodad's in over 3 s (0x9ebbc4), a `$GOn` loop not at
+  all. A looping sequence fires its event every lap, so a loop that was
+  refused (out of range, no voice) is tried again on the next lap.
+- **Stops**: the handle is stopped when the object changes state (0x70d690 ->
+  0x4c6390) and when it goes; `$DSE` stops a doodad's.
+
+In Wowee: `audio::GameObjectSounds` (src/audio/game_object_sounds.cpp), fed
+by `M2Renderer::takeObjectEvents()` in `EntitySpawner::updateGameObjectPresentation`.
+A transport doodad's loop is moved with its ship each frame
+(`AudioEngine::setSoundPosition`); whether stock moves it was not traced.
+The trace names them like any other kit (`3d` / `3d-loop`, the row's id and
+name, `GameObjectSounds::playLoop`/`playOnce` on the stack).
+
+| Scenario | Expected (stock) | Wowee before | Wowee after |
+|---|---|---|---|
+| Stormwind Officer's Door (`.gobject set state 26262 0 n`) | 8015 StormwindDoorOpen as Open starts, 8016 StormwindDoorClose as Close starts, at the door, its row's 10/30 yd | silent | as expected (3D at the door, 13 yd off: gain 0.29) |
+| Door told to shut half way through opening | Close starts at the mirrored point, past its stamp at 0: no slam | - | no slam |
+| Door ACTIVE_ALTERNATIVE -> READY (Rebuild) | no Rebuild/Destroy: Open run backwards; its `$GO1` stamp at 0 is reached last | - | 8015 three seconds after the change, as Open ends backwards |
+| Door Custom0 (`set state 26262 4 0`) | the model has no 153: nothing | - | nothing |
+| Stolen Chest (Chest01) opened / shut | 1277 ChestOpen, 1278 ChestClose, once each | silent; the lid never moved (chest models were kept from animating by name) | once each, at the chest; the lid animates |
+| Temp chest (`.gobject add temp 32`), looted | AzerothCore does not change a chest's GO state on loot, so no lid and no sound (the same for the stock client on this server) | - | the same |
+| Fishing bite | 3355 Fishing Hooked from the bobber's `$GC0` at 200 ms | 3355 played by hand | the event (not traced: no bite in these runs) |
+| Zeppelins (Tirisfal tower) | ZepAnimation's 5457 ZeppelinEngineLoop and 5458 ZeppelinHeliumOneShots on the ship; the server's ZeppelinDocked | only the server's ZeppelinDocked (2D) | 5457 loops on each zeppelin, 5458 every 4 s at the moving doodad (out of range from where the test stood, 115 yd); ZeppelinDocked unchanged |
+| Icebreaker | 11840 Icebreaker_paddlewheel loop | silent | loops on the ship |
+| Undercity lift | no sound source: the lift's display has no sounds, its model no events | silent | silent |

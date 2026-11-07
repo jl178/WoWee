@@ -27,7 +27,7 @@ namespace wowee {
 // Forward declarations
 namespace rendering { class Renderer; }
 namespace pipeline { class AssetManager; class DBCFile; struct M2Model; struct WMOModel; }
-namespace audio { enum class VoiceType; }
+namespace audio { enum class VoiceType; class GameObjectSounds; }
 namespace game { class GameHandler; class Unit; }
 
 namespace core {
@@ -69,17 +69,7 @@ public:
     void despawnPlayer(uint64_t guid);
     void despawnGameObject(uint64_t guid);
 
-    // Re-evaluate the animation policy for spawned game objects of this entry.
-    // Called when a GAMEOBJECT_QUERY_RESPONSE finally supplies the type that the
-    // policy depends on; harmless if nothing of that entry is waiting.
-    void onGameObjectInfoReceived(uint32_t entry);
 
-private:
-    // Freeze or animate a spawned game object based on its type, deferring the
-    // decision when the type has not been queried yet.
-    void applyGameObjectAnimationPolicy(uint64_t guid, uint32_t entry, uint32_t instanceId);
-
-public:
 
     // Clear all queues and instances (logout, reconnect)
     void clearAllQueues();
@@ -358,6 +348,21 @@ public:
     // Player instance accessors (for movement sync in Application::update)
     std::unordered_map<uint64_t, uint32_t>& getPlayerInstances() { return playerInstances_; }
     const std::unordered_map<uint64_t, uint32_t>& getPlayerInstances() const { return playerInstances_; }
+
+    /// SMSG_GAMEOBJECT_CUSTOM_ANIM (Custom0..3, 153-156) and
+    /// SMSG_GAMEOBJECT_DESPAWN_ANIM (Despawn, 157) for a game object.
+    void playGameObjectCustomAnim(uint64_t guid, uint32_t animationId);
+    /// Once a frame, after the renderer's update: the game objects' model
+    /// events played, their freeze flag applied, their loops moved along.
+    void updateGameObjectPresentation();
+    /// The game objects that should glitter (GAMEOBJECT_DYNAMIC 0x8, the
+    /// quest sparkle), with their render position and the sparkle's scale.
+    struct SparklingObject {
+        uint64_t guid = 0;
+        glm::vec3 position{0.0f};
+        float scale = 1.0f;
+    };
+    [[nodiscard]] std::vector<SparklingObject> sparklingGameObjects() const;
 
     // GameObject instance accessors
     auto& getGameObjectInstances() { return gameObjectInstances_; }
@@ -864,11 +869,23 @@ private:
         /// the art kit and anim progress, so the same state arrives again with
         /// every change to those, and must not replay the Open swing.
         uint8_t goState = 0xFF;
+        /// The stock handler's kind (rendering/animation/game_object_anim.hpp)
+        /// now playing, 0xFF none yet.
+        uint8_t goKind = 0xFF;
+        /// GO_FLAG_FREEZE_ANIMATION as last applied.
+        bool frozenByFlag = false;
+        uint32_t displayId = 0;
+        /// GAMEOBJECT_DYNAMIC's low half as last seen, 0xFFFFFFFF none yet.
+        uint32_t dynamicFlags = 0xFFFFFFFFu;
     };
-    // Game objects spawned before their type was known, keyed by entry. Each is
-    // frozen on the conservative assumption that it is state-driven until the
-    // query response says otherwise.
-    std::unordered_map<uint32_t, std::vector<uint32_t>> gameObjectPendingAnimPolicy_;
+    /// Play a kind on a game object's model the stock way (0x70d510 ->
+    /// 0x70d1e0): the model's sequence for it through the substitutes and
+    /// the AnimationData chain, the motion into the state's loop after it.
+    void playGameObjectKind(GameObjectInstanceInfo& info, uint8_t kind, bool heard);
+    std::unique_ptr<audio::GameObjectSounds> goSounds_;
+    /// Transport doodad instances that sound, by their transport.
+    std::unordered_map<uint64_t, std::vector<uint32_t>> transportSoundDoodads_;
+    void ensureGameObjectSounds();
 
     std::unordered_map<uint32_t, uint32_t> gameObjectDisplayIdModelCache_;
     std::unordered_set<uint32_t> gameObjectDisplayIdFailedCache_;
