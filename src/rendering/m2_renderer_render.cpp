@@ -3147,9 +3147,20 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         fillSway(pc, model, skyMode_);
         pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
-        applyRaster(batch.materialFlags,
-                    currentPipeline == opaquePipeline_ || currentPipeline == alphaTestPipeline_ ||
-                    currentPipeline == cutoutPipeline_);
+        // A layer drawn here through a blending pipeline does not write depth,
+        // whatever its flags. In the data only opaque and alpha-key layers
+        // lack flag 0x10 (every one of the 7934 blended batches of the world
+        // models carries it), and they blend here only while their instance
+        // fades or their alpha plays. Stock draws such a layer above the
+        // water after the liquids and the weather (0x4F8EA0: Model2 Pass 2,
+        // liquids 0x790A80, weather 0x77F030, then Pass 1), so its depth
+        // hides neither; this pass runs before both (SEC_POST), and writing
+        // depth here cut the lake and the rain out behind a fading tree.
+        const bool blendsHere = currentPipeline != opaquePipeline_ &&
+                                currentPipeline != alphaTestPipeline_ &&
+                                currentPipeline != cutoutPipeline_;
+        applyRaster(blendsHere ? static_cast<uint16_t>(batch.materialFlags | 0x10) : batch.materialFlags,
+                    !blendsHere);
         vkCmdDrawIndexed(cmd, batch.indexCount, 1, batch.indexStart, 0, 0);
         if (skyMode_) ++counts.skyTransparent;
         counts.draws++;
