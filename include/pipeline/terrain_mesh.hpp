@@ -127,6 +127,15 @@ public:
                                        float fracX, float fracY, float unitSize);
 
     /**
+     * The upward unit normal of the triangle chunkSurfacePoint stands on at
+     * the same fractions: the wedge of the quad's four-triangle fan the point
+     * is in. What the stock walkability test (Wow.exe 0x75D1C0) reads - a
+     * triangle's normal z - rather than a slope differenced across cells.
+     */
+    static glm::vec3 chunkSurfaceNormal(const HeightMap& heightMap,
+                                        float fracX, float fracY, float unitSize);
+
+    /**
      * Where a world position falls inside a chunk, in the 0..8 grid fractions
      * chunkSurfacePoint and isHole take. False if the position is outside it.
      *

@@ -408,5 +408,40 @@ glm::vec3 TerrainMeshGenerator::chunkSurfacePoint(const float chunkPosition[3],
     const float worldZ = chunkPosition[2] + (hA * wA + hB * wB + hC * wC);
     return glm::vec3(worldX, worldY, worldZ);
 }
+
+glm::vec3 TerrainMeshGenerator::chunkSurfaceNormal(const HeightMap& heightMap,
+                                                   float fracX, float fracY, float unitSize) {
+    const int qx = glm::clamp(static_cast<int>(std::floor(fracX)), 0, 7);
+    const int qy = glm::clamp(static_cast<int>(std::floor(fracY)), 0, 7);
+    const float u = glm::clamp(fracX - static_cast<float>(qx), 0.0f, 1.0f);
+    const float v = glm::clamp(fracY - static_cast<float>(qy), 0.0f, 1.0f);
+    const float hTL = heightMap.getHeight(qx,     qy);
+    const float hTR = heightMap.getHeight(qx + 1, qy);
+    const float hBL = heightMap.getHeight(qx,     qy + 1);
+    const float hBR = heightMap.getHeight(qx + 1, qy + 1);
+    const int centreIndex = 9 + qy * 17 + qx;
+    const float hC = (centreIndex >= 0 && centreIndex < static_cast<int>(heightMap.heights.size()))
+                     ? heightMap.heights[centreIndex]
+                     : 0.25f * (hTL + hTR + hBL + hBR);
+    // A grid point (gx, gy) at height h, in world axes: world X runs against
+    // grid Y and world Y against grid X (chunkSurfacePoint).
+    const auto at = [unitSize](float gx, float gy, float h) {
+        return glm::vec3(-gy * unitSize, -gx * unitSize, h);
+    };
+    const glm::vec3 c = at(qx + 0.5f, qy + 0.5f, hC);
+    glm::vec3 a, b;
+    if (u > v) {
+        if (u + v < 1.0f) { a = at(qx, qy, hTL);         b = at(qx + 1, qy, hTR); }
+        else              { a = at(qx + 1, qy, hTR);     b = at(qx + 1, qy + 1, hBR); }
+    } else {
+        if (u + v < 1.0f) { a = at(qx, qy, hTL);         b = at(qx, qy + 1, hBL); }
+        else              { a = at(qx, qy + 1, hBL);     b = at(qx + 1, qy + 1, hBR); }
+    }
+    glm::vec3 n = glm::cross(a - c, b - c);
+    const float len = glm::length(n);
+    if (len < 1e-6f) return glm::vec3(0.0f, 0.0f, 1.0f);
+    n /= len;
+    return n.z < 0.0f ? -n : n;
+}
 } // namespace pipeline
 } // namespace wowee

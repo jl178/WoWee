@@ -357,6 +357,13 @@ public:
     [[nodiscard]] std::optional<float> getHeightAt(float glX, float glY) const;
 
     /**
+     * The upward normal of the terrain triangle under this position (the
+     * mesh's four-triangle fan, as getHeightAt samples it), or nothing where
+     * there is no loaded chunk.
+     */
+    [[nodiscard]] std::optional<glm::vec3> getSurfaceNormalAt(float glX, float glY) const;
+
+    /**
      * True when the MCNK chunk containing this position is cut by terrain holes.
      * getHeightAt interpolates straight across a hole and reports a surface that
      * is not there, so anything reasoning about "below the terrain" has to know

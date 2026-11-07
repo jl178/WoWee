@@ -2800,6 +2800,14 @@ std::optional<float> TerrainManager::getHeightAt(float glX, float glY) const {
     return surface.z;
 }
 
+std::optional<glm::vec3> TerrainManager::getSurfaceNormalAt(float glX, float glY) const {
+    float fracX = 0.0f, fracY = 0.0f;
+    const pipeline::MapChunk* chunk = findChunkAt(glX, glY, fracX, fracY);
+    if (!chunk) return std::nullopt;
+    return pipeline::TerrainMeshGenerator::chunkSurfaceNormal(chunk->heightMap, fracX, fracY,
+                                                              CHUNK_SIZE / 8.0f);
+}
+
 bool TerrainManager::isTileLoadedAt(float glX, float glY) const {
     return loadedTiles.find(worldToTile(glX, glY)) != loadedTiles.end();
 }

@@ -1529,13 +1529,12 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
                     if (terrainManager && !cachedInsideWMO && !terrainManager->isHoleAt(p.x, p.y)) {
                         auto th = terrainManager->getHeightAt(p.x, p.y);
                         if (th && *th <= reach && (!best || *th > *best)) {
-                            // Half a heightfield cell apart, so the difference
-                            // reads the hillside, not the crease between the
-                            // four triangles each cell is fanned into.
-                            constexpr float kTerrainSlopeSpacing = 2.0f;
-                            terrainN = movement::heightfieldNormal(
-                                [this](float sx, float sy) { return terrainManager->getHeightAt(sx, sy); },
-                                p.x, p.y, kTerrainSlopeSpacing);
+                            // The triangle's own normal, as the stock test
+                            // reads it (0x75D1C0): the fan's wedge under p,
+                            // not a slope differenced 2 yd across cells, which
+                            // smoothed a steep face into walkable patches.
+                            terrainN = terrainManager->getSurfaceNormalAt(p.x, p.y)
+                                           .value_or(glm::vec3(0.0f, 0.0f, 1.0f));
                             best = th; bestNz = terrainN.z; source = 1;
                         }
                     }
@@ -2314,10 +2313,9 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
             !terrainManager->isHoleAt(targetPos.x, targetPos.y)) {
             const auto th = terrainManager->getHeightAt(targetPos.x, targetPos.y);
             if (th && std::abs(*th - targetPos.z) < 0.15f) {
-                constexpr float kTerrainSlopeSpacing = 2.0f;  // as the uphill rule
-                const glm::vec3 n = movement::heightfieldNormal(
-                    [this](float sx, float sy) { return terrainManager->getHeightAt(sx, sy); },
-                    targetPos.x, targetPos.y, kTerrainSlopeSpacing);
+                // The triangle under the feet, as the uphill rule reads it.
+                const glm::vec3 n = terrainManager->getSurfaceNormalAt(targetPos.x, targetPos.y)
+                                        .value_or(glm::vec3(0.0f, 0.0f, 1.0f));
                 const glm::vec2 d(n.x, n.y);
                 if (game::stock_movement::groundIsFall(n.z) && glm::length(d) > 1e-4f) {
                     bool onStructure = false;
@@ -3283,7 +3281,12 @@ void CameraController::update(float deltaTime) {
     // (0x988A20, see the edge detection below).
     const bool rawForward = nowForward, rawBackward = nowBackward;
     const bool rawStrafeLeft = nowStrafeLeft, rawStrafeRight = nowStrafeRight;
-    if (!grounded && !swimming && !isFlightAirborne()) {
+    // Sliding down ground too steep to stand on is a fall in stock (the
+    // walker leaves it, 0x988370(0), keeping the leg's direction and speed),
+    // so it latches the same way: a key pressed on the face waits for the
+    // walkable ground at the bottom. Last frame's slope, as the floor pass
+    // that decides it runs after this.
+    if ((!grounded || onSteepSlope_) && !swimming && !isFlightAirborne()) {
         const bool anyKeyDir = nowForward || nowBackward || nowStrafeLeft || nowStrafeRight;
         const bool latchedNoDir = airMoveLatched_ && !airForward_ && !airBackward_ &&
                                   !airStrafeLeft_ && !airStrafeRight_;

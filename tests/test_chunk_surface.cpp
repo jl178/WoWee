@@ -14,6 +14,8 @@
 
 #include "pipeline/terrain_mesh.hpp"
 
+#include <cmath>
+
 using wowee::pipeline::HeightMap;
 using wowee::pipeline::TerrainMeshGenerator;
 
@@ -201,4 +203,30 @@ TEST_CASE("a tilted plane is exact in all four wedges", "[chunksurface]") {
         CHECK(TerrainMeshGenerator::chunkSurfacePoint(position, map, s[0], s[1], kUnitSize).z ==
               Catch::Approx(3.0f * s[0] + 7.0f * s[1] + 5.0f));
     }
+}
+
+TEST_CASE("the surface normal is the fan triangle's own", "[chunksurface]") {
+    // A plane: every wedge has the plane's normal. Grid x runs against world
+    // Y and grid y against world X, so h = 3 gx + 7 gy (yards per cell) falls
+    // 7 / u per yard of world X and 3 / u per yard of world Y.
+    const HeightMap plane = gridWhere([](float x, float y) { return 3.0f * x + 7.0f * y; });
+    const glm::vec3 want = glm::normalize(glm::vec3(7.0f / kUnitSize, 3.0f / kUnitSize, 1.0f));
+    const float samples[4][2] = {{2.2f, 2.5f}, {2.8f, 2.5f}, {2.5f, 2.2f}, {2.5f, 2.8f}};
+    for (const auto& s : samples) {
+        const glm::vec3 n = TerrainMeshGenerator::chunkSurfaceNormal(plane, s[0], s[1], kUnitSize);
+        CHECK(n.x == Catch::Approx(want.x).margin(1e-4));
+        CHECK(n.y == Catch::Approx(want.y).margin(1e-4));
+        CHECK(n.z == Catch::Approx(want.z).margin(1e-4));
+    }
+    // A centre vertex 10 yd over flat corners: four steep faces (rise 10 over
+    // half a cell), which a slope differenced across the cell reads as flat.
+    HeightMap spike = gridWhere([](float, float) { return 0.0f; });
+    spike.heights[9 + 3 * 17 + 3] = 10.0f;
+    const float slope = 10.0f / (0.5f * kUnitSize);
+    const float nz = 1.0f / std::sqrt(1.0f + slope * slope);
+    const glm::vec3 top = TerrainMeshGenerator::chunkSurfaceNormal(spike, 3.5f, 3.2f, kUnitSize);
+    const glm::vec3 left = TerrainMeshGenerator::chunkSurfaceNormal(spike, 3.2f, 3.5f, kUnitSize);
+    CHECK(top.z == Catch::Approx(nz).margin(1e-4));
+    CHECK(left.z == Catch::Approx(nz).margin(1e-4));
+    CHECK(glm::dot(glm::vec2(top), glm::vec2(left)) == Catch::Approx(0.0f).margin(1e-4));
 }

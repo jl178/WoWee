@@ -588,6 +588,10 @@ also skips the cameraDive surface/submerge pitch limits (0x6023D0,
 | 42 | A swimmer's trace has no step (0x760B40): a ledge side is a wall, and a swimmer leaves the water onto it only by the hop at the surface or by wading out where the water is shallower than the exit depth | a ledge within the step under or ahead of a swimmer at the surface, with water over it shallower than the exit depth, ended the swim and the ground mover stepped onto it | the ledge exit removed; the swim's wall sweep passes `stock_movement::kSwimStepHeight` (0) to the WMO wall test, so a dock side stops a swimmer; in game a swimmer at the Goldshire-area lake (-9558, 380) swam the 7 yd to the terrain shore and walked out at the exit depth |
 | 43 | Ground too steep to stand on is a fall (0x75D1C0 refuses it, 0x988370(0), the air step 0x7618B0 slides the box down it FALLING): HEARTBEAT with FALLING, the keys pending, FALL_LAND on walkable ground | a terrain slide with the feet held "grounded": no FALLING ever went out, so the server saw a walker gliding down a cliff | the slide is fall-tracked like a walk off an edge (`stock_movement::groundIsFall`): reported once it has dropped 1/36, landed with FALL_LAND by the same height rule. In game on a knoll at (-9304, 67) the slide went out as HEARTBEAT 0x1000s with a FALL_LAND on each walkable patch it crossed (four, over 3.7 yd) |
 | 44 | A seat model with Vehicle.flags 0x80000 fades by the camera distance less the 0.2 near clip (0x606F90's loop, as for the player) | the raw distance | `vehicle::cameraFadeAlpha` subtracts the near clip |
+| 45 | No client SET_FACING for a charge: the stock client never turns the player to cast, and a server spline's facing is the spline's - along the path, then its final facing (0x6EB0B0 -> 0x98C480, no event 0x13) | Charge always wrote a facing toward the target into the movement block and sent SET_FACING, then the per-frame facing sync put the character's own facing back with a second SET_FACING on the next frame - the server judged the charge against a facing 90 degrees off; at SPLINE_DONE a third went out | Charge turns only under the Combat page's auto-face setting and through `faceCanonicalYaw` (as the auto-attack turn now does); the spline's end facing is recorded as the server's (`MovementHandler::noteServerFacing`). In game: no SET_FACING around the charge, START_FORWARD from the end point with the path's facing |
+| 46 | A movement acknowledgement goes out through 0x7413F0 -> 0x71F0C0 like any movement packet (event 0x22 for a knockback): the heartbeat restarts and its facing and pitch are the reference | the force acks were sent straight to the socket, so a knockback's ack was followed by a heartbeat on the next frame | `noteMovementPacketSent` after the speed, flag-change, collision-height and knockback acks (not the teleport and world-port acks, whose route was not traced). In game the heartbeat now follows a knockback ack by 520 ms |
+| 47 | A slide down steep ground is a fall: the leg's direction and speed are kept and keys pressed meanwhile wait (0x988370(0)) | the keys moved the character on the face | the air latch covers the steep slide (`onSteepSlope_`) |
+| 48 | Walkability is the triangle's normal (0x75D1C0) | terrain slope was differenced 2 yd across cells, which read a steep face as walkable in patches and a steep fan wedge as flat | `TerrainManager::getSurfaceNormalAt` (`TerrainMeshGenerator::chunkSurfaceNormal`: the wedge of the four-triangle fan under the point) for the uphill refusal and the slide. In game the knoll's slide is one fall with one FALL_LAND, where it landed four times |
 
 Knockback in game (row 31 with 40/41, 2026-11-07): the lab casts no
 knockback on a player (`.cast self` / `.cast back` with 10689 or 11027 do
@@ -632,13 +636,13 @@ Still different (not changed here; each needs in-game checking):
   only its radius follows the model.
 - **The steep slide** keeps the feet on the face and slides them with
   Wowee's own acceleration (the horizontal part of g sin t cos t), where
-  stock's air step projects a fall onto the face; the speeds are alike, the
-  flags now are, but a direction pressed during the slide still moves the
-  character (stock holds it pending) and the 2 yd normal sampling lets a
-  knoll's face read walkable in patches, so one slide can land several times.
+  stock's air step projects a fall onto the face; the speeds are alike and
+  the flags and keys now are (rows 43, 47, 48). WMO and M2 floors are not
+  slid on (their queries answer a normal z but no direction).
 - **A swimmer against an M2 ledge**: the doodad test
-  (`m2_renderer_instance.cpp`) keeps its own fixed 1 yd step; only the WMO
-  wall test takes the swimmer's step of 0.
+  (`m2_renderer_instance.cpp`, owned by the renderer lane) keeps its own
+  fixed 1 yd step and 2 yd height; only the WMO wall test takes the
+  swimmer's step of 0. It needs a step argument, as the WMO test's `Body`.
 - **When a walk-off fall is reported**: stock sends its HEARTBEAT the slice
   the walker finds no ground (7.3); Wowee sends it once the fall has dropped
   1/36 yd (54 ms from rest), so a frame's loss of contact that drops less -
