@@ -12,10 +12,49 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <string>
 
 namespace wowee {
 namespace rendering {
 namespace stock_weather {
+
+// --------------------------------------------------------------- Weather.dbc
+
+/// A Weather.dbc row as the weather object takes it (0x7846a0): the emitter
+/// kind (+8, 1 rain, 2 snow, 3 sand: 0x78d170 makes that emitter), the storm
+/// light's scale (+0xc, eased into weather +0x28, 0x784850), the colour the
+/// rain, splashes and snow are drawn in (+0x10..0x18, packed into weather
+/// +0x34 by 0x48bd20) and the rain or snow texture (+0x1c; empty: the
+/// kind's own, 0x783b90).
+struct WeatherRow {
+    bool known = false;
+    uint32_t effect = 0;
+    float lightScale = 1.0f;
+    float colour[3] = {1.0f, 1.0f, 1.0f};
+    std::string texture;
+};
+
+enum class WeatherEffect : uint8_t { NONE, RAIN, SNOW, SAND };
+
+/// The emitter for a server weather state: the row's EffectType when the
+/// row is known (state 106 is a sand row), else by the state's number as
+/// the server's WeatherState enum has it.
+inline WeatherEffect effectFor(const WeatherRow* row, uint32_t state) {
+    if (row && row->known) {
+        switch (row->effect) {
+            case 1: return WeatherEffect::RAIN;
+            case 2: return WeatherEffect::SNOW;
+            case 3: return WeatherEffect::SAND;
+            default: return WeatherEffect::NONE;
+        }
+    }
+    switch (state) {
+        case 2: case 3: case 4: case 5: case 86: case 90: return WeatherEffect::RAIN;
+        case 6: case 7: case 8: case 106:                  return WeatherEffect::SNOW;
+        case 22: case 41: case 42:                         return WeatherEffect::SAND;
+        default:                                           return WeatherEffect::NONE;
+    }
+}
 
 // ------------------------------------------------------------ Where it draws
 
@@ -32,11 +71,17 @@ inline bool weatherDrawsFromCamera(bool portalWalkActive, bool outdoorSealed, bo
 }
 
 /// IsOutdoors (0x71B7F0 -> 0x77FBF0): in a map object group, outdoors when
-/// that group has the exterior flag 0x8 (WMOAreaTable's flags 4 / 2 can
-/// force it, not read here); out of one, the area's AreaTable flags: 0x4000000
-/// outdoors, else 0x2000000 indoors, else outdoors.
-inline bool playerOutdoors(bool inWmoGroup, bool groupLacksExterior, uint32_t areaFlags) {
-    if (inWmoGroup) return !groupLacksExterior;
+/// that group has the exterior flag 0x8, unless its WMOAreaTable row (+0x24
+/// flags, 0x990560) says otherwise: 0x4 outdoors, else 0x2 indoors; out of
+/// one, the area's AreaTable flags: 0x4000000 outdoors, else 0x2000000
+/// indoors, else outdoors.
+inline bool playerOutdoors(bool inWmoGroup, bool groupLacksExterior, uint32_t areaFlags,
+                           uint32_t wmoAreaFlags = 0) {
+    if (inWmoGroup) {
+        if (wmoAreaFlags & 0x4u) return true;
+        if (wmoAreaFlags & 0x2u) return false;
+        return !groupLacksExterior;
+    }
     if (areaFlags & 0x4000000u) return true;
     return (areaFlags & 0x2000000u) == 0;
 }

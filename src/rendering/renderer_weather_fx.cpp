@@ -16,6 +16,8 @@
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/terrain_manager.hpp"
 #include "game/zone_manager.hpp"
+#include "pipeline/asset_manager.hpp"
+#include "pipeline/dbc_loader.hpp"
 #include "game/wmo_area.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/lighting_manager.hpp"
@@ -69,6 +71,34 @@ void Renderer::effectiveWeather(uint32_t& state, float& grade) const {
     const auto* gh = core::Application::getInstance().getGameHandler();
     state = gh ? gh->getWeatherType() : 0;
     grade = gh ? gh->getWeatherIntensity() : 0.0f;
+}
+
+const stock_weather::WeatherRow* Renderer::weatherRowFor(uint32_t state) {
+    if (!weatherRowsLoaded_) {
+        weatherRowsLoaded_ = true;
+        auto* am = core::Application::getInstance().getAssetManager();
+        auto dbc = am ? am->loadDBCOptional("Weather.dbc") : nullptr;
+        // 3.3.5 (and 2.4.3): ID, AmbienceID, EffectType, the light scale,
+        // Color[3], EffectTexture - 8 fields. Another width is skipped and
+        // the state's number decides.
+        if (dbc && dbc->isLoaded() && dbc->getFieldCount() == 8) {
+            for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+                stock_weather::WeatherRow row;
+                row.known = true;
+                row.effect = dbc->getUInt32(i, 2);
+                row.lightScale = dbc->getFloat(i, 3);
+                for (int c = 0; c < 3; ++c) row.colour[c] = dbc->getFloat(i, 4 + static_cast<uint32_t>(c));
+                row.texture = dbc->getString(i, 7);
+                weatherRows_[dbc->getUInt32(i, 0)] = std::move(row);
+            }
+            LOG_INFO("Weather.dbc: ", weatherRows_.size(), " rows");
+        } else if (dbc && dbc->isLoaded()) {
+            LOG_WARNING("Weather.dbc has ", dbc->getFieldCount(), " fields, not 8; the weather kind "
+                        "follows the state number");
+        }
+    }
+    auto it = weatherRows_.find(state);
+    return it == weatherRows_.end() ? nullptr : &it->second;
 }
 
 void Renderer::updateWeatherFx(float fxDt) {

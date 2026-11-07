@@ -262,3 +262,21 @@ TEST_CASE("stock: what makes a place cold", "[weather_fx][stock_weather]") {
     // Grizzly Hills (394) has no 0x1.
     CHECK_FALSE(sw::areaIsCold(0x40u, false, 0));
 }
+
+TEST_CASE("stock: Weather.dbc picks the emitter, WMOAreaTable forces indoors", "[weather_fx][stock_weather]") {
+    sw::WeatherRow sand;
+    sand.known = true;
+    sand.effect = 3;
+    // State 106 is a sand row in 3.3.5's Weather.dbc, whatever its name.
+    CHECK(sw::effectFor(&sand, 106) == sw::WeatherEffect::SAND);
+    CHECK(sw::effectFor(nullptr, 106) == sw::WeatherEffect::SNOW);
+    CHECK(sw::effectFor(nullptr, 86) == sw::WeatherEffect::RAIN);
+    sw::WeatherRow fog;
+    fog.known = true;
+    fog.effect = 0;
+    CHECK(sw::effectFor(&fog, 1) == sw::WeatherEffect::NONE);
+    // In a group: the row's 0x4 makes it outdoors, 0x2 indoors.
+    CHECK(sw::playerOutdoors(true, true, 0, 0x4u));
+    CHECK_FALSE(sw::playerOutdoors(true, false, 0, 0x2u));
+    CHECK(sw::playerOutdoors(true, false, 0, 0));
+}

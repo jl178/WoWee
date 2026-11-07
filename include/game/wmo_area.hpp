@@ -29,6 +29,7 @@ struct WmoAreaRow {
     int32_t groupId = -1;   ///< MOGP group id; -1 is the whole building
     uint32_t areaId = 0;    ///< AreaTable.dbc, 0 when the row names none
     std::string name;       ///< AreaName_lang; often empty
+    uint32_t flags = 0;     ///< Flags (9): 0x4 outdoors, 0x2 indoors (0x77FBF0)
 };
 
 /// The row for a group among one root's rows: the group's own row first, then
@@ -55,6 +56,7 @@ template <class Row>
 struct WmoAreaInfo {
     uint32_t areaId = 0;  ///< 0: no row names one, use the terrain's
     std::string name;     ///< the matched row's name; empty for none
+    uint32_t flags = 0;   ///< the matched row's Flags
 };
 
 /// The area for a group: the matched row's AreaTableID, or the root's -1 row's
@@ -67,6 +69,7 @@ struct WmoAreaInfo {
     if (!own) return out;
     out.name = own->name;
     out.areaId = own->areaId;
+    out.flags = own->flags;
     if (out.areaId == 0 && own->groupId != -1) {
         if (const WmoAreaRow* building = findWmoAreaRow(rows, nameSet, -1)) {
             out.areaId = building->areaId;

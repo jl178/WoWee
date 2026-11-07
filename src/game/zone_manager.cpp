@@ -591,7 +591,7 @@ void ZoneManager::enrichFromDBC(pipeline::AssetManager* assets) {
     // layout, and is skipped rather than misread, as SoundData does.
     wmoAreas_.clear();
     if (auto wmoDbc = assets->loadDBC("WMOAreaTable.dbc"); wmoDbc && wmoDbc->isLoaded()) {
-        constexpr uint32_t kFields = 28, kWmoId = 1, kNameSet = 2, kGroup = 3, kAreaTable = 10, kName = 11;
+        constexpr uint32_t kFields = 28, kWmoId = 1, kNameSet = 2, kGroup = 3, kFlags = 9, kAreaTable = 10, kName = 11;
         if (wmoDbc->getFieldCount() >= kFields) {
             for (uint32_t i = 0; i < wmoDbc->getRecordCount(); ++i) {
                 WmoAreaRow row;
@@ -600,6 +600,8 @@ void ZoneManager::enrichFromDBC(pipeline::AssetManager* assets) {
                 row.groupId = wmoDbc->getInt32(i, kGroup);
                 row.areaId = wmoDbc->getUInt32(i, kAreaTable);
                 row.name = wmoDbc->getString(i, kName);
+                // 0x4 on 1157 rows (Stormwind's streets and the like), 0x2 on 73.
+                row.flags = wmoDbc->getUInt32(i, kFlags);
                 wmoAreas_[row.wmoId].push_back(std::move(row));
             }
         } else {
