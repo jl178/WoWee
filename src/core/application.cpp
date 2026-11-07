@@ -43,6 +43,7 @@
 #include "rendering/camera.hpp"
 #include "rendering/frustum.hpp"
 #include "rendering/camera_controller.hpp"
+#include "game/zone_manager.hpp"
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/terrain_manager.hpp"
 #include "rendering/performance_hud.hpp"
@@ -1437,6 +1438,20 @@ bool Application::initialize() {
         };
         luaSvc.takeScreenshot = [uim = uiManager.get()]() {
             if (uim) uim->getGameScreen().takeScreenshot();
+        };
+        luaSvc.getCameraController = [r = renderer.get()]() -> rendering::CameraController* {
+            return r ? r->getCameraController() : nullptr;
+        };
+        // IsFlyableArea (0x51A1D0 / 0x7261B0): AreaTable flag 0x400 without
+        // 0x20000000 on the area, else the zone; Northrend also wants Cold
+        // Weather Flying (54197).
+        luaSvc.isFlyableArea = [r = renderer.get(), gh = gameHandler.get()]() -> bool {
+            auto* zm = r ? r->getZoneManager() : nullptr;
+            if (!zm) return false;
+            uint32_t flags = zm->getAreaFlags(r->getCurrentAreaId());
+            if (flags == 0) flags = zm->getAreaFlags(r->getCurrentZoneId());
+            if ((flags & 0x400u) == 0 || (flags & 0x20000000u) != 0) return false;
+            return !(gh && gh->getCurrentMapId() == 571 && !gh->getKnownSpells().count(54197));
         };
         luaSvc.getBarberStyleInfo = [uim = uiManager.get(), gh = gameHandler.get()](
                 int selector, std::string& name, bool& isCurrent) -> bool {

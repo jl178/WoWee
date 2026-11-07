@@ -3,6 +3,7 @@
 //                /assist, /pvp, /unstuck*, /transport
 // Moved from ChatPanel::sendChatMessage() if/else chain (Phase 3).
 #include "ui/chat/i_chat_command.hpp"
+#include "ui/chat/macro_evaluator.hpp"
 #include "ui/chat_panel.hpp"
 #include "game/game_handler.hpp"
 #include "game/transport_manager.hpp"
@@ -17,10 +18,6 @@
 
 namespace wowee { namespace ui {
 
-// Forward declaration of evaluateMacroConditionals (still in chat_panel_commands.cpp)
-std::string evaluateMacroConditionals(const std::string& rawArg,
-                                       game::GameHandler& gameHandler,
-                                       uint64_t& targetOverride);
 
 // --- /transportinfo ---
 // Dumps active transport state (entry, path, clock mode, position) so
@@ -257,21 +254,15 @@ public:
         };
 
         if (!ctx.args.empty()) {
-            std::string assistArg = ctx.args;
-            while (!assistArg.empty() && assistArg.front() == ' ') assistArg.erase(assistArg.begin());
+            // SecureCmdList["ASSIST"]: the target= unit, else the action.
+            const MacroOptionsResult opt = evaluateMacroOptions(ctx.args, ctx.gameHandler);
+            if (!opt.matched) return {};
+            std::string assistArg = opt.hasTarget ? opt.target : opt.action;
+            const uint64_t assistOver = assistArg.empty() ? 0 : resolveMacroUnit(assistArg, ctx.gameHandler);
 
-            // Evaluate conditionals if present
-            uint64_t assistOver = static_cast<uint64_t>(-1);
-            if (!assistArg.empty() && assistArg.front() == '[') {
-                assistArg = evaluateMacroConditionals(assistArg, ctx.gameHandler, assistOver);
-                if (assistArg.empty() && assistOver == static_cast<uint64_t>(-1)) return {};
-                while (!assistArg.empty() && assistArg.front() == ' ') assistArg.erase(assistArg.begin());
-                while (!assistArg.empty() && assistArg.back()  == ' ') assistArg.pop_back();
-            }
-
-            if (assistOver != static_cast<uint64_t>(-1) && assistOver != 0) {
+            if (assistOver != 0) {
                 assistEntityTarget(assistOver);
-            } else if (!assistArg.empty()) {
+            } else if (!assistArg.empty() && !opt.hasTarget) {
                 // Name search
                 std::string argLow = assistArg;
                 for (char& c : argLow) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));

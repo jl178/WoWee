@@ -91,16 +91,14 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (ctx.args.empty()) return {.handled = false, .clearInput = false};
 
-        std::string spellArg = ctx.args;
+        // SecureCmdList["CAST"]: action, target = SecureCmdOptionParse(msg).
+        const MacroOptionsResult opt = evaluateMacroOptions(ctx.args, ctx.gameHandler);
+        if (!opt.matched) return {};
+        std::string spellArg = opt.action;
         trimInPlace(spellArg);
-
-        // Evaluate WoW macro conditionals
-        uint64_t castTargetOverride = static_cast<uint64_t>(-1);
-        if (!spellArg.empty() && spellArg.front() == '[') {
-            spellArg = evaluateMacroConditionals(spellArg, ctx.gameHandler, castTargetOverride);
-            if (spellArg.empty()) return {};  // no conditional matched
-            trimInPlace(spellArg);
-        }
+        if (spellArg.empty()) return {};
+        const uint64_t castTargetOverride =
+            opt.hasTarget ? opt.targetGuid : static_cast<uint64_t>(-1);
 
         // Strip leading '!' (force recast)
         if (!spellArg.empty() && spellArg.front() == '!') spellArg.erase(spellArg.begin());
@@ -161,16 +159,12 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (ctx.args.empty()) return {.handled = false, .clearInput = false};
 
-        std::string seqArg = ctx.args;
+        // SecureCmdList["CASTSEQUENCE"]: sequence, target = SecureCmdOptionParse(msg).
+        const MacroOptionsResult opt = evaluateMacroOptions(ctx.args, ctx.gameHandler);
+        if (!opt.matched) return {};
+        std::string seqArg = opt.action;
         trimInPlace(seqArg);
-
-        // Macro conditionals
-        uint64_t seqTgtOver = static_cast<uint64_t>(-1);
-        if (!seqArg.empty() && seqArg.front() == '[') {
-            seqArg = evaluateMacroConditionals(seqArg, ctx.gameHandler, seqTgtOver);
-            if (seqArg.empty() && seqTgtOver == static_cast<uint64_t>(-1)) return {};
-            trimInPlace(seqArg);
-        }
+        const uint64_t seqTgtOver = opt.hasTarget ? opt.targetGuid : static_cast<uint64_t>(-1);
 
         // Optional reset= spec
         std::string resetSpec;
@@ -272,16 +266,12 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (ctx.args.empty()) return {.handled = false, .clearInput = false};
 
-        std::string useArg = ctx.args;
+        // SecureCmdList["USE"] (the same function as CAST).
+        const MacroOptionsResult opt = evaluateMacroOptions(ctx.args, ctx.gameHandler);
+        if (!opt.matched) return {};
+        std::string useArg = opt.action;
         trimInPlace(useArg);
-
-        // Handle macro conditionals
-        if (!useArg.empty() && useArg.front() == '[') {
-            uint64_t dummy = static_cast<uint64_t>(-1);
-            useArg = evaluateMacroConditionals(useArg, ctx.gameHandler, dummy);
-            if (useArg.empty()) return {};
-            trimInPlace(useArg);
-        }
+        if (useArg.empty()) return {};
 
         // Check for bag/slot notation: two numbers separated by whitespace
         {
@@ -364,8 +354,12 @@ public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
         if (ctx.args.empty()) return {.handled = false, .clearInput = false};
 
-        std::string equipArg = ctx.args;
+        // SecureCmdList["EQUIP"]: item = SecureCmdOptionParse(msg).
+        const MacroOptionsResult opt = evaluateMacroOptions(ctx.args, ctx.gameHandler);
+        if (!opt.matched) return {};
+        std::string equipArg = opt.action;
         trimInPlace(equipArg);
+        if (equipArg.empty()) return {};
         std::string equipArgLower = equipArg;
         for (char& c : equipArgLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
@@ -460,19 +454,15 @@ public:
 class StartAttackCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        bool condPass = true;
-        uint64_t saOverride = static_cast<uint64_t>(-1);
-        if (!ctx.args.empty()) {
-            std::string saArg = ctx.args;
-            trimInPlace(saArg);
-            if (!saArg.empty() && saArg.front() == '[') {
-                std::string result = evaluateMacroConditionals(saArg, ctx.gameHandler, saOverride);
-                condPass = !(result.empty() && saOverride == static_cast<uint64_t>(-1));
-            }
-        }
-        if (condPass) {
-            uint64_t atkTarget = (saOverride != static_cast<uint64_t>(-1) && saOverride != 0)
-                ? saOverride : (ctx.gameHandler.hasTarget() ? ctx.gameHandler.getTargetGuid() : 0);
+        // SecureCmdList["STARTATTACK"]: the action names the unit unless
+        // target= named one other than "target"; neither means the target.
+        const MacroOptionsResult opt = evaluateMacroOptions(ctx.args, ctx.gameHandler);
+        if (opt.matched) {
+            std::string unit = (opt.hasTarget && opt.target != "target") ? opt.target : opt.action;
+            trimInPlace(unit);
+            uint64_t atkTarget = unit.empty()
+                ? (ctx.gameHandler.hasTarget() ? ctx.gameHandler.getTargetGuid() : 0)
+                : resolveMacroUnit(unit, ctx.gameHandler);
             if (atkTarget != 0) {
                 ctx.gameHandler.startAutoAttack(atkTarget);
             } else {
@@ -493,7 +483,7 @@ public:
 class StopAttackCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.stopAutoAttack();
+        if (evaluateMacroOptions(ctx.args, ctx.gameHandler).matched) ctx.gameHandler.stopAutoAttack();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"stopattack"}; }
@@ -504,7 +494,7 @@ public:
 class StopCastingCommand : public IChatCommand {
 public:
     ChatCommandResult execute(ChatCommandContext& ctx) override {
-        ctx.gameHandler.stopCasting();
+        if (evaluateMacroOptions(ctx.args, ctx.gameHandler).matched) ctx.gameHandler.stopCasting();
         return {};
     }
     [[nodiscard]] std::vector<std::string> aliases() const override { return {"stopcasting"}; }

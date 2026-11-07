@@ -53,6 +53,11 @@ public:
     /// Shattrath carries the sanctuary bit, and neither would hold if the
     /// column were something else.
     [[nodiscard]] bool isOutdoorPvpArea(uint32_t areaId) const;
+    /// AreaTable.dbc Flags of an area, 0 when unknown.
+    [[nodiscard]] uint32_t getAreaFlags(uint32_t areaId) const {
+        const auto it = areaFlags_.find(areaId);
+        return it == areaFlags_.end() ? 0u : it->second;
+    }
     [[nodiscard]] const ZoneInfo* getZoneInfo(uint32_t zoneId) const;
     std::string getRandomMusic(uint32_t zoneId);
     [[nodiscard]] std::vector<std::string> getAllMusicPaths() const;

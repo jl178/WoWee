@@ -988,6 +988,9 @@ static void pushCvarDefault(lua_State* L, const std::string& n) {
     // defaults to. Unset it fell to zero, so the checkbox would have shown the
     // numbers switched off while they were drawn.
     else if (n == "enablecombattext") lua_pushstring(L, "1");
+    // Screenshot() (0x4A8570): a JPEG at quality 3 unless told "tga".
+    else if (n == "screenshotformat") lua_pushstring(L, "jpeg");
+    else if (n == "screenshotquality") lua_pushstring(L, "3");
     // The three kinds this client draws. All on, which is what it did before
     // any of them were read; unset they fell to zero, which would have shown
     // every one of these boxes unticked while the numbers were on screen.

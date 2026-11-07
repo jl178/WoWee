@@ -3040,6 +3040,7 @@ void CameraController::update(float deltaTime) {
     // Keep physics integration stable during render hitches to avoid floor tunneling.
     const float physicsDeltaTime = std::min(deltaTime, kMaxPhysicsDelta);
     intoxicationTime_ += deltaTime;
+    stepViewMoves(deltaTime);
 
     // During taxi flights, skip movement logic but keep camera orbit/zoom controls.
     if (externalFollow_) {
@@ -3233,7 +3234,11 @@ void CameraController::update(float deltaTime) {
         doCancelAutoFollow();
     }
 
-    bool mouseAutorun = !uiWantsKeyboard && !sitting && leftMouseDown && rightMouseDown;
+    // A script's TurnOrActionStart / CameraOrSelectOrMoveStart hold the
+    // buttons for steering and two-button running as a press would.
+    const bool leftHeld = leftMouseDown || scriptedLeftButton_;
+    const bool rightHeld = rightMouseDown || scriptedRightButton_;
+    bool mouseAutorun = !uiWantsKeyboard && !sitting && leftHeld && rightHeld;
     if (mouseAutorun) {
         autoRunning = false;
         doCancelAutoFollow();
@@ -3278,7 +3283,7 @@ void CameraController::update(float deltaTime) {
     // two turns. With the right button steering the turn keys strafe.
     // Turning is allowed even while rooted; only positional movement is blocked.
     namespace sm = game::stock_movement;
-    const bool rightButtonSteering = !thirdPerson || rightMouseDown;
+    const bool rightButtonSteering = !thirdPerson || rightHeld;
     const int forwardVote = sm::resolveForwardBack(keyW, keyS, autoRunning, mouseAutorun);
     const int strafeVote = sm::resolveStrafe(keyQ, keyE, keyA, keyD, rightButtonSteering);
     const int turnVote = sm::resolveTurn(keyA, keyD, rightButtonSteering);
@@ -3420,7 +3425,7 @@ void CameraController::update(float deltaTime) {
     // Before forward3D is read, so the frame is drawn with the eased angles.
     updateStockFollow(deltaTime, nowForward, nowBackward, nowStrafeLeft, nowStrafeRight,
                       nowTurnLeft, nowTurnRight,
-                      rightMouseDown || mouseAutorun || steering_ || (swimming && hasMoveInput));
+                      rightHeld || mouseAutorun || steering_ || (swimming && hasMoveInput));
 
     // Get camera axes - project forward onto XY plane for walking
     glm::vec3 forward3D = camera->getForward();
@@ -3440,7 +3445,7 @@ void CameraController::update(float deltaTime) {
     // On a phone that is what the right mouse button is on a desktop: the
     // character turns to face where the player is looking, so that walking
     // forward goes where the screen points.
-    bool cameraDrivesFacing = rightMouseDown || mouseAutorun || steering_ ||
+    bool cameraDrivesFacing = rightHeld || mouseAutorun || steering_ ||
                               (swimming && hasMoveInput);
     // The stock drunk steer (Wow.exe 0x6DEB30, docs/re/movement-camera.md
     // section 5): while moving, the facing is pushed every frame by
@@ -4229,6 +4234,102 @@ void CameraController::applyLookDelta(float dxPixels, float dyPixels) {
     pitch += dyPixels * mouseSensitivity * invert;
     pitch = glm::clamp(pitch, MIN_PITCH, MAX_PITCH);
     camera->setRotation(yaw, pitch);
+}
+
+namespace {
+float wrapDegrees180(float d) {
+    d = std::fmod(d + 180.0f, 360.0f);
+    if (d < 0.0f) d += 360.0f;
+    return d - 180.0f;
+}
+} // namespace
+
+void CameraController::setView(int index) {
+    if (index < 0 || index >= kViewCount || !camera) return;
+    const CameraView& v = views_[static_cast<size_t>(index)];
+    // The view already shown is put back at once; another one is blended to
+    // (0x603330: cameraViewBlendStyle 1, and 2 when the view is current).
+    const bool snap = index == currentView_;
+    currentView_ = index;
+    const float maxDist = std::min(MAX_DISTANCE_NORMAL * maxDistanceFactor_, MAX_DISTANCE_EXTENDED);
+    const float dist = glm::clamp(v.distance, MIN_DISTANCE, maxDist);
+    const float targetPitch = glm::clamp(-v.pitchDown, MIN_PITCH, MAX_PITCH);
+    // The stock client logs the same line (0x603330, "Camera view %s").
+    static constexpr const char* kViewNames[kViewCount] = {
+        "FIRST_PERSON", "THIRD_PERSON_A", "THIRD_PERSON_B", "THIRD_PERSON_C",
+        "THIRD_PERSON_D", "THIRD_PERSON_E", "VIEW_COMMENTATOR", "VIEW_BARBER_SHOP"};
+    LOG_INFO("Camera view ", kViewNames[index], " (", dist, " yd, ", v.pitchDown,
+             " deg, from ", userTargetDistance, " yd)", snap ? " at once" : "");
+    userTargetDistance = dist;
+    if (snap) {
+        currentDistance = dist;
+        pitch = targetPitch;
+        yaw = facingYaw + v.yaw;
+        followYaw_.active = false;
+        followPitch_.active = false;
+        camera->setRotation(yaw, pitch);
+        return;
+    }
+    // Eased the way the follow swing is (the same slots and curve, 0x603D30):
+    // each part's time at its smoothing speed, the longest clamped to
+    // [cameraSmoothTimeMin, cameraSmoothTimeMax] and given to both. The
+    // distance travels at cameraDistanceMoveSpeed, as a zoom does.
+    const float offset = wrapDegrees180(yaw - facingYaw);
+    const float yawDelta = wrapDegrees180(v.yaw - offset);
+    float duration = std::max(std::abs(yawDelta) / kFollowYawSpeedDeg,
+                              std::abs(targetPitch - pitch) / kFollowPitchSpeedDeg);
+    duration = std::max(duration, std::abs(dist - currentDistance) / kZoomMoveSpeed);
+    duration = std::clamp(duration, kFollowTimeMin, kFollowTimeMax);
+    followYaw_ = {true, offset, offset + yawDelta, duration, 0.0f};
+    followPitch_ = {true, pitch, targetPitch, duration, 0.0f};
+}
+
+void CameraController::saveView(int index) {
+    if (index < 0 || index >= kViewCount) return;
+    // The zoom target, the pitch and the yaw from behind (0x5FE4E0: +0x1E8,
+    // +0x230, +0x260).
+    views_[static_cast<size_t>(index)] = {userTargetDistance, -pitch,
+                                          wrapDegrees180(yaw - facingYaw)};
+}
+
+void CameraController::resetView(int index) {
+    if (index < 0) {
+        for (int i = 0; i < kViewCount; ++i) resetView(i);
+        return;
+    }
+    if (index >= kViewCount) return;
+    views_[static_cast<size_t>(index)] = kDefaultViews[static_cast<size_t>(index)];
+    if (index == currentView_) setView(index);
+}
+
+void CameraController::flipYaw(float degrees) {
+    if (!camera) return;
+    followYaw_.active = false;
+    yaw += degrees;
+    camera->setRotation(yaw, pitch);
+}
+
+void CameraController::setViewMove(ViewMove move, bool on, float speed) {
+    viewMoveSpeed_[static_cast<size_t>(move)] = on ? speed : 0.0f;
+}
+
+void CameraController::stepViewMoves(float deltaTime) {
+    if (!camera) return;
+    // In and out at cameraDistanceMoveSpeed, turning at cameraYawMoveSpeed
+    // (180 deg/s) and cameraPitchMoveSpeed (90 deg/s), each times the speed
+    // the Start call gave.
+    const auto& s = viewMoveSpeed_;
+    const float zoom = (s[size_t(ViewMove::Out)] - s[size_t(ViewMove::In)]) * kZoomMoveSpeed * deltaTime;
+    const float turn = (s[size_t(ViewMove::Left)] - s[size_t(ViewMove::Right)]) * 180.0f * deltaTime;
+    const float tilt = (s[size_t(ViewMove::Up)] - s[size_t(ViewMove::Down)]) * 90.0f * deltaTime;
+    if (zoom != 0.0f) processMouseWheel(-zoom);
+    if (turn != 0.0f || tilt != 0.0f) {
+        followYaw_.active = false;
+        followPitch_.active = false;
+        yaw += turn;
+        pitch = glm::clamp(pitch + tilt, MIN_PITCH, MAX_PITCH);
+        camera->setRotation(yaw, pitch);
+    }
 }
 
 void CameraController::processMouseWheel(float delta) {

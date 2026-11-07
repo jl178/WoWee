@@ -314,12 +314,8 @@ static std::string macroActionArg(game::GameHandler* gh, uint32_t id) {
     };
     auto resolve = [&](std::string arg, bool list) -> std::string {
         arg = trim(arg);
-        if (!arg.empty() && arg.front() == '[') {
-            uint64_t targetOverride = static_cast<uint64_t>(-1);
-            arg = trim(ui::evaluateMacroConditionals(arg, *gh, targetOverride));
-        } else if (const size_t semi = arg.find(';'); semi != std::string::npos) {
-            arg = trim(arg.substr(0, semi));
-        }
+        // The stock option parser, the same one /cast runs.
+        arg = trim(ui::evaluateMacroOptions(arg, *gh).action);
         if (list) {
             if (arg.rfind("reset=", 0) == 0) {
                 const size_t sp = arg.find(' ');
@@ -3495,6 +3491,9 @@ void registerActionLuaAPI(lua_State* L) {
     ui::frameXmlSetCursorBridge(
         [](uint8_t& bag, uint8_t& slot) { return cursorWireSlot(bag, slot); },
         [L]() { clearCursorItem(L); });
+
+    // The option parser and the binding functions (lua_macro_api.cpp).
+    registerMacroBindingLuaAPI(L);
 }
 
 } // namespace wowee::addons

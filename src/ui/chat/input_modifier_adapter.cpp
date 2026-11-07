@@ -1,27 +1,21 @@
 // InputModifierAdapter - concrete IModifierState wrapping core::Input.
-// Phase 4.3 of chat_panel_ref.md.
 #include "ui/chat/input_modifier_adapter.hpp"
 #include "core/input.hpp"
 #include <SDL3/SDL_scancode.h>
 
 namespace wowee { namespace ui {
 
-bool InputModifierAdapter::isShiftHeld() const {
+bool InputModifierAdapter::isKeyDown(Key key) const {
     auto& input = core::Input::getInstance();
-    return input.isKeyPressed(SDL_SCANCODE_LSHIFT) ||
-           input.isKeyPressed(SDL_SCANCODE_RSHIFT);
-}
-
-bool InputModifierAdapter::isCtrlHeld() const {
-    auto& input = core::Input::getInstance();
-    return input.isKeyPressed(SDL_SCANCODE_LCTRL) ||
-           input.isKeyPressed(SDL_SCANCODE_RCTRL);
-}
-
-bool InputModifierAdapter::isAltHeld() const {
-    auto& input = core::Input::getInstance();
-    return input.isKeyPressed(SDL_SCANCODE_LALT) ||
-           input.isKeyPressed(SDL_SCANCODE_RALT);
+    switch (key) {
+        case Key::LeftShift:  return input.isKeyPressed(SDL_SCANCODE_LSHIFT);
+        case Key::RightShift: return input.isKeyPressed(SDL_SCANCODE_RSHIFT);
+        case Key::LeftCtrl:   return input.isKeyPressed(SDL_SCANCODE_LCTRL);
+        case Key::RightCtrl:  return input.isKeyPressed(SDL_SCANCODE_RCTRL);
+        case Key::LeftAlt:    return input.isKeyPressed(SDL_SCANCODE_LALT);
+        case Key::RightAlt:   return input.isKeyPressed(SDL_SCANCODE_RALT);
+    }
+    return false;
 }
 
 } // namespace ui
