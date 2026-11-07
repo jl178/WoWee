@@ -433,6 +433,30 @@ inline uint32_t landWithPendingKeys(uint32_t flags, uint32_t flags2 = 0) {
     return flags & ~kPendingMask;
 }
 
+/// SMSG_MOVE_KNOCK_BACK on the mover (0x6EF860 event 0x22 -> 0x6E9FF0), the
+/// flags it leaves: swimming or flying stopped, a ROOT made a PENDING_ROOT,
+/// CAN_FLY dropped (AzerothCore gives it back on the ack to a free flier),
+/// a fall from where the unit is (0x988370: not on a transport; SWIMMING,
+/// ASCENDING, DESCENDING, FLYING, SPLINE_ELEVATION and, without
+/// ALWAYS_ALLOW_PITCHING, the pitch keys cleared), then moving along the
+/// packet's direction: FORWARD and PENDING_STOP, so the landing stops it,
+/// BACKWARD cleared. The fall's z speed is the packet's (negative up), its
+/// direction the packet's (x, y) and its speed the packet's.
+inline uint32_t knockBackFlags(uint32_t flags, uint16_t flags2) {
+    constexpr uint32_t kRoot = 0x800;
+    constexpr uint32_t kPendingRoot = 0x100000;
+    constexpr uint32_t kCanFly = 0x1000000;
+    constexpr uint32_t kOnTransport = 0x200;
+    constexpr uint32_t kFlag2AlwaysAllowPitching = 0x20;
+    if (flags & kRoot) flags = (flags & ~kRoot) | kPendingRoot;
+    flags &= ~kCanFly;
+    if (!(flags & kOnTransport)) {
+        flags = (flags & 0xF91FFFFFu) | kFalling;
+        if (!(flags2 & kFlag2AlwaysAllowPitching)) flags &= ~0xC0u;
+    }
+    return (flags & ~kBackward) | kForward | kPendingStop;
+}
+
 /// Whether a landing sends MSG_MOVE_FALL_LAND (0x73D4A0): the fall height
 /// (0x986FB0: the fall's start z less the landing z, plus v^2 / 2g of an
 /// upward start speed - a jump's rise) above 1/36 yd. `apexZ` is that start

@@ -26,6 +26,10 @@ struct AnimOutput {
     uint32_t animId = 0;
     bool loop = false;
     bool valid = false;
+    /// Play it from its first frame even if it is the one playing: a new
+    /// cast's release or precast replaces the last one's (Wow.exe 0x73B140
+    /// plays a kit's AnimID through 0x7385C0 each time a kit plays).
+    bool restart = false;
 
     /// Construct a valid output.
     static AnimOutput ok(uint32_t id, bool looping) {

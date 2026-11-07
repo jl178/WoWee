@@ -188,6 +188,10 @@ void AnimationController::stopSpellCast() {
     characterAnimator_.stopSpellCast();
 }
 
+void AnimationController::cancelSpellCast() {
+    characterAnimator_.cancelSpellCast();
+}
+
 void AnimationController::setSeatedLoopAnimation(uint32_t animationId) {
     characterAnimator_.getActivity().setSeatedLoopAnimation(animationId);
 }
@@ -204,7 +208,12 @@ void AnimationController::stopLooting() {
 
 // ── Hit reactions ────────────────────────────────────────────────────────────
 
-void AnimationController::triggerHitReaction(uint32_t animId) {
+void AnimationController::triggerHitReaction(uint32_t animId, bool upperTrack) {
+    if (animId != 0 && upperTrack && anim::playsOnUpperBody(animId)) {
+        auto* cr = renderer_->getCharacterRenderer();
+        const uint32_t inst = renderer_->getCharacterInstanceId();
+        if (cr && inst != 0 && cr->playUpperBodyAnimation(inst, animId, animId, animId)) return;
+    }
     if (animId != 0) {
         // On the move the flinch, parry or dodge goes on the upper body over
         // the run, as the stock client plays it (Wow.exe 0x736640 picks the
@@ -979,7 +988,9 @@ void AnimationController::updateCharacterAnimation() {
     // renderer auto-resets them to STAND on completion - the FSM detects the ID
     // change via oneShotComplete and transitions to the next state in the same frame.
     const bool drifted = haveState && currentAnimId != animId && loop;
-    const bool shouldPlay = requestChanged || drifted;
+    // A new cast's pose or release replaces the last one's from its first
+    // frame even when it is the same animation (two instants back to back).
+    const bool shouldPlay = requestChanged || drifted || output.restart;
 
     // Debug: log animation decisions (only when animation changes or replays)
     static uint32_t dbgLastAnim = UINT32_MAX;
@@ -1000,13 +1011,20 @@ void AnimationController::updateCharacterAnimation() {
     if (shouldPlay) {
         // The renderer has already flowed into this loop (a one-shot's return
         // animation): recording the request is enough, restarting it is a hitch.
-        const bool alreadyThere = requestChanged && loop && haveState && currentAnimId == animId;
+        const bool alreadyThere = requestChanged && !output.restart && loop && haveState &&
+                                  currentAnimId == animId;
         if (!alreadyThere) {
             // A finished one-shot returns to Stand unless told otherwise, which
             // put the arms down for a frame between JumpStart and the jump loop.
             uint32_t returnAnim = 0;
             if (animId == anim::JUMP_START && characterRenderer->hasAnimation(characterInstanceId, anim::JUMP)) {
                 returnAnim = anim::JUMP;
+            }
+            // A flinch taken during a cast returns to the cast pose, not to
+            // Stand for a frame before the state machine asks for it again.
+            if (!loop) {
+                if (const uint32_t back = characterAnimator_.getCombat().resumeAnimAfterHit())
+                    returnAnim = back;
             }
             characterRenderer->playAnimation(characterInstanceId, animId, loop, returnAnim);
         }

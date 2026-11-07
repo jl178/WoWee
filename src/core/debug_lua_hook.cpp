@@ -39,6 +39,13 @@
 //                                  no key behind it - queued for the next
 //                                  input frame (the scripted source), for the
 //                                  pad paths
+//   WoweeDebug_UnitMotion(unit)    "player" or "target": the animation its
+//                                  model plays, where the model is drawn
+//                                  (render x, y, z), where the unit is
+//                                  (canonical x, y, z), whether a server
+//                                  spline moves it, the upper-body
+//                                  overlay's animation (0 for none) and the
+//                                  body animation's time (ms)
 //   WoweeDebug_Quit()              close the client
 //
 // Events pushed this way reach only this client: SDL's queue is in-process.
@@ -47,12 +54,14 @@
 #include "addons/lua_engine.hpp"
 #include "audio/audio_engine.hpp"
 #include "core/application.hpp"
+#include "core/entity_spawner.hpp"
 #include "core/input.hpp"
 #include "core/logger.hpp"
 #include "core/profile_tag.hpp"
 #include "game/entity.hpp"
 #include "game/game_handler.hpp"
 #include "rendering/camera_controller.hpp"
+#include "rendering/character_renderer.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "rendering/renderer.hpp"
 #include "ui/framexml_takeover.hpp"
@@ -263,6 +272,47 @@ int luaDebugRightClickCorpse(lua_State* L) {
     return 1;
 }
 
+/// WoweeDebug_UnitMotion(unit) - anim id, drawn render x, y, z, entity
+/// canonical x, y, z, on-spline; nil when the unit or its model is unknown.
+int luaDebugUnitMotion(lua_State* L) {
+    const std::string token = luaL_checkstring(L, 1);
+    auto& app = Application::getInstance();
+    auto* gh = app.getGameHandler();
+    auto* renderer = app.getRenderer();
+    auto* cr = renderer ? renderer->getCharacterRenderer() : nullptr;
+    if (!gh || !cr) return 0;
+    uint64_t guid = 0;
+    uint32_t inst = 0;
+    if (token == "player") {
+        guid = gh->getPlayerGuid();
+        inst = renderer->getCharacterInstanceId();
+    } else if (token == "target") {
+        guid = gh->getTargetGuid();
+        if (auto* sp = app.getEntitySpawner()) {
+            inst = sp->getCreatureInstanceId(guid);
+            if (inst == 0) inst = sp->getPlayerInstanceId(guid);
+        }
+    }
+    auto e = guid ? gh->getEntityManager().getEntity(guid) : nullptr;
+    if (!e || inst == 0) return 0;
+    uint32_t anim = 0;
+    float t = 0.0f, d = 0.0f;
+    cr->getAnimationState(inst, anim, t, d);
+    glm::vec3 drawn(0.0f);
+    cr->getInstancePosition(inst, drawn);
+    lua_pushinteger(L, anim);
+    lua_pushnumber(L, drawn.x);
+    lua_pushnumber(L, drawn.y);
+    lua_pushnumber(L, drawn.z);
+    lua_pushnumber(L, e->getX());
+    lua_pushnumber(L, e->getY());
+    lua_pushnumber(L, e->getZ());
+    lua_pushboolean(L, e->hasStockMotion() && e->stockMotionIsSpline());
+    lua_pushinteger(L, cr->upperBodyAnimId(inst));
+    lua_pushnumber(L, t);
+    return 10;
+}
+
 int luaDebugProfileTag(lua_State* L) {
     setProfileTag(luaL_checkstring(L, 1));
     return 0;
@@ -337,6 +387,7 @@ void debugLuaHookTick(addons::LuaEngine* engine, SDL_Window* window) {
     lua_register(L, "WoweeDebug_TimeOfDay", luaDebugTimeOfDay);
     lua_register(L, "WoweeDebug_UseObject", luaDebugUseObject);
     lua_register(L, "WoweeDebug_RightClickCorpse", luaDebugRightClickCorpse);
+    lua_register(L, "WoweeDebug_UnitMotion", luaDebugUnitMotion);
     gEngine = engine;
     ++pass;
     if (relogRequested()) {

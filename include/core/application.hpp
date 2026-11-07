@@ -466,13 +466,12 @@ private:
     /// The unit the controls moved last frame (the player, or a driven vehicle).
     uint64_t lastActiveMover_ = 0;
     void applyMoverBody();
-    void updateSeatExitFollow(float deltaTime, bool onTaxi);
+    void updateServerSplineFollow(bool onTaxi);
     void snapControlsToActiveMover();
     void syncDrivenVehicle();
-    /// The player just left a vehicle's seat and rides the exit spline.
-    bool wasInVehicleSeat_ = false;
-    float sinceVehicleExit_ = 1.0e6f;
-    bool playerOnSeatSpline_ = false;
+    /// A server spline of its own moves the player (a charge, a leap, the
+    /// exit off a seat): the character is drawn on it and the controls wait.
+    bool playerOnServerSpline_ = false;
     uint32_t lastWMORideMapId_ = 0xFFFFFFFFu;
     // Set when a rider boards or transfers onto a WMO ship whose deck collision hasn't
     // finished loading yet - holds the boarding-time offset (and freezes camera follow)

@@ -638,6 +638,9 @@ public:
     /// seconds, or 0 when none is pending. The item is unusable meanwhile and
     /// its square is greyed without a sweep (enable 0).
     [[nodiscard]] float getPendingEventCooldown(uint32_t spellId, uint32_t category = 0) const;
+    /// The unit died: its cast pose and build-up are put away (the server's
+    /// failure, usually first, ends the cast's record and bar).
+    void onCasterDied(uint64_t guid);
 private:
     void handleSupercededSpell(network::Packet& packet);
     void handleRemovedSpell(network::Packet& packet);

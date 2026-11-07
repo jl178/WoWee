@@ -144,6 +144,12 @@ public:
                         uint32_t finalizeAnimId = 0);
     /// Leave spell cast animation state → plays finalization anim then idle.
     void stopSpellCast();
+    /// The cast ended without going off: the pose goes at once, no release.
+    void cancelSpellCast();
+    /// The pace of the server spline the player rides (setCharging).
+    void setChargePace(float speed, float walkSpeed, bool airborne) {
+        characterAnimator_.getCombat().setChargePace(speed, walkSpeed, airborne);
+    }
     void setSeatedLoopAnimation(uint32_t animationId);
 
     // ── Loot animation ─────────────────────────────────────────────────────
@@ -154,7 +160,9 @@ public:
     /// Play a one-shot hit reaction animation (wound, dodge, block, etc.)
     /// on the player character.  The state machine returns to the previous
     /// state once the reaction animation finishes.
-    void triggerHitReaction(uint32_t animId);
+    /// `upperTrack`: the stock client's choice for a unit fighting something
+    /// or a crit (0x736640) - the flinch over whatever the body plays.
+    void triggerHitReaction(uint32_t animId, bool upperTrack = false);
 
     // ── Crowd control ──────────────────────────────────────────────────────
     /// Enter/exit stunned state (loops STUN animation until cleared).

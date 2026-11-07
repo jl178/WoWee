@@ -2360,6 +2360,17 @@ void CharacterRenderer::playDeath(uint32_t instanceId, bool alreadyDead) {
         animSoundEventCallback_(instanceId, anim::DEATH, kAnimEventDeathStart, 0, inst.position);
 }
 
+uint32_t CharacterRenderer::upperBodyAnimId(uint32_t instanceId) const {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return 0;
+    const auto& inst = it->second;
+    if (inst.upperTime < 0.0f || !inst.cachedModel) return 0;
+    const int seq = inst.upperSequenceIndex[2];
+    const auto& seqs = inst.cachedModel->data.sequences;
+    if (seq < 0 || seq >= static_cast<int>(seqs.size())) return 0;
+    return seqs[seq].id;
+}
+
 bool CharacterRenderer::upperBodyAnimHasEvent(uint32_t instanceId, uint32_t eventTag) const {
     auto it = instances.find(instanceId);
     if (it == instances.end() || !it->second.cachedModel) return false;
@@ -2512,13 +2523,18 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos) {
         // that decay (remote_smoothing.hpp); getModelMatrix draws them.
         if (remoteSmoothing_) {
             if (isRemoteUnit(inst) && !inst.hasOverrideModelMatrix && inst.mountedOn == 0) {
-                remote_smoothing::step(inst.smooth, inst.position, inst.rotation.z, deltaTime);
+                if (inst.smoothReported)
+                    remote_smoothing::stepReported(inst.smooth, inst.position, inst.rotation.z,
+                                                   deltaTime, inst.pendingCorrection);
+                else
+                    remote_smoothing::step(inst.smooth, inst.position, inst.rotation.z, deltaTime);
                 inst.smoothActive = true;
             } else if (inst.smoothActive) {
                 inst.smooth = remote_smoothing::State{};
                 inst.smoothActive = false;
             }
         }
+        inst.pendingCorrection = glm::vec3(0.0f);
 
         // Skip weapon instances for animation - their transforms are set by parent
         // bones. Enchant visuals are the exception: they are pure animated FX.
@@ -5140,6 +5156,13 @@ void CharacterRenderer::setMotionEnhancements(int secondaryMotion, const glm::ve
             }
         }
     }
+}
+
+void CharacterRenderer::addMotionCorrection(uint32_t instanceId, const glm::vec3& renderDelta) {
+    auto it = instances.find(instanceId);
+    if (it == instances.end()) return;
+    it->second.smoothReported = true;
+    it->second.pendingCorrection += renderDelta;
 }
 
 bool CharacterRenderer::isRemoteUnit(const CharacterInstance& inst) const {

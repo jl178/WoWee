@@ -583,6 +583,51 @@ record (count, spell):
 So a cast the client ended itself and the server then reports again fires
 its event again and never a second STOP.
 
+**The pose.** 0x7FEC00 puts the cast's pose away with it (0x72E430 zeroes
+`+0xA5C`/`+0xA60`; 0x72ED80, for `SMSG_SPELL_FAILURE`, ends the unit's kit
+through 0x72E240 -> 0x72DF00): a cast that ends without going off - failed,
+interrupted, cancelled - returns to the idle at once. **Only `SMSG_SPELL_GO`
+plays the release** (the cast kit's animation). A channel's end
+(`MSG_CHANNEL_UPDATE` 0, or its failure) is the same: the channel loop stops,
+nothing plays after it.
+
+**A cast during another's pose or release.** Every kit plays its
+animation through 0x7385C0 when it plays (0x73B140): a new cast's precast
+kit at `SMSG_SPELL_START` (for the player at the send, 0x80AC90 -> 0x805330)
+plays its AnimID at once, cutting the last cast's release with the incoming
+sequence's blend; an instant's cast kit at `SMSG_SPELL_GO` plays its AnimID
+again from the first frame, so two instants back to back release twice.
+Nothing waits for a release to finish. Between kits the re-pick (0x73AC30
+-> 0x724500) answers the spell pose (0x7224D0: the current cast's precast
+kit AnimID, or StartAnimID while the start mark `+0xA38 & 0x10000` lasts;
+the channel's kit for a channel) unless a cast kit animation is still
+recorded at `+0xFA4`.
+
+**A wound during a cast** (0x736640, from the blow's `$CAH`): the cast goes
+on. CombatWound (attack target), CombatCritical (crit), or StandWound (at
+ease) - the track: the **whole body only for a StandWound on a unit at
+ease** (no attack target, not moving, not falling or on a spline, not
+sitting, `+0x98C` 0); otherwise the **upper-body track** (`+0xB84`), over
+whatever the body plays - a fighter's stance, its swing, a cast. A
+whole-body flinch is a one-shot; at its end the re-pick answers the spell
+pose again, so a caster hit at ease flinches and goes back to its cast.
+
+**Deaths.** What AzerothCore sends when a cast's target dies depends on the
+corpse. A target that leaves the world (a temporary summon despawns as it
+dies) cancels the cast at once (`Spell::update`: the unit target is gone ->
+`cancel()`): on the lab, Frostbolt with such a target killed 1 s in got
+`SMSG_CAST_FAILED` / `SMSG_SPELL_FAILURE` / `FAILED_OTHER` INTERRUPTED 0.12-0.36 s
+later. A corpse that stays lets the cast run to its end, where `CheckCast`
+fails it (`SMSG_CAST_FAILED`, then `SendInterrupted`): on the lab, Frostbolt
+at a Mangy Wolf killed 1 s in held ReadySpellDirected until the 3 s cast was
+up, then `SMSG_CAST_FAILED` ("Invalid target") and the pose went straight to
+Stand. Nothing in the client ends a cast on its target's death: 0x7FECC0's
+callers are the move start, SpellStopCasting and the server's four answers. A channel whose target dies ends with
+`MSG_CHANNEL_UPDATE` 0 (`UpdateChanneledTargetList`). A dying caster's cast
+ends with its failure (`setDeathState` -> `InterruptNonMeleeSpells`), which
+arrived before the death on the lab. Either way the cast's end is the
+server's word, and its pose goes with it as above.
+
 Who calls it:
 
 | Path | Record | Result | Also |
@@ -703,6 +748,11 @@ Fourth pass (casts ending, duels, macros; `input-timing.md` section 6):
 | 28 | An Auto Shot or Shoot press in flight was untouched by a move start | Its record is cancelled with INTERRUPTED and no packet (cast time 0, not next-swing); the repeat goes on |
 | 29 | Food and drink: `CMSG_CANCEL_AURA` and `CMSG_STANDSTATECHANGE` on a move start | Nothing sent; the movement packet ends them on the server |
 | 30 | Every TargetNearest* in a macro ran | Once per macro (0xBEAF44 bit 0x20), modes 0-4 |
+| 31 | The player's cast that ended without going off played its release anyway: every end went through `CombatFSM::stopSpellCast` (SPELL_FINALIZE), so Frostbolt interrupted by its target's death raised SpellCastDirected (53) after the interrupt, and an Arcane Missiles channel ended by its target's death played ChannelCastDirected (124) once more as a one-shot (lab, `[AnimDbg]`) | A failure, interrupt, cancel, channel end or death is a hard stop for the player as for other units: `CombatFSM::cancelSpellCast` puts the pose away (no release); `SpellHandler::clearPlayerCastState` and the predicted precast's end pass it; only `SMSG_SPELL_GO` plays the release |
+| 32 | A caster's death left its cast pose and build-up to the server's failure, and a death seen first kept them | The death puts both away (`SpellHandler::onCasterDied`, from the death callback); the cast's record and bar still wait for the server's word |
+| 33 | A wound during the player's cast cleared the cast in `CombatFSM::triggerHitReaction`: after the flinch the caster stood idle for the rest of the cast (Jered's report: "when hit, I did a new cast and I just stand still") | The cast survives the flinch and its pose comes back after it, from the flinch's own end (no Stand frame between); a release during the flinch still plays; a cast ended during it leaves nothing to come back. Lab, Rotting Maggot hitting a casting mage: 51 -> 8 -> 51 |
+| 34 | A second instant's release (the same SpellCastOmni/Directed) was left playing as the first's - the same id was not asked for again - and the first's end was taken for the second's | `AnimOutput::restart`: a new precast or release plays from its first frame; the release's end is not read on the frame it was asked for. Lab: Ice Lance, Ice Lance - 53 restarted |
+| 35 | Wounds on other units took the whole body unless they were moving, and were dropped over a swing or a cast; a fighter's next swing then cut its flinch, and a flinch cut a swing's end ("the enemy's animation doesn't finish") | The track by 0x736640 (`anim::woundOnUpperBody`): a unit with an attack target, a crit, a moving or casting unit flinches on the upper body over its stance, swing or cast; only a unit at ease takes it on the whole body. The local player the same (`AnimationController::triggerHitReaction(id, upperTrack)`). Lab: the Rotting Maggot's CombatWound (9) on the upper body over ReadySpell / its swing (16 / 25), each running to its end |
 
 Still different:
 

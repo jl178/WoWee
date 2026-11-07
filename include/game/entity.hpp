@@ -188,6 +188,10 @@ public:
     [[nodiscard]] uint32_t stockMotionSplineFlags() const {
         return (motionKind_ == MotionKind::Spline && unitSpline_) ? unitSpline_->flags : 0u;
     }
+    /// The running spline's server id, 0 with no spline.
+    [[nodiscard]] uint32_t stockMotionSplineId() const {
+        return (motionKind_ == MotionKind::Spline && unitSpline_) ? unitSpline_->id : 0u;
+    }
     /// Speed over the path now (a spline's length over its duration, or the
     /// speed the flags select), 0 standing.
     [[nodiscard]] float stockMotionSpeed() const { return motionSpeed_; }
@@ -204,6 +208,17 @@ public:
     [[nodiscard]] float stockMotionAttitudePitch() const { return motionAttitudePitch_; }
     [[nodiscard]] float stockMotionBank() const { return motionBank_; }
     uint32_t takeMotionEvents() { const uint32_t e = motionEvents_; motionEvents_ = 0; return e; }
+    /// The corrections the motion made to where the unit is since the last
+    /// call (canonical axes): a remote packet applied where dead reckoning did
+    /// not have it, a monster move that placed it, a ground spline's step
+    /// onto its path. The motion itself - a spline run, a charge, a stop -
+    /// is not one. What "Smoother other units" (E10) glides over.
+    glm::vec3 takeMotionCorrection() {
+        // serverToCanonical swaps x and y.
+        const glm::vec3 c(motionCorrection_.y, motionCorrection_.x, motionCorrection_.z);
+        motionCorrection_ = glm::vec3(0.0f);
+        return c;
+    }
     std::optional<SplineFinish> takeSplineFinish() {
         auto f = splineFinish_;
         splineFinish_.reset();
@@ -553,6 +568,7 @@ protected:
     uint32_t motionFlags_ = 0;
     uint32_t baseMoveFlags_ = 0;
     uint32_t motionEvents_ = 0;
+    glm::vec3 motionCorrection_{0.0f};  // server axes, since takeMotionCorrection
     uint8_t motionAnimTier_ = 0;
     uint32_t remoteAppliedSeen_ = 0;
     std::optional<SplineFinish> splineFinish_;

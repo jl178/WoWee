@@ -113,6 +113,9 @@ inline const char* tracedOpcodeName(uint16_t op, bool outbound) {
             case 0x0BE: return "MSG_MOVE_STOP_TURN";
             case 0x0DA: return "MSG_MOVE_SET_FACING";
             case 0x0EE: return "MSG_MOVE_HEARTBEAT";
+            case 0x0C9: return "MSG_MOVE_FALL_LAND";
+            case 0x0F0: return "CMSG_MOVE_KNOCK_BACK_ACK";
+            case 0x2C9: return "CMSG_MOVE_SPLINE_DONE";
             default: return nullptr;
         }
     }
@@ -126,6 +129,8 @@ inline const char* tracedOpcodeName(uint16_t op, bool outbound) {
         case 0x144: return "SMSG_ATTACKSTOP";
         case 0x14A: return "SMSG_ATTACKERSTATEUPDATE";
         case 0x29C: return "SMSG_CANCEL_AUTO_REPEAT";
+        case 0x0DD: return "SMSG_MONSTER_MOVE";
+        case 0x0EF: return "SMSG_MOVE_KNOCK_BACK";
         default: return nullptr;
     }
 }

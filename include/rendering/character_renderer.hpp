@@ -222,6 +222,10 @@ public:
     /// blends (remote_smoothing.hpp); the local instances (the player's
     /// character, its native form, its mount; 0 for none) are never smoothed.
     /// Never called (the previews), or at 0 and false, nothing of either runs.
+    /// A correction the unit's motion made to where it is drawn this frame
+    /// (render space): what "Smoother other units" (E10) glides over. Once a
+    /// unit has reported one, its own steps are no longer guessed at.
+    void addMotionCorrection(uint32_t instanceId, const glm::vec3& renderDelta);
     void setMotionEnhancements(int secondaryMotion, const glm::vec3& windWorld, bool remoteSmoothing,
                                uint32_t localA, uint32_t localB, uint32_t localC);
     /// Look twist: yaw on the SpineLow key bone and, on top of it, the Head
@@ -301,6 +305,9 @@ public:
     /// Whether the animation playing on the upper body (playUpperBodyAnimation)
     /// carries an event with this tag; false when none plays there.
     [[nodiscard]] bool upperBodyAnimHasEvent(uint32_t instanceId, uint32_t eventTag) const;
+    /// The animation id the upper-body overlay plays, 0 when none (a test
+    /// hook's view of the layering).
+    [[nodiscard]] uint32_t upperBodyAnimId(uint32_t instanceId) const;
     /// Plays the rest of the whole-body animation at `speed` (1 = as authored);
     /// the next playAnimation starts at 1 again. The stock client slows a
     /// swing that missed to half speed from its blow (Wow.exe 0x735CC0).
@@ -697,6 +704,10 @@ private:
         // row is on and this is another unit, else the matrix is stock.
         remote_smoothing::State smooth;
         bool smoothActive = false;
+        /// The unit's motion reports its corrections (addMotionCorrection):
+        /// E10 smooths those and nothing else.
+        bool smoothReported = false;
+        glm::vec3 pendingCorrection{0.0f};
         // Foot placement (E9): the targets the pose applies and the floor
         // reads behind them. Weight 0 - always, with the row off - is stock.
         foot_ik::State footIk;

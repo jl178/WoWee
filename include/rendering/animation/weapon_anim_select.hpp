@@ -301,6 +301,14 @@ inline uint32_t woundAnim(bool crit, bool attacking) {
     return attacking ? COMBAT_WOUND : STAND_WOUND;
 }
 
+/// Which track that flinch takes (0x736640): the whole body only for a
+/// StandWound on a unit at ease - not moving, not casting; a crit or a unit
+/// with an attack target of its own flinches on the upper-body track, over
+/// whatever its body plays (its stance, its swing, its cast).
+inline bool woundOnUpperBody(bool crit, bool attacking, bool moving, bool casting) {
+    return crit || attacking || moving || casting;
+}
+
 /// The sheath state a unit's weapons are shown in, which in the stock client
 /// is not the server's byte alone (Wow.exe 0x738180, run on every animation
 /// change). In order:

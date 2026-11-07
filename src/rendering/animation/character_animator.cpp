@@ -35,6 +35,10 @@ void CharacterAnimator::stopSpellCast() {
     combat_.stopSpellCast();
 }
 
+void CharacterAnimator::cancelSpellCast() {
+    combat_.cancelSpellCast();
+}
+
 void CharacterAnimator::triggerMeleeSwing() {
     // Melee is handled via timer in FrameInput - CombatFSM transitions automatically
 }

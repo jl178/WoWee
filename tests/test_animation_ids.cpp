@@ -276,6 +276,13 @@ TEST_CASE("Combat animations follow the stock weapon tables", "[animation][comba
     REQUIRE(anim::woundAnim(false, false) == anim::STAND_WOUND);
     REQUIRE(anim::woundAnim(false, true) == anim::COMBAT_WOUND);
     REQUIRE(anim::woundAnim(true, false) == anim::COMBAT_CRITICAL);
+    // Its track: the whole body only at ease; fighting, a crit, moving or
+    // casting take the upper body, so a swing or a stance goes on under it.
+    REQUIRE_FALSE(anim::woundOnUpperBody(false, false, false, false));
+    REQUIRE(anim::woundOnUpperBody(false, true, false, false));
+    REQUIRE(anim::woundOnUpperBody(true, false, false, false));
+    REQUIRE(anim::woundOnUpperBody(false, false, true, false));
+    REQUIRE(anim::woundOnUpperBody(false, false, false, true));
 
     // Upper body over a run, 0x71D800: swings, flinches, stances and casts
     // do; Kick, Whirlwind and Death take the whole body.

@@ -329,7 +329,15 @@ void MovementHandler::registerOpcodes(DispatchTable& table) {
                      // were last seen until their next heartbeat.
                      Opcode::MSG_MOVE_HOVER, Opcode::MSG_MOVE_FEATHER_FALL,
                      Opcode::MSG_MOVE_WATER_WALK,
-                     Opcode::MSG_MOVE_ROOT, Opcode::MSG_MOVE_UNROOT }) {
+                     Opcode::MSG_MOVE_ROOT, Opcode::MSG_MOVE_UNROOT,
+                     // Another player knocked back: AzerothCore relays the
+                     // knocked player's ack as this, its movement block (the
+                     // fall) and then the knockback's own four floats, which
+                     // the block already carries. Stock reads it with the
+                     // other MSG_MOVE_* (0x742200's table: 0xF1 -> 0x741B60).
+                     // Left out, the player stood until its FALL_LAND and then
+                     // jumped to where the knockback had put it.
+                     Opcode::MSG_MOVE_KNOCK_BACK }) {
         table[op] = [this](network::Packet& packet) {
             if (owner_.getState() == WorldState::IN_WORLD) handleOtherPlayerMovement(packet);
         };
@@ -605,6 +613,12 @@ void MovementHandler::sendMovement(Opcode opcode) {
         // Every opcode, stop and heartbeat included: the stock client sends
         // nothing between SMSG_NEW_WORLD and the end of the load (0x403B70).
         heldReason = "the new map is loading";
+    } else if (playerOnServerSpline()) {
+        // Nothing either while a server spline moves the player: the keys do
+        // nothing (0x5FA060) and no heartbeat goes out (0x6F09F0 -> 0x4F5240).
+        // The server drops whatever arrives meanwhile (AzerothCore's
+        // VerifyMovementInfo refuses a mover whose spline is not finalized).
+        heldReason = "a server spline moves the character";
     } else if (!taxiAllowed) {
         if (!serverMovementAllowed_) heldReason = "the server has not given control of the character";
         else if (movingOtherUnit()) heldReason = nullptr;
@@ -1013,7 +1027,8 @@ void MovementHandler::sendMovement(Opcode opcode) {
     if (core::input_trace::enabled()) {
         LOG_WARNING("[input] move 0x", std::hex, static_cast<uint32_t>(wireOpcode(opcode)),
                     std::dec, " facing ", movementInfo.orientation, " flags 0x", std::hex,
-                    movementInfo.flags, std::dec);
+                    movementInfo.flags, std::dec, " at (", movementInfo.x, ", ", movementInfo.y,
+                    ", ", movementInfo.z, ")");
     }
     lastSentPos_ = glm::vec3(movementInfo.x, movementInfo.y, movementInfo.z);
     hasSentMovement_ = true;
@@ -1304,6 +1319,9 @@ void MovementHandler::setPosition(float x, float y, float z) {
     // map (".gps" after ".tele" to another continent read the new map with
     // the old x, y, z).
     if (isWorldPortHeld()) return;
+    // A server spline has the player: its position is the spline's
+    // (updateServerSpline), and setting the entity would end the spline.
+    if (playerOnServerSpline()) return;
     movementInfo.x = x;
     movementInfo.y = y;
     movementInfo.z = z;
@@ -1323,6 +1341,7 @@ void MovementHandler::setPosition(float x, float y, float z) {
 
 void MovementHandler::setOrientation(float orientation) {
     if (isWorldPortHeld()) return;
+    if (playerOnServerSpline()) return;  // the spline faces the player
     movementInfo.orientation = orientation;
 }
 
@@ -1598,6 +1617,22 @@ void MovementHandler::handleMoveKnockBack(network::Packet& packet) {
              " hspeed=", hspeed, " vspeed=", vspeed);
 
     if (forceTargetOf(guid) != ForceTarget::Mover) return;
+
+    // 0x6E9FF0: the fall the packet describes is the mover's now, and the
+    // ack carries it (FALLING, fall time 0, the packet's z speed, direction
+    // and speed); AzerothCore relays the ack's movement to everyone else as
+    // MSG_MOVE_KNOCK_BACK, so what they draw is this. No MSG_MOVE_JUMP goes
+    // out for it.
+    if (!isPreWotlk()) {
+        movementInfo.flags = sm::knockBackFlags(movementInfo.flags, movementInfo.flags2);
+        movementInfo.fallTime = 0;
+        movementInfo.jumpVelocity = vspeed;
+        movementInfo.jumpSinAngle = vcos;  // x first on the wire (+0x70)
+        movementInfo.jumpCosAngle = vsin;
+        movementInfo.jumpXYSpeed = hspeed;
+        isFalling_ = (movementInfo.flags & sm::kFalling) != 0;
+        fallStartMs_ = nextMovementTimestampMs();
+    }
 
     if (owner_.knockBackCallbackRef()) {
         owner_.knockBackCallbackRef()(vcos, vsin, hspeed, vspeed);
@@ -3080,6 +3115,60 @@ void MovementHandler::updateClientTaxi(float deltaTime) {
     if (serverTaxi || taxiStartGrace_ > 0.0f) return;
     if (!taxiSplineSeen_ && taxiActivatePending_) return;
     endTaxiFlight();
+}
+
+bool MovementHandler::playerOnServerSpline() const {
+    if (movingOtherUnit()) return false;
+    if (onTaxiFlight_ || taxiMountActive_ || taxiClientActive_ || taxiActivatePending_) return false;
+    const uint64_t player = owner_.getPlayerGuid();
+    if (player == 0 || owner_.vehiclePassenger(player)) return false;
+    auto e = owner_.getEntityManager().getEntity(player);
+    return e && e->hasStockMotion() && e->stockMotionIsSpline();
+}
+
+void MovementHandler::updateServerSpline() {
+    constexpr uint32_t kSteer =
+        static_cast<uint32_t>(MovementFlags::FORWARD) | static_cast<uint32_t>(MovementFlags::BACKWARD) |
+        static_cast<uint32_t>(MovementFlags::STRAFE_LEFT) | static_cast<uint32_t>(MovementFlags::STRAFE_RIGHT) |
+        static_cast<uint32_t>(MovementFlags::TURN_LEFT) | static_cast<uint32_t>(MovementFlags::TURN_RIGHT);
+    auto player = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
+    if (playerOnServerSpline() && player) {
+        if (!serverSplineActive_) {
+            // 0x98C770 starts the mover forward on it (0x988A20); the keys
+            // held before are let go here and taken up again at the end.
+            serverSplineActive_ = true;
+            movementInfo.flags = sm::startForwardBackward(movementInfo.flags & ~kSteer, true);
+            LOG_INFO("Server spline moves the player: id=", player->stockMotionSplineId(),
+                     " flags=0x", std::hex, player->stockMotionSplineFlags(), std::dec,
+                     " speed=", player->stockMotionSpeed());
+        }
+        serverSplineId_ = player->stockMotionSplineId();
+        movementInfo.x = player->getX();
+        movementInfo.y = player->getY();
+        movementInfo.z = player->getZ();
+        movementInfo.orientation = player->getOrientation();
+        return;
+    }
+    if (!serverSplineActive_) return;
+    serverSplineActive_ = false;
+    // The end (0x6EB0B0): on the final point, facing as asked; forward and
+    // the pending stop go (0x98BD10 clears 0x4003). The directions the keys
+    // still hold come back as their own start packets (0x5FBBC0).
+    if (player) {
+        movementInfo.x = player->getX();
+        movementInfo.y = player->getY();
+        movementInfo.z = player->getZ();
+        movementInfo.orientation = player->getOrientation();
+    }
+    movementInfo.flags &= ~(kSteer | sm::kPendingStop);
+    if (isWorldPortHeld() || owner_.getState() != WorldState::IN_WORLD) return;
+    const uint32_t id = serverSplineId_;
+    // 0x6EAE70 -> 0x71F210: the mover's movement, then the spline's id; the
+    // next heartbeat is 500 ms on (0x6E9B70).
+    sendMoverPacket(Opcode::CMSG_MOVE_SPLINE_DONE, [id](network::Packet& p) { p.writeUInt32(id); });
+    timeSinceLastMoveHeartbeat_ = 0.0f;
+    LOG_INFO("Server spline done: id=", id, " at (", movementInfo.x, ", ", movementInfo.y, ", ",
+             movementInfo.z, ")");
 }
 
 void MovementHandler::handleActivateTaxiReply(network::Packet& packet) {

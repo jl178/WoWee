@@ -983,6 +983,9 @@ void GameHandler::update(float deltaTime) {
         section("gameHandler/world");
 
         updateEntityInterpolation(deltaTime);
+        // The player on a server spline of its own: where it has them, and
+        // CMSG_MOVE_SPLINE_DONE at its end.
+        if (movementHandler_) movementHandler_->updateServerSpline();
         section("gameHandler/interpolation");
     }
 }

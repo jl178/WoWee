@@ -144,6 +144,180 @@ TEST_CASE("CombatFSM: stopSpellCast transitions to finalize", "[combat]") {
     CHECK(fsm.getState() == CombatFSM::State::SPELL_FINALIZE);
 }
 
+TEST_CASE("CombatFSM: a cast that did not go off puts its pose away with no release", "[combat][cast_end]") {
+    // 0x7FECC0 -> 0x7FEC00: a failed, interrupted or cancelled cast, a
+    // channel's end and a caster's death put the cast and its pose away
+    // (0x72E430). Only SMSG_SPELL_GO plays the release. Seen on the lab:
+    // Frostbolt interrupted by its target's death played SpellCastDirected
+    // (53) after the interrupt, and an Arcane Missiles channel ended by its
+    // target's death played ChannelCastDirected once more.
+    auto caps = makeCombatCaps();
+    auto wl = unarmedLoadout();
+    for (const bool channel : {false, true}) {
+        CombatFSM fsm;
+        fsm.startSpellCast(0, channel ? anim::CHANNEL_CAST_DIRECTED : anim::READY_SPELL_DIRECTED, true,
+                           channel ? 0u : static_cast<uint32_t>(anim::SPELL_CAST_DIRECTED));
+        REQUIRE(fsm.getState() == CombatFSM::State::SPELL_CASTING);
+        fsm.cancelSpellCast();
+        CHECK(fsm.getState() == CombatFSM::State::INACTIVE);
+        auto in = combatInput();
+        in.inCombat = false;
+        const auto out = fsm.resolve(in, caps, wl);
+        CHECK((!out.valid || (out.animId != anim::SPELL_CAST_DIRECTED &&
+                              out.animId != anim::CHANNEL_CAST_DIRECTED &&
+                              out.animId != anim::READY_SPELL_DIRECTED)));
+    }
+    {
+        // In the precast too.
+        CombatFSM fsm;
+        fsm.startSpellCast(anim::SPELL_PRECAST, anim::READY_SPELL_OMNI, true, anim::SPELL_CAST_OMNI);
+        REQUIRE(fsm.getState() == CombatFSM::State::SPELL_PRECAST);
+        fsm.cancelSpellCast();
+        CHECK(fsm.getState() == CombatFSM::State::INACTIVE);
+    }
+    {
+        // A release already playing for a cast that went off is left to finish.
+        CombatFSM fsm;
+        fsm.startSpellCast(0, anim::READY_SPELL_DIRECTED, true, anim::SPELL_CAST_DIRECTED);
+        fsm.stopSpellCast();
+        REQUIRE(fsm.getState() == CombatFSM::State::SPELL_FINALIZE);
+        fsm.cancelSpellCast();
+        CHECK(fsm.getState() == CombatFSM::State::SPELL_FINALIZE);
+    }
+}
+
+namespace {
+// One frame: the body plays what the last resolve asked for (from its first
+// frame on a restart), `elapsed` ms into it, of `duration` ms.
+struct Body { uint32_t anim = 0; float t = 0.0f; };
+CombatFSM::Input bodyInput(const Body& b, float durationMs = 500.0f) {
+    CombatFSM::Input in;
+    in.grounded = true;
+    in.haveAnimState = true;
+    in.currentAnimId = b.anim;
+    in.currentAnimTime = b.t;
+    in.currentAnimDuration = durationMs;
+    return in;
+}
+void play(Body& b, const AnimOutput& out) {
+    if (!out.valid) return;
+    if (out.restart || out.animId != b.anim) b.t = 0.0f;
+    b.anim = out.animId;
+}
+}  // namespace
+
+TEST_CASE("CombatFSM: a wound during a cast does not end the cast pose", "[combat][cast_end][wound]") {
+    // 0x736640 plays the flinch; the re-pick after it (0x73AC30) answers the
+    // spell pose while the unit casts (0x7224D0). Wowee cleared the cast on
+    // the hit and stood the caster idle for the rest of it (lab report:
+    // "when hit, I did a new cast and I just stand still").
+    auto caps = makeCombatCaps();
+    auto wl = unarmedLoadout();
+    CombatFSM fsm;
+    Body b;
+    fsm.startSpellCast(0, anim::READY_SPELL_DIRECTED, true, anim::SPELL_CAST_DIRECTED);
+    play(b, fsm.resolve(bodyInput(b), caps, wl));
+    REQUIRE(b.anim == anim::READY_SPELL_DIRECTED);
+    fsm.triggerHitReaction(anim::STAND_WOUND);
+    play(b, fsm.resolve(bodyInput(b), caps, wl));
+    CHECK(b.anim == anim::STAND_WOUND);
+    // The flinch plays out...
+    for (int i = 0; i < 40; ++i) {
+        b.t += 20.0f;
+        play(b, fsm.resolve(bodyInput(b), caps, wl));
+    }
+    // ...and the cast pose is back, the cast still on.
+    CHECK(b.anim == anim::READY_SPELL_DIRECTED);
+    CHECK(fsm.getState() == CombatFSM::State::SPELL_CASTING);
+    // The cast went off: its release.
+    fsm.stopSpellCast();
+    play(b, fsm.resolve(bodyInput(b), caps, wl));
+    CHECK(b.anim == anim::SPELL_CAST_DIRECTED);
+
+    // A cast that ends during the flinch: the flinch finishes, no pose after.
+    CombatFSM f2;
+    Body c;
+    f2.startSpellCast(0, anim::READY_SPELL_DIRECTED, true, anim::SPELL_CAST_DIRECTED);
+    play(c, f2.resolve(bodyInput(c), caps, wl));
+    f2.triggerHitReaction(anim::STAND_WOUND);
+    play(c, f2.resolve(bodyInput(c), caps, wl));
+    f2.cancelSpellCast();
+    for (int i = 0; i < 40; ++i) {
+        c.t += 20.0f;
+        play(c, f2.resolve(bodyInput(c), caps, wl));
+    }
+    CHECK(c.anim != anim::READY_SPELL_DIRECTED);
+    CHECK(f2.getState() == CombatFSM::State::INACTIVE);
+}
+
+TEST_CASE("CombatFSM: back-to-back casts replace the release from its first frame", "[combat][chain]") {
+    // Each kit plays its AnimID through 0x7385C0 when it plays (0x73B140):
+    // a second instant's release starts over, and a new cast's pose cuts the
+    // last release. The same id requested again used to be left playing, so
+    // the second release ended with the first.
+    auto caps = makeCombatCaps();
+    auto wl = unarmedLoadout();
+    CombatFSM fsm;
+    Body b;
+    // Instant 1: start and release in one frame.
+    fsm.startSpellCast(0, anim::READY_SPELL_OMNI, true, anim::SPELL_CAST_OMNI);
+    fsm.stopSpellCast();
+    auto out = fsm.resolve(bodyInput(b), caps, wl);
+    CHECK(out.animId == anim::SPELL_CAST_OMNI);
+    CHECK(out.restart);
+    play(b, out);
+    b.t = 400.0f;  // near the end of the first release
+    // Instant 2 in the same way.
+    fsm.startSpellCast(0, anim::READY_SPELL_OMNI, true, anim::SPELL_CAST_OMNI);
+    fsm.stopSpellCast();
+    out = fsm.resolve(bodyInput(b), caps, wl);
+    CHECK(out.animId == anim::SPELL_CAST_OMNI);
+    CHECK(out.restart);
+    play(b, out);
+    CHECK(b.t == 0.0f);
+    // The first release's end is not taken for the second's.
+    b.t = 100.0f;
+    play(b, fsm.resolve(bodyInput(b), caps, wl));
+    CHECK(fsm.getState() == CombatFSM::State::SPELL_FINALIZE);
+    // A cast started during the release cuts it with its pose.
+    fsm.startSpellCast(0, anim::READY_SPELL_DIRECTED, true, anim::SPELL_CAST_DIRECTED);
+    out = fsm.resolve(bodyInput(b), caps, wl);
+    CHECK(out.animId == anim::READY_SPELL_DIRECTED);
+    CHECK(out.loop);
+    // A plain frame afterwards asks for no restart.
+    play(b, out);
+    out = fsm.resolve(bodyInput(b), caps, wl);
+    CHECK_FALSE(out.restart);
+}
+
+TEST_CASE("CombatFSM: a server spline under the player moves at its pace", "[combat][charge]") {
+    // 0x717050, for every unit on a spline: above 11 yd/s Sprint, above twice
+    // the walk speed Run, else Walk. A charge runs at the 28 yd/s cap.
+    CHECK(CombatFSM::paceFor(28.0f, 2.5f) == CombatFSM::Pace::Sprint);
+    CHECK(CombatFSM::paceFor(11.0f, 2.5f) == CombatFSM::Pace::Run);
+    CHECK(CombatFSM::paceFor(7.0f, 2.5f) == CombatFSM::Pace::Run);
+    CHECK(CombatFSM::paceFor(5.0f, 2.5f) == CombatFSM::Pace::Walk);
+    auto caps = makeCombatCaps();
+    caps.resolvedRun = anim::RUN;
+    caps.resolvedSprint = anim::SPRINT;
+    caps.resolvedWalk = anim::WALK;
+    auto wl = unarmedLoadout();
+    CombatFSM fsm;
+    fsm.setCharging(true);
+    fsm.setChargePace(28.0f, 2.5f);
+    auto in = combatInput();
+    auto out = fsm.resolve(in, caps, wl);
+    REQUIRE(out.valid);
+    CHECK(out.animId == anim::SPRINT);
+    fsm.setChargePace(7.0f, 2.5f);
+    out = fsm.resolve(in, caps, wl);
+    CHECK(out.animId == anim::RUN);
+    caps.resolvedSprint = 0;  // a model without Sprint runs
+    fsm.setChargePace(28.0f, 2.5f);
+    out = fsm.resolve(in, caps, wl);
+    CHECK(out.animId == anim::RUN);
+}
+
 TEST_CASE("CombatFSM: hit reaction", "[combat]") {
     CombatFSM fsm;
     auto caps = makeCombatCaps();

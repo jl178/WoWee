@@ -402,6 +402,32 @@ TEST_CASE("A late packet is applied at once and run on", "[unit_motion][remote]"
     CHECK(m.state().position.x == Approx(0.7f + 7.0f * 0.3f));
 }
 
+TEST_CASE("A remote packet reports where it corrected dead reckoning", "[unit_motion][remote]") {
+    // Stock sets the position a packet carries (0x988920); the difference
+    // from where dead reckoning had the unit at the packet's time is the
+    // correction "Smoother other units" glides over - and the only thing it
+    // glides over.
+    RemoteMover m;
+    MovementSample a;
+    a.time = 0;
+    a.flags = MoveFlags::Forward;
+    m.receive(a, 1000);
+    CHECK(glm::length(m.takeCorrection()) == 0.0f);  // the first: nothing to correct
+    MovementSample b = a;
+    b.time = 500;
+    b.position = {3.5f, 0, 0};                         // where 500 ms at 7 yd/s puts it
+    m.receive(b, 1500);
+    m.update(1500);
+    CHECK(glm::length(m.takeCorrection()) == Approx(0.0f).margin(1e-3f));
+    MovementSample c = b;
+    c.time = 1000;
+    c.position = {8.0f, 0, 0};                         // a yard further than that
+    m.receive(c, 2000);
+    m.update(2000);
+    CHECK(m.takeCorrection().x == Approx(1.0f).margin(1e-3f));
+    CHECK(glm::length(m.takeCorrection()) == 0.0f);    // taken
+}
+
 TEST_CASE("A remote runner whose packets stop comes to rest", "[unit_motion][remote]") {
     RemoteMover m;
     MovementSample a;

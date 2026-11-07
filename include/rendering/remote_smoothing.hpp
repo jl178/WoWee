@@ -9,14 +9,24 @@
 /// at 0 (a hard cut). With the row on, for units other than the player's own
 /// character and mount:
 ///
-///   - A step in the drawn position that ordinary motion does not explain -
-///     more than kStepThreshold beyond where the unit's own recent velocity
-///     would have carried it, and less than kSnapDistance (a teleport, a
-///     respawn, a long correction, which still snap) - is drawn as an offset
-///     that decays to nothing with time constant kPositionTau, so the model
-///     glides the last part of the way instead of jumping. The unit's real
-///     position (selection, nameplates, range) is untouched; only its model
-///     matrix carries the offset.
+///   - A correction of the drawn position - less than kSnapDistance (a
+///     teleport, a respawn, a long correction still snap) - is drawn as an
+///     offset that decays to nothing with time constant kPositionTau, so the
+///     model glides the last part of the way instead of jumping. The unit's
+///     real position (selection, nameplates, range) is untouched; only its
+///     model matrix carries the offset.
+///
+///     What is a correction is the motion's to say (stepReported): with the
+///     stock unit motion (WotLK) only a remote packet applied where dead
+///     reckoning did not have the unit, a monster move that places it, or a
+///     ground spline's sideways step onto its path - never the motion itself.
+///     A charge (0 to 28 yd/s and back to 0 within a frame) is motion: a
+///     guess from the drawn velocity read its start as a step behind and its
+///     stop as a step ahead, and drew the charger lagging 2 yd, then
+///     overshooting the end and gliding back to it. The guess (step) is kept
+///     for the older expansions' interpolation, which reports nothing: more
+///     than kStepThreshold beyond where the recent velocity would have
+///     carried the unit.
 ///   - A turn of more than kYawStepThreshold in one frame - the body-facing
 ///     ease (stepBodyFacing) already turns everything else smoothly - is
 ///     likewise drawn as a decaying yaw offset.
@@ -110,6 +120,40 @@ inline void step(State& s, const glm::vec3& position, float yaw, float dt) {
         s.yawOffset = std::clamp(wrapAngle(s.yawOffset - turned), -kMaxYawOffset, kMaxYawOffset);
     }
     s.yawOffset *= std::exp(-dt / kYawTau);
+    if (std::abs(s.yawOffset) < 1e-5f) s.yawOffset = 0.0f;
+    s.lastYaw = yaw;
+}
+
+/// The same, with the corrections the motion reported this frame (render
+/// space, the sum since the last call) instead of a guess from the velocity:
+/// everything else the position did is motion and is drawn as it is.
+inline void stepReported(State& s, const glm::vec3& position, float yaw, float dt,
+                         const glm::vec3& correction) {
+    if (!s.primed || !(dt >= 0.0f) || dt > kMaxDt) {
+        s = State{};
+        s.primed = true;
+        s.lastPosition = position;
+        s.lastYaw = yaw;
+        return;
+    }
+    const float c = glm::length(correction);
+    if (c > kSnapDistance) {
+        s.offset = glm::vec3(0.0f);  // a long one snaps, as stock
+    } else if (c > 0.0f) {
+        s.offset -= correction;
+        const float o = glm::length(s.offset);
+        if (o > kMaxOffset) s.offset *= kMaxOffset / o;
+    }
+    if (dt > 0.0f) s.offset *= std::exp(-dt / kPositionTau);
+    if (glm::dot(s.offset, s.offset) < 1e-8f) s.offset = glm::vec3(0.0f);
+    s.lastPosition = position;
+    s.velocity = glm::vec3(0.0f);
+
+    const float turned = wrapAngle(yaw - s.lastYaw);
+    if (std::abs(turned) > kYawStepThreshold) {
+        s.yawOffset = std::clamp(wrapAngle(s.yawOffset - turned), -kMaxYawOffset, kMaxYawOffset);
+    }
+    if (dt > 0.0f) s.yawOffset *= std::exp(-dt / kYawTau);
     if (std::abs(s.yawOffset) < 1e-5f) s.yawOffset = 0.0f;
     s.lastYaw = yaw;
 }

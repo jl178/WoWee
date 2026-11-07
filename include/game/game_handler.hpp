@@ -2947,11 +2947,6 @@ public:
     QuestGiverStatus getQuestGiverStatus(uint64_t guid) const;
     const std::unordered_map<uint64_t, QuestGiverStatus>& getNpcQuestStatuses() const;
 
-    // Charge callback - fires when player casts a charge spell toward target
-    // Parameters: targetGuid, targetX, targetY, targetZ (canonical WoW coordinates)
-    using ChargeCallback = std::function<void(uint64_t targetGuid, float x, float y, float z)>;
-    void setChargeCallback(ChargeCallback cb) { chargeCallback_ = std::move(cb); }
-
     // Level-up callback - fires when the player gains a level (newLevel > 1)
     using LevelUpCallback = std::function<void(uint32_t newLevel)>;
     void setLevelUpCallback(LevelUpCallback cb) { levelUpCallback_ = std::move(cb); }
@@ -4366,14 +4361,12 @@ public:
     auto& appearanceChangedCallbackRef() { return appearanceChangedCallback_; }
     auto& playerModelRebuildCallbackRef() { return playerModelRebuildCallback_; }
     auto& autoFollowCallbackRef() { return autoFollowCallback_; }
-    auto& chargeCallbackRef() { return chargeCallback_; }
     auto& chatBubbleCallbackRef() { return chatBubbleCallback_; }
     auto& creatureDespawnCallbackRef() { return creatureDespawnCallback_; }
     auto& creatureMoveCallbackRef() { return creatureMoveCallback_; }
     auto& creatureSpawnCallbackRef() { return creatureSpawnCallback_; }
     auto& emoteAnimCallbackRef() { return emoteAnimCallback_; }
     auto& gameObjectDespawnCallbackRef() { return gameObjectDespawnCallback_; }
-    auto& gameObjectInfoCallbackRef() { return gameObjectInfoCallback_; }
     auto& gameObjectMoveCallbackRef() { return gameObjectMoveCallback_; }
     auto& gameObjectSpawnCallbackRef() { return gameObjectSpawnCallback_; }
     auto& gameObjectStateCallbackRef() { return gameObjectStateCallback_; }
@@ -5704,7 +5697,6 @@ private:
     TextEmoteSoundCallback textEmoteSoundCallback_;
     NpcFarewellCallback npcFarewellCallback_;
     NpcVendorCallback npcVendorCallback_;
-    ChargeCallback chargeCallback_;
     LevelUpCallback levelUpCallback_;
     LevelUpDeltas lastLevelUpDeltas_;
     std::vector<TempEnchantTimer> tempEnchantTimers_;

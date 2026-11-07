@@ -1291,12 +1291,19 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
             owner_.raiseUiError("Out of range.");
             return;
         }
+        // Nothing moves here. The charge is the server's spline for the
+        // player (SMSG_MONSTER_MOVE at the Charge speed, capped at 28 yd/s
+        // as the client caps it), run by the stock motion like any unit's
+        // (docs/re/unit-motion.md section 6); the attack starts when the
+        // server says so at its end (SMSG_ATTACKSTART). A dash simulated
+        // here at its own speed ended somewhere else, and the heartbeat
+        // sent from there pulled the player back for everyone.
+        (void)tx;
+        (void)ty;
+        (void)tz;
         float yaw = std::atan2(-dy, dx);
         owner_.movementInfoRef().orientation = yaw;
         owner_.sendMovement(Opcode::MSG_MOVE_SET_FACING);
-        if (owner_.chargeCallbackRef()) {
-            owner_.chargeCallbackRef()(target, tx, ty, tz);
-        }
         facingHandled = true;
     }
 
@@ -1900,8 +1907,36 @@ void SpellHandler::clearPlayerCastState() {
     if (auto* ac = owner_.services().audioCoordinator) {
         if (auto* ssm = ac->getSpellSoundManager()) ssm->stopPrecast();
     }
+    // Every caller ends a cast that did not go off (a failure, a cancel, a
+    // channel's end): the pose is put away with no release (0x7FEC00); the
+    // release is SMSG_SPELL_GO's alone.
     if (owner_.spellCastAnimCallbackRef())
-        owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), false, false, SpellCastType::OMNI);
+        owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), false, /*hard stop*/true,
+                                          SpellCastType::OMNI);
+}
+
+void SpellHandler::onCasterDied(uint64_t guid) {
+    // A dead unit casts nothing. The server ends a dying caster's cast or
+    // channel itself (AzerothCore's setDeathState -> InterruptNonMeleeSpells:
+    // SMSG_SPELL_FAILURE, FAILED_OTHER, MSG_CHANNEL_UPDATE 0) and that usually
+    // arrives first; a death seen before it puts the pose and the build-up
+    // away now. The cast's own record and bar wait for the server's word,
+    // which fires the events.
+    if (guid == 0) return;
+    if (guid == owner_.getPlayerGuid()) {
+        if (!casting_ && predictedPrecastSpellId_ == 0) return;
+        predictedPrecastSpellId_ = 0;
+    } else if (unitCastStates_.find(guid) == unitCastStates_.end()) {
+        return;
+    }
+    cancelCastVisual(guid);
+    if (guid == owner_.getPlayerGuid()) {
+        if (auto* ac = owner_.services().audioCoordinator) {
+            if (auto* ssm = ac->getSpellSoundManager()) ssm->stopPrecast();
+        }
+    }
+    if (owner_.spellCastAnimCallbackRef())
+        owner_.spellCastAnimCallbackRef()(guid, false, /*hard stop*/true, SpellCastType::OMNI);
 }
 
 void SpellHandler::fireCastEnd(uint64_t guid, const stock_cast::CastEndSteps& steps,
@@ -1930,7 +1965,8 @@ void SpellHandler::endPlayerCast(stock_cast::CastRef cast, uint8_t result) {
         predictedPrecastSpellId_ = 0;
         cancelCastVisual(owner_.getPlayerGuid());
         if (owner_.spellCastAnimCallbackRef())
-            owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), false, false, SpellCastType::OMNI);
+            owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), false, /*hard stop*/true,
+                                              SpellCastType::OMNI);
     }
     fireCastEnd(owner_.getPlayerGuid(), steps, cast);
     pendingCasts_.remove(cast);
