@@ -54,7 +54,10 @@ out of a group, the area's AreaTable flags: 0x4000000 outdoors, else
 0x2000000 indoors, else outdoors. Now `stock_weather::playerOutdoors` on the
 player's own group (the tightest group round the player, when that group's
 floor decides the area as for the zone text) or the live area's flags.
-WMOAreaTable's flags are not loaded, so their override is not applied.
+The WMOAreaTable row's Flags (column 9, +0x24; 0x4 on 1157 rows such as
+Stormwind's streets, 0x2 on 73) are loaded with the rows (`WmoAreaRow::flags`,
+`WmoAreaInfo::flags`) and override the group's flag: 0x4 outdoors, else 0x2
+indoors.
 
 ## 2. The mist and the sand
 
@@ -147,11 +150,17 @@ Differences left:
 
 - **Ground along the path**: three samples (start, middle, end), lifted to
   `ground + 6` between them; the steep-rise cut of 0x786330 is not done.
-- **Sand grain count**: at most 9000 alive (`Weather::MAX_GRAINS`, built on
-  the CPU as quads), the stock rate held to `9000 / 3.2` a second. Stock keeps
-  about 67000 at weatherDensity 2, so the stock sand is denser.
+- **Sand on the GPU, as stock**: each grain is written once, at birth, into
+  a 131072-slot ring (`Weather::grainRing_`, 32 bytes a grain) and moved,
+  sized, faded and discarded by `weather_sand.vert` from its
+  birth, velocity and life, as `sand.bls` does; one or two instanced draws
+  of six vertices a grain. The stock rate is kept: about 67000 alive at
+  weatherDensity 2, 107000 at 3 (seven eighths of the ring; the rest keeps
+  the slots the frames in flight read clear of new writes).
 - **Sand path**: ended where the straight line between the ground at both
-  ends is crossed, not cast against the world (WMOs, doodads).
+  ends is crossed, not cast against the world (WMOs, doodads). The ground
+  is read from a 2 yd grid filled on demand (`Weather::sandGround`), as
+  tens of thousands of grains a second would be as many ground queries.
 - **Point size**: a square of the stock pixel size, at the camera's FOV and
   aspect; no `min(caps, 24)` limit (it never reaches it).
 - **Heading**: the player's averaged velocity from its position, and its
@@ -252,20 +261,81 @@ named, a 1251x986 window on the Iris Xe (Jered's machine under load):
   0.27-0.28 (both with their 3000 / 2100 drops and flakes). The GPU's
   last-frame figure (13-20 ms, vsync-bound and loaded) did not separate.
 
-## 6. Not done here
+Second round (GPU sand, Weather.dbc, sky order), the same setup: Silithus
+sandstorm with the rows off reached 56000 grains a few seconds after the
+full grade (the stock rate at Weather Detail 3, less those the dunes end
+at birth), the weather stage 0.23 ms/frame with them (spawning and the
+ground grid; the GPU moves them); `Weather.dbc: 32 rows` read; Goldshire at
+23:00 keeps its stars under the moon; the Storm Peaks' sky as before;
+`IsIndoors()` false in Gadgetzan's and Stormwind's streets.
 
-- **Weather.dbc's own textures and colour**: the rain and snow emitters load
-  the row's EffectTexture (record +0x1c) when it names one, else
-  `RainDrop01` / `SnowFlake01` (0x7846a0, 0x783b90); rows 83/96-98 name
-  SnowFlake01, 90 `Particles\LeafBrown.blp`, 100/108 `RainDropRed01.blp`.
-  Wowee draws every rain as RainDrop01. The colour (+0x10..0x18, 0x48bd20)
-  is still not read.
-- **The kind from Weather.dbc**: stock picks the emitter by the row's
-  EffectType (record +8: 1 rain, 2 snow, 3 sand); Wowee by the state number
-  (`game::weatherKind`), which reads 106 as snow where the row is sand.
-- **Sky model order**: stock draws stars, sun, moons, the additive dome and
-  the clouds, then the LightSkybox models (0x7f09b0); Wowee draws the dome,
-  the models (its stars are one of them), then sun, moons and clouds. Moving
-  the models needs the stars taken out of the model layers first.
-- **ScreenEffect 2 and 3** and the **underwater glow wave**: world-lighting.md
-  section 8, not traced further here.
+## 6. Weather.dbc
+
+**Stock** (0x7846a0, from the SMSG_WEATHER handler 0x526530 with the row
+0x65c290 found): the row's EffectType (+8) picks the emitter (0x78d170 makes
+the rain, snow or sand one); its light scale (+0xc) is eased into weather
++0x28 and multiplies the storm light (0x784850); its colour (+0x10..0x18) is
+packed with alpha 1 into weather +0x34 (0x48bd20) and set as the vertex
+colour of the rain (0x78a640, c7), the splashes (0x78a030, c7) and the snow
+(0x78aee0, c8) - not the sand or the mist, which take the fog colour; its
+EffectTexture (+0x1c) is copied into weather +0x38 when it names one, else
+the kind's own (0x783b90: RainDrop01, SnowFlake01), and the rain and snow
+emitters load their particle texture from there (0x78ca90, 0x78cd30).
+
+3.3.5's rows: 83 and 96-98 SnowFlake01, 90 `Particles\LeafBrown.blp` (the
+server's black rain), 100 and 108 `RainDropRed01.blp`; 104 SnowMist01 on a
+sand row (unused: sand reads no texture); colours all white but 103
+(1, 0.5, 0) and 104 (0, 0, 0), both sand; light scale 0 on 103 and 105-107.
+State 106 (the server's "black snow") is a sand row.
+
+**Wowee now.** `Renderer::weatherRowFor` reads Weather.dbc once (8 fields;
+another width falls back to the state number). The kind is the row's
+EffectType (`stock_weather::effectFor`; 86 stays `Type::STORM` for the
+enhancement rows and is drawn as the stock rain, its own slant and gusts
+only with the "Rain and snow in the wind" row); the storm light is the grade
+times the row's scale (not eased over the stock 5 s); `Weather::setRowLook`
+tints the rain, splashes and snow by the colour and draws the row's texture,
+loaded once into one of four spare sprite slots.
+
+## 7. Sky order
+
+**Stock** (0x7f09b0): the stars (stars.mdl), the sun and moons, the additive
+dome and the clouds; then the LightSkybox models at their weights; the
+glares later. **Wowee before**: the dome, every sky model (the stars among
+them, as a LightSkybox-like layer), then the sun, moons and clouds - so a
+zone's sky model was drawn under the clouds and sun. **Now**: the stars
+have their own sky-mode M2Renderer (`Renderer::skyStarsRenderer_`), drawn
+right after the dome; then the sun, moons and clouds; then the other sky
+models. The dome is opaque here and drawn first, the stars and the sprites
+add to it, which comes to what stock's additive dome over them gives.
+
+## 8. ScreenEffect 2 and 3, the underwater glow wave (traced, not drawn)
+
+0x4f7020 picks the full-screen effect by ScreenEffect.dbc's Effect (+8):
+
+- **2, nether** ("Invis Screen Effect" 81, 121; "Echo of Ymiron" 221;
+  "World of Shadows" 342): 0x7ed870(0.7, 150, colour, 0) saves the current
+  fog (0xd38c1c, 0xd38bf4, 0xd38c20, 0xd38c24) and puts in its place a fog
+  colour 0xff4c4c63 (0xffffffff when 0xd45774 +0x30 is set; not identified) with the end 150 yd and the start 0.7 of it; leaving it
+  restores them (0x7ed820). The chain (0x7ea470, cvar `ffxNetherWorld`):
+  `ffxnetherblur` (four taps averaged, x0.25) into the quarter target, then
+  `ffxnethercombine`: `m = scene * 0.5 + blur; g = dot(m, 1/6);
+  m = m * 0.5 + g; out = scene + c0.w * (m * c0.rgb - scene)`.
+- **3, special** (21, 41, 43, 61, ...): the row's colour (+0xc) and
+  parameters (+0x10..) go to the special chain's vtable +0x10 (0x7ea5f0,
+  cvar `ffxSpecial`, "full screen test effect"); only with shaders (0x682d20).
+- Both then set the row's light slot (+0x1c, 0x7ecec0) and sound (+0x20,
+  +0x24, 0x4c8fa0) as types 0 and 1 do.
+- **Under liquid** the glow chain's last pass is `ffxglowwave`: texture 0 is
+  a wave map whose xy, scaled by c0 and c1, offsets the scene's and the
+  blur's coordinates before the glow combine
+  (`lerp(scene, blur, z) + blur^2 * w`).
+
+Wowee draws none of these yet (the nether fog override is the easiest
+start: it needs only the screen effect's type from the game handler).
+
+## 9. Not done here
+
+- **Weather.dbc**: the light scale is applied at once, not eased over 5 s.
+- **ScreenEffect 2 and 3** and the **underwater glow wave**: traced above,
+  not drawn.

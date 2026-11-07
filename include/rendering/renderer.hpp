@@ -18,6 +18,7 @@
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/shadow_cache.hpp"
 #include "rendering/weather_fx.hpp"
+#include "rendering/stock_weather.hpp"
 #include "rendering/enhancements.hpp"
 #include "rendering/vk_utils.hpp"
 #include "rendering/sky_system.hpp"
@@ -456,6 +457,9 @@ private:
     std::unique_ptr<WMORenderer> wmoRenderer;
     std::unique_ptr<M2Renderer> m2Renderer;
     std::unique_ptr<M2Renderer> skyboxModelRenderer_;
+    /// The night stars (Stars.mdx), apart from the other sky models: stock
+    /// draws them before the dome and those after the clouds (0x7f09b0).
+    std::unique_ptr<M2Renderer> skyStarsRenderer_;
     /// The last zone a terrain chunk actually named. Many chunks carry an area
     /// id of zero, and a tile being loaded carries none at all, so the lookup
     /// answers "do not know" often - and answering from somewhere else instead
@@ -471,6 +475,7 @@ private:
     struct SkyLayerInstance {
         std::string path;
         uint32_t instanceId = 0;
+        bool stars = false;   ///< in skyStarsRenderer_
     };
     std::vector<SkyLayerInstance> skyLayers_;
     /// Sky models already uploaded, by path, so one that fades out and back in
@@ -692,6 +697,9 @@ private:
     [[nodiscard]] weather_fx::Forced weatherPreview() const;
     /// The server's weather state and grade, or the preview's in its place.
     void effectiveWeather(uint32_t& state, float& grade) const;
+    /// The Weather.dbc row for a weather state (read once), null when the
+    /// file or the row is missing.
+    const stock_weather::WeatherRow* weatherRowFor(uint32_t state);
     /// The lightning flash and the sandstorm's haze on this frame's light and
     /// fog (updatePerFrameUBO); nothing while neither is happening.
     void applyWeatherFxLight();
@@ -711,7 +719,7 @@ private:
     const void* enhTargets_[8] = {};
     void applyMsaaChange();
     bool updateSkyboxLayers();
-    uint32_t loadSkyboxModel(const std::string& path);
+    uint32_t loadSkyboxModel(const std::string& path, bool stars = false);
     VkSampleCountFlagBits pendingMsaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
     bool msaaChangePending_ = false;
     void renderShadowPass();
@@ -784,6 +792,8 @@ private:
     /// Per unit instance: whether its area is cold, and when to ask again
     /// (stock asks every 10 s, 0x71FA90).
     struct BreathArea { float recheckAt = 0.0f; bool cold = false; };
+    std::unordered_map<uint32_t, stock_weather::WeatherRow> weatherRows_;
+    bool weatherRowsLoaded_ = false;
     std::unordered_map<uint32_t, BreathArea> breathAreas_;
     float breathClock_ = 0.0f;
     /// The clock "Fade in new scenery" stamps and reads (stream_fade.hpp):

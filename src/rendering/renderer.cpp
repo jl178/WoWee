@@ -1283,6 +1283,10 @@ void Renderer::shutdown() {
         skyLayers_.clear();
         loadedSkyModels_.clear();
     }
+    if (skyStarsRenderer_) {
+        skyStarsRenderer_->shutdown();
+        skyStarsRenderer_.reset();
+    }
 
     // Audio shutdown is handled by AudioCoordinator (owned by Application).
     audioCoordinator_ = nullptr;
@@ -1732,6 +1736,7 @@ void Renderer::applyMsaaChange() {
     if (wmoRenderer) wmoRenderer->recreatePipelines();
     if (m2Renderer) m2Renderer->recreatePipelines();
     if (skyboxModelRenderer_) skyboxModelRenderer_->recreatePipelines();
+    if (skyStarsRenderer_) skyStarsRenderer_->recreatePipelines();
     if (characterRenderer) characterRenderer->recreatePipelines();
     if (footprintRenderer) footprintRenderer->recreatePipelines();
     if (weather) weather->recreatePipelines();
@@ -2422,37 +2427,51 @@ bool Renderer::updateSkyboxLayers() {
     };
     const auto& layers = lightingManager->getSkyboxLayers();
 
+    // The night stars ride their own renderer: the stock client draws them
+    // first, under the dome (0x7f09b0), and the LightSkybox models last,
+    // after the sun, moons and clouds.
+    auto rendererFor = [&](bool stars) -> M2Renderer* {
+        return stars ? skyStarsRenderer_.get() : skyboxModelRenderer_.get();
+    };
+
     // Faded out and no longer wanted.
     std::erase_if(skyLayers_, [&](const SkyLayerInstance& sky) {
         const bool wanted = std::any_of(layers.begin(), layers.end(), [&](const auto& l) {
-            return normalized(l.path) == sky.path;
+            return normalized(l.path) == sky.path && l.stars == sky.stars;
         });
-        if (!wanted) skyboxModelRenderer_->removeInstance(sky.instanceId);
+        if (!wanted) {
+            if (M2Renderer* r = rendererFor(sky.stars)) r->removeInstance(sky.instanceId);
+        }
         return !wanted;
     });
 
     for (const auto& layer : layers) {
+        M2Renderer* r = rendererFor(layer.stars);
+        if (!r) continue;
         const std::string path = normalized(layer.path);
-        auto it = std::find_if(skyLayers_.begin(), skyLayers_.end(),
-                               [&](const SkyLayerInstance& s) { return s.path == path; });
+        auto it = std::find_if(skyLayers_.begin(), skyLayers_.end(), [&](const SkyLayerInstance& s) {
+            return s.path == path && s.stars == layer.stars;
+        });
         if (it == skyLayers_.end()) {
-            const uint32_t modelId = loadSkyboxModel(path);
+            const uint32_t modelId = loadSkyboxModel(path, layer.stars);
             if (modelId == 0) continue;
-            const uint32_t instanceId = skyboxModelRenderer_->createInstance(
-                modelId, camera->getPosition(), glm::vec3(0.0f), 1.0f);
+            const uint32_t instanceId = r->createInstance(modelId, camera->getPosition(), glm::vec3(0.0f), 1.0f);
             if (instanceId == 0) continue;
-            skyboxModelRenderer_->setSkipCollision(instanceId, true);
-            skyLayers_.push_back({.path = path, .instanceId = instanceId});
+            r->setSkipCollision(instanceId, true);
+            skyLayers_.push_back({.path = path, .instanceId = instanceId, .stars = layer.stars});
             it = std::prev(skyLayers_.end());
         }
-        skyboxModelRenderer_->setInstanceFade(it->instanceId, layer.weight);
-        skyboxModelRenderer_->setInstancePosition(it->instanceId, camera->getPosition());
+        r->setInstanceFade(it->instanceId, layer.weight);
+        r->setInstancePosition(it->instanceId, camera->getPosition());
     }
     return !skyLayers_.empty();
 }
 
-uint32_t Renderer::loadSkyboxModel(const std::string& path) {
-    if (auto it = loadedSkyModels_.find(path); it != loadedSkyModels_.end()) return it->second;
+uint32_t Renderer::loadSkyboxModel(const std::string& path, bool stars) {
+    M2Renderer* target = stars ? skyStarsRenderer_.get() : skyboxModelRenderer_.get();
+    if (!target) return 0;
+    const std::string cacheKey = stars ? "*" + path : path;
+    if (auto it = loadedSkyModels_.find(cacheKey); it != loadedSkyModels_.end()) return it->second;
     if (failedSkyboxPaths_.count(path)) return 0;
 
     std::vector<std::string> candidates{path};
@@ -2495,12 +2514,12 @@ uint32_t Renderer::loadSkyboxModel(const std::string& path) {
     }
 
     const uint32_t modelId = static_cast<uint32_t>(std::hash<std::string>{}(model.name));
-    if (!skyboxModelRenderer_->loadModel(model, modelId)) {
+    if (!target->loadModel(model, modelId)) {
         LOG_WARNING("Failed to upload skybox model: ", resolvedPath);
         failedSkyboxPaths_.insert(path);
         return 0;
     }
-    loadedSkyModels_[path] = modelId;
+    loadedSkyModels_[cacheKey] = modelId;
     LOG_INFO("Skybox model loaded: ", resolvedPath);
     return modelId;
 }
@@ -2865,13 +2884,19 @@ void Renderer::update(float deltaTime) {
             updateLiveArea(0, 0, 0);
         }
         // IsIndoors / [indoors] (0x71B7F0 -> 0x77FBF0): the player's group
-        // lacks the exterior flag 0x8, else the area's AreaTable flags
+        // lacks the exterior flag 0x8 unless its WMOAreaTable row forces it
+        // (0x4 outdoors, 0x2 indoors), else the area's AreaTable flags
         // (0x4000000 outdoors, 0x2000000 indoors). Not the camera's box.
         {
-            uint32_t areaFlags = 0;
+            uint32_t areaFlags = 0, wmoAreaFlags = 0;
+            const bool inGroup = liveAreaFromWmo_ && unitInside;
             if (zoneManager && liveAreaValid_) areaFlags = zoneManager->getAreaFlags(liveAreaId_);
-            playerIndoors_ = !stock_weather::playerOutdoors(liveAreaFromWmo_ && unitInside,
-                                                         unitHit.soundIndoors, areaFlags);
+            if (zoneManager && inGroup) {
+                wmoAreaFlags = zoneManager->resolveWmoArea(unitHit.wmoId, unitHit.nameSet,
+                                                           static_cast<int32_t>(unitHit.wmoGroupId)).flags;
+            }
+            playerIndoors_ = !stock_weather::playerOutdoors(inGroup, unitHit.soundIndoors, areaFlags,
+                                                         wmoAreaFlags);
         }
         fireZoneEvents();
         // And whether the minimap shows the building's own map.
@@ -2892,9 +2917,13 @@ void Renderer::update(float deltaTime) {
         float weatherGrade = 0.0f;
         effectiveWeather(weatherState, weatherGrade);
         const bool weatherPreviewOn = weatherPreview().active;
-        const float stormIntensity =
+        // Times the Weather.dbc row's storm-light scale (0x784850: weather
+        // +0x14 x +0x28): 0 on the coloured sandstorms 103 and 105-107.
+        const stock_weather::WeatherRow* weatherRow = weatherRowFor(weatherState);
+        float stormIntensity =
             ((gh || weatherPreviewOn) && game::weatherKind(weatherState) != game::WeatherKind::NONE)
                 ? glm::clamp(weatherGrade, 0.0f, 1.0f) : 0.0f;
+        if (weatherRow && weatherRow->known) stormIntensity *= glm::clamp(weatherRow->lightScale, 0.0f, 1.0f);
         // Light.dbc's underwater slots while the camera is under the surface -
         // not while the player swims at it, which kept the underwater set up
         // with the camera in open air.
@@ -2947,15 +2976,26 @@ void Renderer::update(float deltaTime) {
             // sends fine weather on entering a zone that has none, and this
             // drew a random zone weather over it. Fog and sandstorms have no
             // particles here, so they draw nothing rather than rain.
+            // The emitter is the Weather.dbc row's EffectType (0x78d170), not
+            // the state's number: 106 is a sand row. 86 stays STORM for the
+            // rows that read it; it is drawn as the stock rain.
             Weather::Type wanted = Weather::Type::NONE;
-            switch (game::weatherKind(wType)) {
-                case game::WeatherKind::RAIN:         wanted = Weather::Type::RAIN; break;
-                case game::WeatherKind::SNOW:         wanted = Weather::Type::SNOW; break;
-                case game::WeatherKind::THUNDERSTORM: wanted = Weather::Type::STORM; break;
+            switch (stock_weather::effectFor(weatherRow, wType)) {
+                case stock_weather::WeatherEffect::RAIN:
+                    wanted = wType == 86 ? Weather::Type::STORM : Weather::Type::RAIN;
+                    break;
+                case stock_weather::WeatherEffect::SNOW: wanted = Weather::Type::SNOW; break;
                 // The stock sand and its grainy mist (0x784580, 0x78cf20);
                 // the "Sandstorms" row adds its haze and wind on top.
-                case game::WeatherKind::SANDSTORM:    wanted = Weather::Type::SAND; break;
-                default:                              break;
+                case stock_weather::WeatherEffect::SAND: wanted = Weather::Type::SAND; break;
+                default: break;
+            }
+            if (weatherRow && weatherRow->known) {
+                weather->setRowLook(glm::vec3(weatherRow->colour[0], weatherRow->colour[1],
+                                              weatherRow->colour[2]),
+                                    weatherRow->texture);
+            } else {
+                weather->setRowLook(glm::vec3(1.0f), std::string());
             }
             weather->followServerWeather(wanted, wInt, deltaTime);
             weather->setEnabled(weatherShown);
@@ -3083,9 +3123,10 @@ void Renderer::update(float deltaTime) {
     if (skySystem) {
         skySystem->update(fxDt);
     }
-    if (updateSkyboxLayers() && skyboxModelRenderer_ && camera) {
-        skyboxModelRenderer_->update(fxDt, camera->getPosition(),
-            camera->getProjectionMatrix() * camera->getViewMatrix());
+    if (updateSkyboxLayers() && camera) {
+        const glm::mat4 viewProj = camera->getProjectionMatrix() * camera->getViewMatrix();
+        if (skyboxModelRenderer_) skyboxModelRenderer_->update(fxDt, camera->getPosition(), viewProj);
+        if (skyStarsRenderer_) skyStarsRenderer_->update(fxDt, camera->getPosition(), viewProj);
     }
 
     // Update weather particles
@@ -3989,7 +4030,10 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     // whenever any is up at all; the procedural sun, moons and clouds they
     // stand in for hand over halfway, where both are at half and a switch is
     // least visible - rather than staying away until the last model has faded.
-    const bool drawSkyModels = skyboxModelRenderer_ && !skyLayers_.empty();
+    const bool drawSkyModels = skyboxModelRenderer_ &&
+        std::any_of(skyLayers_.begin(), skyLayers_.end(), [](const SkyLayerInstance& l) { return !l.stars; });
+    const bool drawSkyStars = skyStarsRenderer_ &&
+        std::any_of(skyLayers_.begin(), skyLayers_.end(), [](const SkyLayerInstance& l) { return l.stars; });
     // The procedural sky goes only when a sky model takes the whole of it:
     // one above 0.99 weight whose LightSkybox flags lack bit 2 (0x7f09b0).
     // Below that the dome, sun, moons and clouds stay, with the models over
@@ -4019,6 +4063,8 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         if (m2Renderer && camera) m2Renderer->prepareRender(frameIdx, *camera);
         if (drawSkyModels && camera)
             skyboxModelRenderer_->prepareRender(frameIdx, *camera);
+        if (drawSkyStars && camera)
+            skyStarsRenderer_->prepareRender(frameIdx, *camera);
         auto prepM2End = std::chrono::steady_clock::now();
         if (characterRenderer) characterRenderer->prepareRender(frameIdx);
         auto prepEnd = std::chrono::steady_clock::now();
@@ -4210,13 +4256,16 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                     lightingManager ? &lightingManager->getLightingParams() : nullptr,
                     useOriginalSkybox);
                 skyParams.sunOcclusion = sunOcclusion_;
-                // Dome, then the client's sky models (and night stars), then
-                // the sun, moon and clouds over them.
+                // The stock order (0x7f09b0): stars, sun and moons, the
+                // additive dome and the clouds, then the LightSkybox models.
+                // The dome is opaque here and drawn first; the stars and the
+                // sprites add to it, which comes to the same.
                 skySystem->renderDome(cmd, perFrameSet, skyParams);
+                if (drawSkyStars) skyStarsRenderer_->render(cmd, perFrameSet, *camera);
+                skySystem->renderOverlays(cmd, perFrameSet, *camera, skyParams);
                 if (drawSkyModels) {
                     skyboxModelRenderer_->render(cmd, perFrameSet, *camera);
                 }
-                skySystem->renderOverlays(cmd, perFrameSet, *camera, skyParams);
             }
             vkEndCommandBuffer(cmd);
         }
@@ -4400,14 +4449,19 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                 lightingManager ? &lightingManager->getLightingParams() : nullptr,
                 useOriginalSkybox);
             skyParams.sunOcclusion = sunOcclusion_;
-            // Dome, then the client's sky models (and night stars), then the
-            // sun, moon and clouds over them.
+            // The stock order (0x7f09b0): stars, sun and moons, the additive
+            // dome and the clouds, then the LightSkybox models (see the
+            // parallel path).
             skySystem->renderDome(currentCmd, perFrameSet, skyParams);
+            if (drawSkyStars) {
+                skyStarsRenderer_->prepareRender(frameIdx, *camera);
+                skyStarsRenderer_->render(currentCmd, perFrameSet, *camera);
+            }
+            skySystem->renderOverlays(currentCmd, perFrameSet, *camera, skyParams);
             if (drawSkyModels) {
                 skyboxModelRenderer_->prepareRender(frameIdx, *camera);
                 skyboxModelRenderer_->render(currentCmd, perFrameSet, *camera);
             }
-            skySystem->renderOverlays(currentCmd, perFrameSet, *camera, skyParams);
             if (vkCtx) vkCtx->gpuMark(currentCmd, "sky");
         }
 
@@ -4982,6 +5036,14 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         if (!skyboxModelRenderer_->initialize(vkCtx, perFrameSetLayout, assetManager)) {
             LOG_WARNING("Sky M2 renderer initialization failed");
             skyboxModelRenderer_.reset();
+        }
+    }
+    if (!skyStarsRenderer_) {
+        skyStarsRenderer_ = std::make_unique<M2Renderer>();
+        skyStarsRenderer_->setSkyMode(true);
+        if (!skyStarsRenderer_->initialize(vkCtx, perFrameSetLayout, assetManager)) {
+            LOG_WARNING("Sky stars renderer initialization failed");
+            skyStarsRenderer_.reset();
         }
     }
 

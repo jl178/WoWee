@@ -9,6 +9,7 @@
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
 #include <vector>
+#include <string>
 #include <unordered_map>
 
 #include "rendering/vk_texture.hpp"
@@ -164,7 +165,18 @@ public:
     [[nodiscard]] size_t mistSheetCount() const { return sheets_.size(); }
     /// The stock mist's sheets and sand grains alive now.
     [[nodiscard]] size_t stockMistCount() const { return mist_.size(); }
-    [[nodiscard]] size_t sandGrainCount() const { return grains_.size(); }
+    [[nodiscard]] size_t sandGrainCount() const { return grainCount_; }
+    /// The Weather.dbc row's look (0x7846a0): its colour, which the rain,
+    /// splashes and snow are drawn in (weather +0x34, 0x78a640 c7, 0x78aee0
+    /// c8), and its EffectTexture for the rain or snow (empty: RainDrop01,
+    /// SnowFlake01, 0x783b90). Call before update().
+    void setRowLook(const glm::vec3& colour, const std::string& texture) {
+        rowColour_ = colour;
+        if (texture != rowTexture_) {
+            rowTexture_ = texture;
+            rowTextureResolved_ = false;
+        }
+    }
 
     /// Whether the weather is drawn (the camera is not sealed indoors). Off,
     /// it is still simulated, as stock updates its emitters and only skips
@@ -231,13 +243,15 @@ private:
         glm::vec3 groundAt[3];     ///< the ground under its path: start, middle, end (x, y, ground z)
     };
     /// One stock sand grain: where it was born, its velocity, and when its
-    /// path ends (it dies where it meets the ground).
+    /// path ends (it dies where it meets the ground). Written as it is into
+    /// the grain ring the GPU draws from (weather_sand.vert, as sand.bls).
     struct Grain {
         glm::vec3 origin;
         glm::vec3 velocity;
         float born = 0.0f;
         float life = 0.0f;
     };
+    static_assert(sizeof(Grain) == 32, "Grain instance size");
     struct Firefly {
         glm::vec3 position;
         glm::vec3 home;            ///< where it wanders about
@@ -252,7 +266,12 @@ private:
     };
     static_assert(sizeof(Vertex) == 24, "Weather vertex size");
 
-    enum Sprite : uint32_t { RAIN_STREAK = 0, RAIN_SPLASH, SNOW_FLAKE, MIST_SHEET, SAND_MIST, WHITE, SPRITE_COUNT };
+    /// ROW0.. hold the Weather.dbc rows' own EffectTextures, loaded the first
+    /// time a row names one and kept (never rewritten while a frame may read
+    /// them).
+    enum Sprite : uint32_t { RAIN_STREAK = 0, RAIN_SPLASH, SNOW_FLAKE, MIST_SHEET, SAND_MIST, WHITE,
+                             ROW0, ROW1, ROW2, ROW3, SPRITE_COUNT };
+    static constexpr uint32_t kRowSlots = SPRITE_COUNT - ROW0;
 
     void loadTextures(pipeline::AssetManager* assetManager);
     void spawnParticle(Particle& p, const glm::vec3& cameraPos, bool anywhereInColumn);
@@ -266,6 +285,15 @@ private:
     void spawnStockMist(StockMist& m, const glm::vec3& cameraPos);
     void updateSand(const glm::vec3& cameraPos, float level, float deltaTime);
     void spawnGrain(Grain& g, const glm::vec3& cameraPos);
+    /// The ground under (x, y) for the sand, from a 2 yd grid filled as
+    /// it is asked (the stock casts each grain against the world; tens of
+    /// thousands a second are too many ground queries here).
+    std::optional<float> sandGround(float x, float y, float fromZ);
+    /// The particle sprite for this frame: the row's texture, else the kind's.
+    Sprite particleSprite() const;
+    void resolveRowTexture(pipeline::AssetManager* assetManager);
+    bool createGrainRing();
+    void drawGrains(VkCommandBuffer cmd, VkDescriptorSet perFrameSet);
     /// Grow the per-frame vertex buffers to hold `vertexCount` (the
     /// intensity slider and the extra sprites can need more than the stock
     /// cap); the old ones are freed once no frame in flight reads them.
@@ -282,6 +310,10 @@ private:
     VkPipeline mod2xPipeline_ = VK_NULL_HANDLE;
     /// Fireflies: additive, so they glow over the night.
     VkPipeline addPipeline_ = VK_NULL_HANDLE;
+    /// The sand grains: instanced quads moved on the GPU (weather_sand.*).
+    VkPipeline sandPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout sandLayout_ = VK_NULL_HANDLE;
+    float sandPerYard_ = 0.0f;   ///< half a grain's side per yard, at full size
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout textureSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
@@ -299,6 +331,14 @@ private:
     };
     std::vector<FrameBuffer> frameBuffers_;   ///< MAX_FRAMES_IN_FLIGHT of them
     VkDeviceSize frameBufferSize_ = 0;
+    /// The grain ring: grains written once, at birth, in birth order; a
+    /// slot is reused only after its grain is older than any can live, and
+    /// the ring is longer than that by more than the frames in flight read.
+    FrameBuffer grainRing_;
+    std::vector<float> grainBorn_;   ///< birth of each slot, for the tail
+    uint32_t grainHead_ = 0;         ///< oldest live slot
+    uint32_t grainCount_ = 0;        ///< live slots from the head
+    std::unordered_map<int64_t, float> sandGroundCache_;
 
     // Particles and this frame's geometry
     std::vector<Particle> particles;
@@ -308,11 +348,9 @@ private:
     uint32_t sheetVertexCount_ = 0;      ///< the row's sheets, then
     uint32_t particleVertexCount_ = 0;   ///< streaks or flakes, then splashes,
     uint32_t splashVertexCount_ = 0;
-    uint32_t grainVertexCount_ = 0;      ///< then sand grains
     uint32_t fireflyVertexCount_ = 0;    ///< then fireflies
     std::vector<MistSheet> sheets_;
     std::vector<StockMist> mist_;
-    std::vector<Grain> grains_;
     float mistAccum_ = 0.0f;   ///< sheets owed by the spawn rate
     float grainAccum_ = 0.0f;
     glm::vec3 playerPos_{0.0f};
@@ -340,12 +378,17 @@ private:
     Style style_{};
     glm::vec3 fogColour_{0.5f};
     float fireflyAmount_ = 0.0f;
+    glm::vec3 rowColour_{1.0f};
+    std::string rowTexture_;
+    bool rowTextureResolved_ = true;
+    int rowSprite_ = -1;                       ///< the row texture's slot, -1 the kind's own
+    std::array<std::string, kRowSlots> rowSlotPath_{};
 
     static constexpr int MAX_PARTICLES = 3000;
-    /// Sand grains alive at most. Stock keeps about 67000 at weatherDensity 2
-    /// (32000 a second times 0.66 for 3.2 s) on the GPU; these are built on
-    /// the CPU, so fewer, each as large as stock's.
-    static constexpr int MAX_GRAINS = 9000;
+    /// Sand grain slots. Stock keeps about 67000 alive at weatherDensity 2
+    /// (32000 a second times 0.66 for 3.2 s) and 107000 at 3; the ring holds
+    /// the latter with room for the frames in flight.
+    static constexpr uint32_t MAX_GRAINS = 131072;
     static constexpr int MAX_SPLASHES = 400;
 
     // Zone-based weather
