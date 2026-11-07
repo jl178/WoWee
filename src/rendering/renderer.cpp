@@ -2954,8 +2954,17 @@ void Renderer::update(float deltaTime) {
         // Light.dbc's death slot while the screen effect asks for it - the
         // ghost's does; a corpse that has not released keeps the world's.
         lightingManager->setPlayerDead(gh && gh->getScreenEffectLightSlot() == game::stock_death::kLightSlotDeath);
+        // "Time of day (this client only)": the row's hour in place of the
+        // server's clock, for the light only.
+        static constexpr float kFixedTimeOfDayHours[] = {
+            -1.0f, 6.0f, 9.0f, 12.0f, 15.0f, 19.0f, 21.0f, 23.0f, 0.0f};
+        const int fixedHour = enh_.fixedTimeOfDay;
+        const float lightTime =
+            (fixedHour > 0 && fixedHour < static_cast<int>(std::size(kFixedTimeOfDayHours)))
+                ? kFixedTimeOfDayHours[fixedHour]
+                : gameTime;
         lightingManager->update(characterPosition, mapId, resolvedZoneId,
-                                gameTime, stormIntensity, isUnderwater);
+                                lightTime, stormIntensity, isUnderwater);
         // The water's Light.dbc colours and alphas follow the same lights.
         if (waterRenderer) waterRenderer->setLiquidLighting(lightingManager->getLightingParams());
         // Window glass (MOMT F_SIDN) glows by the stock night table

@@ -631,6 +631,18 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "in place of SMSG_WEATHER's for the picture, the storm light and the "
                  "weather loop; nothing is sent",
      .asInt = &Enhancements::weatherPreview},
+    {.key = "fixedtimeofday", .label = "Time of day (this client only)", .kind = SettingKind::Enum,
+     .minValue = 0, .maxValue = 8, .step = 1, .category = kEnhPageWeather, .section = "",
+     .tooltip = "Holds the sky and the world's light at one hour, on this\n"
+                "client only. The server's clock, quests and everyone else are\n"
+                "unchanged. Off follows the server's time.",
+     .choices = "Off (the server's time)|Dawn (6:00)|Morning (9:00)|Noon (12:00)|"
+                "Afternoon (15:00)|Dusk (19:00)|Evening (21:00)|Night (23:00)|"
+                "Midnight (0:00)",
+     .stockValue = 0, .recommendedValue = 0, .saveKey = "fixed_time_of_day",
+     .controls = "Renderer::update: the hour handed to LightingManager::update in place "
+                 "of GameHandler::getGameTime; nothing is sent",
+     .asInt = &Enhancements::fixedTimeOfDay},
 
     // ------------------------------------------------------------ Experimental
     {.key = "grassenabled", .label = "Grass (experimental)", .kind = SettingKind::Bool,

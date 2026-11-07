@@ -143,6 +143,9 @@ struct Enhancements {
     /// A client-only weather to look at the rows with, in place of the
     /// server's (weather_fx::previewWeather): 0 off. Never sent.
     int   weatherPreview = 0;
+    /// A client-only hour for the sky and the world's light, in place of
+    /// the server's clock (kFixedTimeOfDayHours): 0 off. Never sent.
+    int   fixedTimeOfDay = 0;
 
     // ---- Motion ------------------------------------------------------------
     /// How hard the wind moves trees and cloth. 0 is stock: nothing sways.
