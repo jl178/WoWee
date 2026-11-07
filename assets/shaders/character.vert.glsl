@@ -1,6 +1,8 @@
 #version 450
 
 #define MAX_BONES 240u  // must match CharacterRenderer::MAX_BONES
+#define HEM_SLOT (MAX_BONES - 1u)  // CharacterRenderer::kHemSlot
+#define CAPE_SLOT (MAX_BONES - 2u)  // CharacterRenderer::kCapeSlot
 
 layout(set = 0, binding = 0) uniform PerFrame {
     mat4 view;
@@ -23,6 +25,8 @@ layout(push_constant) uniform Push {
     vec4 uvOffset;
     // x: where each stage's coordinates come from (m2fx::UvSource), bits
     // 0-1 the first stage and 2-3 the second: 0 UV0, 1 UV1, 2 env map.
+    // y: bit 0 on a robe batch while its hem sways (E7, bones[HEM_SLOT]),
+    // bit 1 on a cloak batch while it bends (bones[CAPE_SLOT]).
     ivec4 stages;
 } push;
 
@@ -75,6 +79,26 @@ void main() {
                  + bones[bi.w] * aBoneWeights.w;
 
     vec4 skinnedPos = skinMat * vec4(aPos, 1.0);
+    // Robes and skirts (E7, CharacterRenderer::stepRobeHem): the hem's lag
+    // behind each leg, spread by how far below the robe's top the vertex
+    // hangs and how far it stands off that side's leg; zero on the cloth
+    // that hugs the shin, all of it at a free-swinging hem.
+    // Cloaks (E7, CharacterRenderer::updateCapeBend): the cloak turned as a
+    // plate about a line across the shoulders; nothing above that line.
+    if ((push.stages.y & 2) != 0) {
+        mat4 cape = bones[CAPE_SLOT];
+        float below = max(cape[2].x - aPos.z, 0.0);
+        float ease = smoothstep(0.0, 1.0, below / max(cape[2].x - cape[2].y, 1e-3));
+        skinnedPos.xyz += (cape[0].xyz + cape[1].xyz) * (below * ease);
+    }
+    if ((push.stages.y & 1) != 0) {
+        mat4 hem = bones[HEM_SLOT];
+        float depth = clamp((hem[2].x - aPos.z) / max(hem[2].x - hem[2].y, 1e-3), 0.0, 1.0);
+        float side = smoothstep(hem[3].y, hem[2].w, aPos.y);
+        vec2 leg = mix(hem[3].xy, hem[2].zw, side);
+        float off = smoothstep(hem[3].z, hem[3].w, length(aPos.xy - leg));
+        skinnedPos.xyz += mix(hem[1].xyz, hem[0].xyz, side) * (depth * depth * off);
+    }
     vec3 skinnedNorm = mat3(skinMat) * aNormal;
     vec3 skinnedTan = mat3(skinMat) * aTangent.xyz;
 

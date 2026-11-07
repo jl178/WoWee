@@ -538,6 +538,28 @@ private:
         std::vector<int16_t> springSlot;
         std::vector<uint8_t> springSlotChain;
         std::vector<uint8_t> springSlotIndex;
+        /// The body collider (secondary_motion.hpp Capsule): per spring slot
+        /// the bone's far end at rest (the next bone's pivot, or for the last
+        /// the farthest vertex it carries), how far its cloth reaches to
+        /// each side and the bones below it; per
+        /// capsule its two bones, their rest pivots and the fitted radius.
+        struct SpringCollider {
+            int16_t a = -1, b = -1;
+            glm::vec3 pivotA{0.0f}, pivotB{0.0f};
+            float r = 0.0f;
+        };
+        std::vector<glm::vec3> springTip;
+        std::vector<float> springHalfWidth;
+        std::vector<std::vector<uint16_t>> springBelow;
+        std::vector<SpringCollider> springColliders;
+        /// Robes (secondary_motion.hpp HemState): the model's long-robe
+        /// geosets (1302-1399) and the height of their top and hem at rest.
+        std::vector<uint16_t> robeGeosets;
+        float robeTopZ = 0.0f, robeHemZ = 0.0f;
+        /// Cloaks: the back cloth chain that drives the whole cloak (-1
+        /// none) and the height it bends from and hangs to at rest.
+        int capeChain = -1;
+        float capePivotZ = 0.0f, capeHemZ = 0.0f;
         /// Foot placement (foot_ik.hpp): the two legs, found once the row is
         /// first on for a unit of this model.
         bool footRigAnalyzed = false;
@@ -700,6 +722,16 @@ private:
         std::vector<secondary_motion::ChainState> springChainStates;
         float springStamp = -1.0f;
         float springWeight = 0.0f;
+        // Robe hem sway (E7): a point spring per leg, and what character.vert
+        // reads from bone slot kHemSlot while hemActive (robe batches only).
+        secondary_motion::HemState hem[2];
+        glm::mat4 hemData{1.0f};
+        float hemStamp = -1.0f;
+        bool hemActive = false;
+        // The cloak's bend (E7): what character.vert reads from kCapeSlot
+        // while capeActive (cloak batches only).
+        glm::mat4 capeData{1.0f};
+        bool capeActive = false;
         // Remote smoothing (E10): the drawn offsets; smoothActive while the
         // row is on and this is another unit, else the matrix is stock.
         remote_smoothing::State smooth;
@@ -766,6 +798,14 @@ private:
     void calculateBoneMatrices(CharacterInstance& instance);
     /// E7: find the model's spring chains (main thread; once).
     void analyzeSpringChains(M2ModelGPU& gpuModel);
+    /// E7 and E9: find the model's two legs (foot_ik::findLegs; once).
+    void ensureFootRig(M2ModelGPU& gpuModel);
+    /// E7: turn cloth chains back out of the body collider, after the pose.
+    void applySpringCollisions(CharacterInstance& instance, const M2ModelGPU& gpuModel);
+    /// E7: step the robe hem springs from the posed legs; sets hemActive.
+    void stepRobeHem(CharacterInstance& instance, const M2ModelGPU& gpuModel);
+    /// E7: the whole cloak's bend from its chain's swing; sets capeActive.
+    void updateCapeBend(CharacterInstance& instance, const M2ModelGPU& gpuModel);
     /// E7: step the instance's chains for this pose; false when none applies.
     bool stepSprings(CharacterInstance& instance);
     /// E10: is this one of the other units (not the player's own, not an
@@ -954,6 +994,7 @@ private:
     bool indoorProbesOn_ = false;      // updateIndoorProbes has a probe this frame
     // Motion enhancements (setMotionEnhancements).
     int springLevel_ = 0;
+    float springStrength_ = 1.0f;  // secondary_motion::strength() as last read
     glm::vec3 springWind_{0.0f};
     float springClock_ = 0.0f;
     bool remoteSmoothing_ = false;
@@ -1016,6 +1057,14 @@ private:
 
     // Maximum bones supported
     static constexpr int MAX_BONES = 240;
+    /// The bone slot the robe sway's data rides in (character.vert
+    /// HEM_SLOT): the last, past every character model's bones.
+    static constexpr int kHemSlot = MAX_BONES - 1;
+    /// And the cloak's bend (character.vert CAPE_SLOT), the one before.
+    static constexpr int kCapeSlot = MAX_BONES - 2;
+    /// Marks a robe batch in the draw loop's stage bits; pushed as stages.y.
+    static constexpr int32_t kStagesRobeHem = 1 << 30;
+    static constexpr int32_t kStagesCape = 1 << 29;
     uint32_t numAnimThreads_ = 1;
     std::vector<std::future<void>> animFutures_;
     std::vector<std::reference_wrapper<CharacterInstance>> toUpdate_;  // reused across frames

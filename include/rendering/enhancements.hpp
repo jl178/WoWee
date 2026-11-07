@@ -164,6 +164,9 @@ struct Enhancements {
     /// animation (secondary_motion.hpp, CharacterRenderer). 0 is stock: every
     /// bone is the animation's; 1 capes and robes; 2 also tails and hair.
     int   secondaryMotion = 0;
+    /// How far those swing, 0-2 (secondary_motion::strength): 1 the tuned
+    /// swing, 0 none at all - stock, as secondaryMotion 0 is.
+    float secondaryMotionStrength = 0.0f;
     /// Other units' position corrections and turns glide instead of stepping,
     /// and their switches between moving animations always fade
     /// (remote_smoothing.hpp). Stock puts them where each packet says and cuts

@@ -3347,6 +3347,15 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
         foot_ik::apply(instance.boneMatrices, gm.footRig, instance.footIk.targets, instance.footIk.ends);
         instance.footIk.endsValid = true;
     }
+    // E7: cloth turned back out of the legs and hips, on the final pose.
+    if (springs && !gm.springColliders.empty()) applySpringCollisions(instance, gm);
+    // E7: the robe's hem, from the legs as posed now. A pose without it
+    // clears the flag, so the robe batches draw stock.
+    if (springLevel_ > 0 && !gm.robeGeosets.empty()) stepRobeHem(instance, gm);
+    else instance.hemActive = false;
+    // E7: the cloak bent as one from the shoulders by its chain's swing.
+    if (springs && gm.capeChain >= 0) updateCapeBend(instance, gm);
+    else instance.capeActive = false;
 
     // Once per call, not once per last bone. The bump used to sit inside the
     // loop under `i == numBones - 1`, which this loop does reach - but a
@@ -4194,8 +4203,16 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             uvOffset.w = s1.y;
                         }
                     }
+                    // The robe sway (E7) reads its offsets on the robe's own
+                    // batches only; everything else is skinned as stock.
+                    if (instance.hemActive && batch.submeshId >= 1302 && batch.submeshId < 1400)
+                        stages |= kStagesRobeHem;
+                    if (instance.capeActive && batch.submeshId > 1501 && batch.submeshId < 1600)
+                        stages |= kStagesCape;
                     if (uvOffset != pushedUvOffset || stages != pushedStages) {
-                        struct { glm::vec4 uv; glm::ivec4 stages; } push{uvOffset, glm::ivec4(stages, 0, 0, 0)};
+                        const int32_t sway = ((stages & kStagesRobeHem) ? 1 : 0) | ((stages & kStagesCape) ? 2 : 0);
+                        struct { glm::vec4 uv; glm::ivec4 stages; } push{
+                            uvOffset, glm::ivec4(stages & ~(kStagesRobeHem | kStagesCape), sway, 0, 0)};
                         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
                                            sizeof(glm::mat4), sizeof(push), &push);
                         pushedUvOffset = uvOffset;
@@ -4412,6 +4429,10 @@ bool CharacterRenderer::uploadBones(CharacterInstance& inst, uint32_t frameIndex
     // made), so a slot that took this pose last still holds it.
     if (reuse && inst.uploadedPoseSerial[frameIndex] == inst.poseSerial) return false;
     memcpy(inst.boneMapped[frameIndex], inst.boneMatrices.data(), numBones * sizeof(glm::mat4));
+    if (inst.hemActive && numBones <= kCapeSlot)
+        static_cast<glm::mat4*>(inst.boneMapped[frameIndex])[kHemSlot] = inst.hemData;
+    if (inst.capeActive && numBones <= kCapeSlot)
+        static_cast<glm::mat4*>(inst.boneMapped[frameIndex])[kCapeSlot] = inst.capeData;
     inst.uploadedPoseSerial[frameIndex] = inst.poseSerial;
     return true;
 }
@@ -5018,6 +5039,26 @@ void CharacterRenderer::updateIndoorProbes(float deltaTime, const IndoorProbeFn*
     }
 }
 
+void CharacterRenderer::ensureFootRig(M2ModelGPU& gm) {
+    if (gm.footRigAnalyzed) return;
+    gm.footRigAnalyzed = true;
+    const auto& data = gm.data;
+    std::vector<foot_ik::BoneInfo> info(data.bones.size());
+    for (size_t i = 0; i < data.bones.size(); ++i) {
+        info[i].parent = data.bones[i].parentBone;
+        info[i].keyBoneId = data.bones[i].keyBoneId;
+        info[i].pivot = data.bones[i].pivot;
+    }
+    for (const auto& v : data.vertices) {
+        for (int j = 0; j < 4; ++j) {
+            if (v.boneWeights[j] > 0.0f && v.boneIndices[j] < info.size()) {
+                info[v.boneIndices[j]].weight += v.boneWeights[j];
+            }
+        }
+    }
+    gm.footRig = foot_ik::findLegs(info);
+}
+
 void CharacterRenderer::updateFootPlacement(float deltaTime, const FloorHeightFn* floor,
                                             const glm::vec3& cameraPos) {
     footIkOn_ = floor != nullptr;
@@ -5041,23 +5082,7 @@ void CharacterRenderer::updateFootPlacement(float deltaTime, const FloorHeightFn
         if (!inst.cachedModel->footRigAnalyzed) {
             auto mit = models.find(inst.modelId);
             if (mit == models.end()) continue;
-            M2ModelGPU& gm = mit->second;
-            gm.footRigAnalyzed = true;
-            const auto& data = gm.data;
-            std::vector<fk::BoneInfo> info(data.bones.size());
-            for (size_t i = 0; i < data.bones.size(); ++i) {
-                info[i].parent = data.bones[i].parentBone;
-                info[i].keyBoneId = data.bones[i].keyBoneId;
-                info[i].pivot = data.bones[i].pivot;
-            }
-            for (const auto& v : data.vertices) {
-                for (int j = 0; j < 4; ++j) {
-                    if (v.boneWeights[j] > 0.0f && v.boneIndices[j] < info.size()) {
-                        info[v.boneIndices[j]].weight += v.boneWeights[j];
-                    }
-                }
-            }
-            gm.footRig = fk::findLegs(info);
+            ensureFootRig(mit->second);
         }
         const fk::Rig& rig = inst.cachedModel->footRig;
         if (!rig.valid) continue;
@@ -5127,7 +5152,10 @@ void CharacterRenderer::setMotionEnhancements(int secondaryMotion, const glm::ve
     localInstances_[1] = localB;
     localInstances_[2] = localC;
     springWind_ = windWorld;
-    const int level = std::clamp(secondaryMotion, 0, 2);
+    // The strength row (secondary_motion::strength) at 0 is off as level 0
+    // is: no spring runs and every bone is its tracks.
+    springStrength_ = secondary_motion::strength();
+    const int level = springStrength_ > 0.0f ? std::clamp(secondaryMotion, 0, 2) : 0;
     if (level != springLevel_) {
         springLevel_ = level;
         if (level > 0) {
@@ -5144,6 +5172,10 @@ void CharacterRenderer::setMotionEnhancements(int secondaryMotion, const glm::ve
             inst.springChainStates.clear();
             inst.springStamp = -1.0f;
             inst.springWeight = 0.0f;
+            inst.hem[0] = inst.hem[1] = secondary_motion::HemState{};
+            inst.hemStamp = -1.0f;
+            inst.hemActive = false;
+            inst.capeActive = false;
         }
     }
     if (remoteSmoothing != remoteSmoothing_) {
@@ -5172,6 +5204,22 @@ bool CharacterRenderer::isRemoteUnit(const CharacterInstance& inst) const {
     }
     return true;
 }
+
+namespace {
+/// The points of a cloth bone the body collider tests: its tip and middle,
+/// each on the midline and toward both edges of the cloth.
+void collisionPoints(const glm::vec3& pivot, const glm::vec3& tip, const glm::vec3& lateral, float halfWidth,
+                     glm::vec3 (&out)[6]) {
+    const glm::vec3 mid = 0.5f * (pivot + tip);
+    const glm::vec3 w = lateral * (0.75f * halfWidth);
+    out[0] = tip;
+    out[1] = tip + w;
+    out[2] = tip - w;
+    out[3] = mid;
+    out[4] = mid + w;
+    out[5] = mid - w;
+}
+}  // namespace
 
 void CharacterRenderer::analyzeSpringChains(M2ModelGPU& gm) {
     namespace sm = secondary_motion;
@@ -5220,7 +5268,6 @@ void CharacterRenderer::analyzeSpringChains(M2ModelGPU& gm) {
         }
     }
     gm.springChains = sm::findChains(info, character);
-    if (gm.springChains.empty()) return;
     gm.springSlot.assign(n, -1);
     for (size_t c = 0; c < gm.springChains.size(); ++c) {
         const auto& chain = gm.springChains[c];
@@ -5230,14 +5277,265 @@ void CharacterRenderer::analyzeSpringChains(M2ModelGPU& gm) {
             gm.springSlotIndex.push_back(static_cast<uint8_t>(k));
         }
     }
+    // The body collider: each cloth bone's far end at rest and the bones
+    // below it, and capsules on the legs fitted to the rest pose.
+    const size_t slots = gm.springSlotChain.size();
+    gm.springTip.assign(slots, glm::vec3(0.0f));
+    gm.springHalfWidth.assign(slots, 0.0f);
+    gm.springBelow.assign(slots, {});
+    gm.springColliders.clear();
+    std::vector<float> reach(slots, -1.0f);
+    for (size_t slot = 0; slot < slots; ++slot) {
+        const auto& chain = gm.springChains[gm.springSlotChain[slot]];
+        const size_t k = gm.springSlotIndex[slot];
+        const uint16_t b = chain.bones[k];
+        gm.springTip[slot] = !chain.fan && k + 1 < chain.bones.size()
+            ? data.bones[chain.bones[k + 1]].pivot
+            : data.bones[b].pivot + chain.restDir * (0.25f * chain.length);
+        for (size_t j = b + 1u; j < n; ++j) {
+            for (int up = data.bones[j].parentBone; up >= 0 && static_cast<size_t>(up) < n;
+                 up = data.bones[up].parentBone) {
+                if (up == b) { gm.springBelow[slot].push_back(static_cast<uint16_t>(j)); break; }
+                if (up < b) break;
+            }
+        }
+    }
+    // The last bone of a chain reaches as far as the farthest vertex it
+    // carries most of (a cloak's hem hangs well below its last bone).
+    for (const auto& v : data.vertices) {
+        int best = 0;
+        for (int j = 1; j < 4; ++j) if (v.boneWeights[j] > v.boneWeights[best]) best = j;
+        const uint8_t b = v.boneIndices[best];
+        if (v.boneWeights[best] <= 0.0f || b >= n || gm.springSlot[b] < 0) continue;
+        const size_t slot = static_cast<size_t>(gm.springSlot[b]);
+        const auto& chain = gm.springChains[gm.springSlotChain[slot]];
+        gm.springHalfWidth[slot] = std::max(gm.springHalfWidth[slot],
+                                            std::abs(glm::dot(v.position - data.bones[b].pivot, chain.lateral)));
+        if (chain.fan || gm.springSlotIndex[slot] + 1u != chain.bones.size()) continue;
+        const float d = glm::dot(v.position - data.bones[b].pivot, chain.restDir);
+        if (d > reach[slot]) { reach[slot] = d; gm.springTip[slot] = data.bones[b].pivot + chain.restDir * d; }
+    }
+    ensureFootRig(gm);
+    // The cloak: the back cloth chain, and how high the cloak geosets reach
+    // (it bends from a little below its top, where it lies on the shoulders).
+    gm.capeChain = -1;
+    if (character) {
+        for (size_t c = 0; c < gm.springChains.size(); ++c) {
+            const auto& chain = gm.springChains[c];
+            if (chain.kind == sm::ChainKind::Cloth && !chain.fan && chain.outward.x < -0.5f) {
+                gm.capeChain = static_cast<int>(c);
+                break;
+            }
+        }
+        float top = -1e30f, hem = 1e30f;
+        for (const auto& batch : data.batches) {
+            if (batch.submeshId <= 1501 || batch.submeshId >= 1600) continue;
+            const uint32_t end = std::min<uint32_t>(batch.indexStart + batch.indexCount,
+                                                    static_cast<uint32_t>(data.indices.size()));
+            for (uint32_t k = batch.indexStart; k < end; ++k) {
+                const uint16_t vi = data.indices[k];
+                if (vi >= data.vertices.size()) continue;
+                top = std::max(top, data.vertices[vi].position.z);
+                hem = std::min(hem, data.vertices[vi].position.z);
+            }
+        }
+        if (gm.capeChain >= 0 && top > hem + 0.1f) {
+            gm.capePivotZ = top - 0.15f * (top - hem);
+            gm.capeHemZ = hem;
+        } else {
+            gm.capeChain = -1;
+        }
+    }
+    // Long robes: their geosets and how far they reach, top to hem.
+    gm.robeGeosets.clear();
+    if (character && gm.footRig.valid) {
+        float top = -1e30f, hem = 1e30f;
+        std::unordered_set<uint64_t> robeSections;
+        for (const auto& batch : data.batches) {
+            if (batch.submeshId < 1302 || batch.submeshId >= 1400) continue;
+            if (std::find(gm.robeGeosets.begin(), gm.robeGeosets.end(), batch.submeshId) == gm.robeGeosets.end())
+                gm.robeGeosets.push_back(batch.submeshId);
+            const uint64_t key = (static_cast<uint64_t>(batch.indexStart) << 32) | batch.indexCount;
+            if (!robeSections.insert(key).second) continue;
+            const uint32_t end = std::min<uint32_t>(batch.indexStart + batch.indexCount,
+                                                    static_cast<uint32_t>(data.indices.size()));
+            for (uint32_t k = batch.indexStart; k < end; ++k) {
+                const uint16_t vi = data.indices[k];
+                if (vi >= data.vertices.size()) continue;
+                top = std::max(top, data.vertices[vi].position.z);
+                hem = std::min(hem, data.vertices[vi].position.z);
+            }
+        }
+        if (top > hem + 0.05f) {
+            gm.robeTopZ = top;
+            gm.robeHemZ = hem;
+        } else {
+            gm.robeGeosets.clear();
+        }
+    }
+    if (gm.footRig.valid) {
+        std::vector<glm::vec3> rest;
+        for (size_t slot = 0; slot < slots; ++slot) {
+            const auto& chain = gm.springChains[gm.springSlotChain[slot]];
+            if (chain.kind != sm::ChainKind::Cloth || chain.fan) continue;
+            const glm::vec3 p = data.bones[chain.bones[gm.springSlotIndex[slot]]].pivot;
+            glm::vec3 pts[6];
+            collisionPoints(p, gm.springTip[slot], chain.lateral, gm.springHalfWidth[slot], pts);
+            rest.insert(rest.end(), std::begin(pts), std::end(pts));
+        }
+        const float leg = gm.footRig.legLength;
+        auto add = [&](int a, const glm::vec3& pa, int b, const glm::vec3& pb, float nominal) {
+            M2ModelGPU::SpringCollider c;
+            c.a = static_cast<int16_t>(a);
+            c.b = static_cast<int16_t>(b);
+            c.pivotA = pa;
+            c.pivotB = pb;
+            c.r = sm::fitRadius(nominal * leg, pa, pb, rest);
+            if (c.r > 0.01f * leg) gm.springColliders.push_back(c);
+        };
+        for (const auto& l : gm.footRig.legs) {
+            add(l.hip, l.hipPivot, l.knee, l.kneePivot, 0.11f);
+            add(l.knee, l.kneePivot, l.end, l.endPivot, 0.08f);
+        }
+        const auto& legL = gm.footRig.legs[0];
+        const auto& legR = gm.footRig.legs[1];
+        add(legL.hip, legL.hipPivot, legR.hip, legR.hipPivot, 0.13f);
+    }
     static const bool logChains = core::envFlagEnabled("WOWEE_SPRING_LOG", false);
     if (logChains) {
+        for (const auto& c : gm.springColliders)
+            LOG_INFO("Spring collider on ", data.name, ": bones ", c.a, "-", c.b, " r=", c.r);
         for (const auto& chain : gm.springChains) {
             std::string bonesText;
             for (uint16_t b : chain.bones) bonesText += std::to_string(b) + " ";
             LOG_INFO("Spring chain on ", data.name, ": ",
                      chain.kind == sm::ChainKind::Cloth ? "cloth" : chain.kind == sm::ChainKind::Hair ? "hair" : "tail",
                      chain.fan ? " (fan)" : "", " bones ", bonesText, "length ", chain.length);
+        }
+    }
+}
+
+void CharacterRenderer::stepRobeHem(CharacterInstance& inst, const M2ModelGPU& gm) {
+    namespace sm = secondary_motion;
+    const foot_ik::Rig& rig = gm.footRig;
+    inst.hemActive = false;
+    if (!rig.valid || inst.isAttachedItem || inst.isEffectModel || inst.isSceneModel) return;
+    bool worn = false;
+    for (uint16_t g : gm.robeGeosets) {
+        if (inst.activeGeosets.count(g)) { worn = true; break; }
+    }
+    const float weight = sm::distanceWeight(glm::distance(inst.position, lastCameraPos_));
+    if (!worn || weight <= 0.0f || springStrength_ <= 0.0f) {
+        inst.hem[0] = inst.hem[1] = sm::HemState{};
+        return;
+    }
+    const size_t numBones = inst.boneMatrices.size();
+    if (numBones > static_cast<size_t>(kCapeSlot)) return;  // no free slot for the data
+    const glm::mat4 world = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix : getModelMatrix(inst);
+    const glm::mat3 lin(world);
+    const float scale = std::max(glm::length(lin[0]), 1e-4f);
+    const glm::mat3 toModel = glm::transpose(lin / scale) / scale;
+    // Each step reads the time since this unit's last pose, as the chains do.
+    const float dt = inst.hemStamp < 0.0f ? -1.0f : std::max(springClock_ - inst.hemStamp, 0.0f);
+    inst.hemStamp = springClock_;
+    const float maxOff = sm::kHemMaxOffset * rig.legLength * sm::limitScale(springStrength_);
+    glm::vec3 off[2];
+    for (int l = 0; l < 2; ++l) {
+        const foot_ik::Leg& leg = rig.legs[l];
+        if (leg.knee < 0 || leg.end < 0 || static_cast<size_t>(std::max(leg.knee, leg.end)) >= numBones) return;
+        const glm::vec3 knee(inst.boneMatrices[leg.knee] * glm::vec4(leg.kneePivot, 1.0f));
+        const glm::vec3 ankle(inst.boneMatrices[leg.end] * glm::vec4(leg.endPivot, 1.0f));
+        const glm::vec3 shin = 0.5f * (knee + ankle);
+        const glm::vec3 target(world * glm::vec4(shin, 1.0f));
+        const glm::vec3 o = sm::stepHem(inst.hem[l], sm::HemParams{}, target, springWind_ * 0.5f,
+                                        dt < 0.0f ? sm::kResetDt * 2.0f : dt);
+        off[l] = sm::softClamp(toModel * o * springStrength_, maxOff) * weight;
+        off[l].z *= 0.3f;  // the hem swings; it barely lifts
+    }
+    // Columns: the left and right offsets; the robe's top and hem heights and
+    // the left leg's line; the right leg's line and the band (from the leg's
+    // line) over which the cloth goes from hugging the leg to swinging free.
+    const float r0 = 0.09f * rig.legLength, r1 = 0.22f * rig.legLength;
+    inst.hemData = glm::mat4(glm::vec4(off[0], 1.0f), glm::vec4(off[1], 0.0f),
+                             glm::vec4(gm.robeTopZ, gm.robeHemZ, rig.legs[0].kneePivot.x, rig.legs[0].kneePivot.y),
+                             glm::vec4(rig.legs[1].kneePivot.x, rig.legs[1].kneePivot.y, r0, r1));
+    inst.hemActive = true;
+}
+
+void CharacterRenderer::updateCapeBend(CharacterInstance& inst, const M2ModelGPU& gm) {
+    namespace sm = secondary_motion;
+    inst.capeActive = false;
+    if (inst.boneMatrices.size() > static_cast<size_t>(kCapeSlot)) return;
+    const auto& chain = gm.springChains[static_cast<size_t>(gm.capeChain)];
+    size_t first = 0;
+    for (int c = 0; c < gm.capeChain; ++c) first += gm.springChains[static_cast<size_t>(c)].bones.size();
+    if (first + chain.bones.size() > inst.springBones.size()) return;
+    // The chain's whole swing, taken by the cloak as one plate turning
+    // about a line across the shoulders: per yard below that line, the
+    // vertex moves out by the out-swing and aside by the side-swing (small
+    // angles), and rises by half the square, so the cloth keeps its length.
+    glm::vec2 swing(0.0f);
+    for (size_t k = 0; k < chain.bones.size(); ++k) swing += inst.springBones[first + k].swing;
+    swing *= sm::kCapeBendShare * inst.springWeight;
+    swing.x = std::max(swing.x, -0.05f);  // never bent into the back
+    const int parent = gm.data.bones[chain.bones.front()].parentBone;
+    if (parent < 0 || static_cast<size_t>(parent) >= inst.boneMatrices.size()) return;
+    const glm::mat3 frame(inst.boneMatrices[static_cast<size_t>(parent)]);
+    const glm::vec3 perDepth = frame * (chain.outward * swing.x + chain.lateral * swing.y);
+    const glm::vec3 lift = frame * glm::vec3(0.0f, 0.0f, 0.5f * glm::dot(swing, swing));
+    inst.capeData = glm::mat4(glm::vec4(perDepth, 0.0f), glm::vec4(lift, 0.0f),
+                              glm::vec4(gm.capePivotZ, gm.capeHemZ, 0.0f, 0.0f), glm::vec4(0.0f));
+    inst.capeActive = glm::dot(swing, swing) > 1e-8f;
+}
+
+void CharacterRenderer::applySpringCollisions(CharacterInstance& inst, const M2ModelGPU& gm) {
+    namespace sm = secondary_motion;
+    const auto& bones = gm.data.bones;
+    const size_t numBones = std::min(bones.size(), inst.boneMatrices.size());
+    if (inst.springWeight <= 0.0f) return;
+    auto posed = [&](int b, const glm::vec3& p) {
+        return glm::vec3(inst.boneMatrices[static_cast<size_t>(b)] * glm::vec4(p, 1.0f));
+    };
+    // The capsules as posed now.
+    sm::Capsule caps[8];
+    size_t capCount = 0;
+    for (const auto& c : gm.springColliders) {
+        if (capCount == std::size(caps)) break;
+        if (c.a < 0 || c.b < 0 || static_cast<size_t>(c.a) >= numBones || static_cast<size_t>(c.b) >= numBones)
+            continue;
+        caps[capCount++] = sm::Capsule{posed(c.a, c.pivotA), posed(c.b, c.pivotB), c.r};
+    }
+    if (capCount == 0) return;
+    size_t first = 0;
+    for (const auto& chain : gm.springChains) {
+        const size_t count = chain.bones.size();
+        const size_t base = first;
+        first += count;
+        if (chain.kind != sm::ChainKind::Cloth || chain.fan || !sm::kindEnabled(chain.kind, springLevel_))
+            continue;
+        const int parent = bones[chain.bones.front()].parentBone;
+        if (parent < 0 || static_cast<size_t>(parent) >= numBones) continue;
+        const glm::mat3 frame(inst.boneMatrices[static_cast<size_t>(parent)]);
+        const glm::vec3 n = glm::normalize(frame * chain.outward);
+        const glm::vec3 side = glm::normalize(frame * chain.lateral);
+        if (!std::isfinite(n.x) || !std::isfinite(n.y) || !std::isfinite(n.z) || !std::isfinite(side.x)) continue;
+        for (size_t k = 0; k < count; ++k) {
+            const size_t slot = base + k;
+            const uint16_t b = chain.bones[k];
+            if (b >= numBones || slot >= gm.springTip.size()) break;
+            const glm::vec3 p = posed(b, bones[b].pivot);
+            const glm::vec3 tip = posed(b, gm.springTip[slot]);
+            glm::vec3 pts[6];
+            collisionPoints(p, tip, side, gm.springHalfWidth[slot], pts);
+            const glm::vec3 turn = sm::clearanceTurn(p, pts, std::size(pts), n, caps, capCount) * inst.springWeight;
+            const float angle = glm::length(turn);
+            if (angle < 1e-5f) continue;
+            const glm::mat4 fix = glm::translate(glm::mat4(1.0f), p) *
+                                  glm::mat4_cast(glm::angleAxis(angle, turn / angle)) *
+                                  glm::translate(glm::mat4(1.0f), -p);
+            inst.boneMatrices[b] = fix * inst.boneMatrices[b];
+            for (uint16_t j : gm.springBelow[slot])
+                if (j < numBones) inst.boneMatrices[j] = fix * inst.boneMatrices[j];
         }
     }
 }
@@ -5286,7 +5584,19 @@ bool CharacterRenderer::stepSprings(CharacterInstance& inst) {
             continue;
         }
         sm::Input in;
-        in.probeWorld = glm::vec3(world * glm::vec4(chain.probe, 1.0f));
+        // The probe rides half on the root's parent bone as it was last
+        // posed, so the body's own animated motion - the bob of a stride,
+        // the crouch and spring of a jump, a mount's gallop under a rider -
+        // pushes the chain as well as the model's travel does.
+        glm::vec3 probeModel = chain.probe;
+        const int parent = gm->data.bones[chain.bones.front()].parentBone;
+        // (Not before the first pose: the matrices are zero until then.)
+        if (inst.poseSerial > 2 && parent >= 0 && static_cast<size_t>(parent) < inst.boneMatrices.size())
+            probeModel = glm::mix(probeModel,
+                                  glm::vec3(inst.boneMatrices[parent] * glm::vec4(chain.probe, 1.0f)),
+                                  sm::kGaitShare);
+        in.probeWorld = glm::vec3(world * glm::vec4(probeModel, 1.0f));
+        in.strength = springStrength_;
         in.worldToModel = toModel;
         in.windWorld = wind;
         in.dt = dt < 0.0f ? sm::kResetDt * 2.0f : dt;
