@@ -31,6 +31,12 @@ public:
     PipelineBuilder& setShaders(VkPipelineShaderStageCreateInfo vert,
         VkPipelineShaderStageCreateInfo frag);
 
+    /// Tessellation control and evaluation stages after the vertex stage, and
+    /// the patch size. The topology has to be VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+    /// the device has to have tessellationShader enabled. Call after setShaders.
+    PipelineBuilder& addTessellation(VkPipelineShaderStageCreateInfo control,
+        VkPipelineShaderStageCreateInfo evaluation, uint32_t patchControlPoints);
+
     // Vertex input
     PipelineBuilder& setVertexInput(
         const std::vector<VkVertexInputBindingDescription>& bindings,
@@ -106,6 +112,7 @@ public:
 
 private:
     std::vector<VkPipelineShaderStageCreateInfo> shaderStages_;
+    uint32_t patchControlPoints_ = 0;  ///< 0: no tessellation state
     std::vector<VkVertexInputBindingDescription> vertexBindings_;
     std::vector<VkVertexInputAttributeDescription> vertexAttributes_;
     VkPrimitiveTopology topology_ = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;

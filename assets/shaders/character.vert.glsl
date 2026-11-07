@@ -49,6 +49,21 @@ layout(location = 3) out vec3 Tangent;
 layout(location = 4) out vec3 Bitangent;
 layout(location = 5) out vec2 TexCoord2;
 
+#ifdef CHAR_TESS
+// Smoother characters (character_tess.vert.spv, CharacterRenderer
+// fidelity pipelines): the vertex is skinned exactly as above, then handed
+// to character.tesc/.tese with what Phong tessellation needs. aWeld is the
+// normal shared by every vertex at this position (the seams' split copies
+// averaged), w how much the corner may round off (0 on a crease).
+layout(location = 7) in vec4 aWeld;
+layout(location = 6) out vec4 ClipPos;
+layout(location = 7) out vec4 WeldN;   // world, unit length; w the weight
+layout(location = 8) out vec4 ClipN;   // projection * view * (WeldN, 0)
+// x the view depth, y weld N . to-camera, z this unit's share of the
+// budget (push.stages.z / 1000, CharacterRenderer::kFidelityMaxUnits).
+layout(location = 9) out vec3 ViewFacing;
+#endif
+
 #include "m2_combiner.glsli"
 
 vec2 stageUv(int src, vec2 env, vec2 offset) {
@@ -127,4 +142,13 @@ void main() {
     Bitangent = B;
 
     gl_Position = projection * view * worldPos;
+#ifdef CHAR_TESS
+    vec3 weldWorld = safeNormalize(modelMat3 * (mat3(skinMat) * aWeld.xyz), N);
+    WeldN = vec4(weldWorld, aWeld.w);
+    ClipPos = gl_Position;
+    ClipN = projection * view * vec4(weldWorld, 0.0);
+    ViewFacing = vec3(gl_Position.w,
+                      dot(weldWorld, safeNormalize(viewPos.xyz - worldPos.xyz, weldWorld)),
+                      float(push.stages.z) * 0.001);
+#endif
 }

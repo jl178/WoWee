@@ -70,6 +70,13 @@ struct Enhancements {
     /// flatter than 45 degrees is drawn as stock either way. Off is the
     /// stock top-down mapping everywhere.
     bool  cliffProjection = false;
+    /// Characters within about 22 yards have their outline rounded by Phong
+    /// tessellation of the skinned mesh, from the normals the art already
+    /// has (character.tesc/.tese), and their composited skin and clothing is
+    /// baked at twice the stock size with a sharper resample of each layer
+    /// (CharacterRenderer::setCharacterFidelity). The same models, textures
+    /// and light; off is the stock mesh and the stock bake.
+    bool  characterFidelity = false;
 
     // ---- Sky and air -------------------------------------------------------
     /// Volumetric mist and light shafts: 0 off, 1-3 the volume's size.

@@ -517,6 +517,10 @@ function(compile_shaders TARGET_NAME)
             set(SHADER_STAGE compute)
         elseif(FILE_NAME MATCHES "\\.geom\\.glsl$")
             set(SHADER_STAGE geometry)
+        elseif(FILE_NAME MATCHES "\\.tesc\\.glsl$")
+            set(SHADER_STAGE tesscontrol)
+        elseif(FILE_NAME MATCHES "\\.tese\\.glsl$")
+            set(SHADER_STAGE tesseval)
         else()
             message(WARNING "Cannot determine shader stage for: ${FILE_NAME}")
             continue()
@@ -556,6 +560,7 @@ function(compile_shaders TARGET_NAME)
         "terrain_horizon.vert.glsl|terrain_horizon_lit.vert.spv|-DHORIZON_LIT"
         "terrain_horizon.frag.glsl|terrain_horizon_lit.frag.spv|-DHORIZON_LIT"
         "terrain_horizon_far.frag.glsl|terrain_horizon_far_lit.frag.spv|-DHORIZON_LIT"
+        "character.vert.glsl|character_tess.vert.spv|-DCHAR_TESS"
     )
     foreach(VARIANT ${SHADER_VARIANTS})
         string(REPLACE "|" ";" VARIANT_PARTS "${VARIANT}")

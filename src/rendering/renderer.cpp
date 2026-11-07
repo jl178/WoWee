@@ -1620,6 +1620,7 @@ void Renderer::applyEnhancementsToSubsystems() {
         characterRenderer->setNormalMapStrength(e.normalMapStrength);
         characterRenderer->setPOMEnabled(e.parallax);
         characterRenderer->setPOMQuality(e.parallaxQuality);
+        characterRenderer->setCharacterFidelity(e.characterFidelity);
     }
     if (terrainRenderer) terrainRenderer->setSpecularEnabled(e.terrainSpecular);
     // Unstretched cliffs (E16): the terrain's side-projection pipelines.

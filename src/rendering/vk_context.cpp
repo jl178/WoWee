@@ -580,6 +580,9 @@ bool VkContext::selectPhysicalDevice() {
     // it the size is undefined. GlueSceneParticles reads the feature back and
     // draws 1 px points on a device without it.
     (void)enableIfPresent(&VkPhysicalDeviceFeatures::largePoints);
+    // The smoother characters row (CharacterRenderer, character.tesc/.tese)
+    // tessellates near units; without the feature it keeps the stock mesh.
+    tessellationShaderSupported_ = enableIfPresent(&VkPhysicalDeviceFeatures::tessellationShader);
     fsr2ComputeFeaturesSupported_ =
         enableIfPresent(&VkPhysicalDeviceFeatures::shaderStorageImageWriteWithoutFormat) &&
         enableIfPresent(&VkPhysicalDeviceFeatures::shaderInt16);

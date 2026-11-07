@@ -462,6 +462,22 @@ public:
     void setNormalMapStrength(float strength) { normalMapStrength_ = strength; }
     void setPOMEnabled(bool enabled) { pomEnabled_ = enabled; }
     void setPOMQuality(int quality) { pomQuality_ = quality; }
+    /// Smoother, sharper characters (Enhancements::characterFidelity): near
+    /// units are drawn through Phong tessellation pipelines (built on first
+    /// use) and composites made from now on are baked at twice the stock size.
+    /// Off is the stock pipelines and the stock bake; nothing is made for it.
+    void setCharacterFidelity(bool on) { fidelity_ = on; }
+    [[nodiscard]] bool characterFidelity() const { return fidelity_; }
+    /// Past this view distance (yards) a unit is drawn by the stock pipelines
+    /// even with the row on; character.tesc reaches level 1 here.
+    static constexpr float kFidelityTessFar = 22.0f;
+    /// At most about this many units are tessellated at once, the nearest
+    /// on screen: the rest of a crowd is drawn by the stock pipelines. Each
+    /// costs ~0.13 ms of GPU on the Iris Xe (docs/enhancements-plan.md 3.19).
+    static constexpr size_t kFidelityMaxUnits = 6;
+    /// Over this many yards inside the budget's edge a unit's rounding eases
+    /// to none, so leaving the budget changes nothing on screen.
+    static constexpr float kFidelityFade = 3.0f;
 
     // Fog/lighting/shadow are now in per-frame UBO - keep stubs for callers that haven't been updated
     void setFog(const glm::vec3&, float, float) {}
@@ -482,6 +498,13 @@ private:
         VmaAllocation indexAlloc = VK_NULL_HANDLE;
         uint32_t indexCount = 0;
         uint32_t vertexCount = 0;
+        /// Smoother characters (setCharacterFidelity): per vertex, the normal
+        /// shared by every vertex at its position and how far that corner may
+        /// round off (character.tese). Made the first time a unit of this
+        /// model is drawn tessellated; never with the row off.
+        VkBuffer weldBuffer = VK_NULL_HANDLE;
+        VmaAllocation weldAlloc = VK_NULL_HANDLE;
+        bool weldFailed = false;
 
         pipeline::M2Model data;  // Original model data
         std::vector<glm::mat4> bindPose;  // Inverse bind pose matrices
@@ -904,6 +927,22 @@ private:
     // write kept on, so the faded model still self-occludes instead of showing
     // backfaces and under-armor skin through the body.
     VkPipeline translucentPipeline_ = VK_NULL_HANDLE;
+    // Smoother characters: the tessellated twins of the four surface
+    // pipelines (opaque, alpha key, alpha, translucent). Built the first time
+    // the row is on (buildFidelityPipelines); the glow and modulate cards
+    // stay on the stock pipelines.
+    VkPipeline tessOpaquePipeline_ = VK_NULL_HANDLE;
+    VkPipeline tessAlphaTestPipeline_ = VK_NULL_HANDLE;
+    VkPipeline tessAlphaPipeline_ = VK_NULL_HANDLE;
+    VkPipeline tessTranslucentPipeline_ = VK_NULL_HANDLE;
+    bool fidelity_ = false;
+    bool fidelityPipelinesFailed_ = false;
+    std::vector<float> fidelityDist_;  // render()'s scratch: candidates' distances
+    void buildFidelityPipelines();
+    void destroyFidelityPipelines();
+    bool ensureWeldBuffer(M2ModelGPU& gm);
+    /// The tessellated twin of a stock pipeline, or the stock one itself.
+    VkPipeline fidelityTwin(VkPipeline stock) const;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
     // Descriptor set layouts

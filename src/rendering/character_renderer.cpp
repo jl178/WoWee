@@ -64,6 +64,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <chrono>
+#include <deque>
 #include <cstdlib>
 #include <limits>
 #include <cstring>
@@ -385,6 +386,164 @@ void CharacterRenderer::buildMainPassPipelines(VkDevice device, VkRenderPass mai
 
 }
 
+// ---- Smoother characters (Enhancements::characterFidelity) ---------------
+
+void CharacterRenderer::buildFidelityPipelines() {
+    if (tessOpaquePipeline_ || fidelityPipelinesFailed_ || !vkCtx_ || !pipelineLayout_) return;
+    fidelityPipelinesFailed_ = true;  // until every one is built
+    if (!vkCtx_->isTessellationShaderSupported()) {
+        LOG_WARNING("Smoother characters: the device has no tessellation shaders; "
+                    "units keep the stock mesh (the sharper bake still applies)");
+        return;
+    }
+    VkDevice device = vkCtx_->getDevice();
+    rendering::VkShaderModule vert, tesc, tese, frag;
+    if (!vert.loadFromFile(device, "assets/shaders/character_tess.vert.spv") ||
+        !tesc.loadFromFile(device, "assets/shaders/character.tesc.spv") ||
+        !tese.loadFromFile(device, "assets/shaders/character.tese.spv") ||
+        !frag.loadFromFile(device, "assets/shaders/character.frag.spv")) {
+        LOG_ERROR("Smoother characters: missing tessellation shaders");
+        vert.destroy(); tesc.destroy(); tese.destroy(); frag.destroy();
+        return;
+    }
+    // The stock layout on binding 0 (buildMainPassPipelines), and the weld
+    // normals on binding 1.
+    const std::vector<VkVertexInputBindingDescription> bindings = {
+        {.binding = 0, .stride = sizeof(CharVertexGPU), .inputRate = VK_VERTEX_INPUT_RATE_VERTEX},
+        {.binding = 1, .stride = sizeof(glm::vec4), .inputRate = VK_VERTEX_INPUT_RATE_VERTEX},
+    };
+    const std::vector<VkVertexInputAttributeDescription> attrs = {
+        {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = static_cast<uint32_t>(offsetof(CharVertexGPU, position))},
+        {.location = 1, .binding = 0, .format = VK_FORMAT_R8G8B8A8_UNORM,   .offset = static_cast<uint32_t>(offsetof(CharVertexGPU, boneWeights))},
+        {.location = 2, .binding = 0, .format = VK_FORMAT_R8G8B8A8_UINT,     .offset = static_cast<uint32_t>(offsetof(CharVertexGPU, boneIndices))},
+        {.location = 3, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,  .offset = static_cast<uint32_t>(offsetof(CharVertexGPU, normal))},
+        {.location = 4, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,     .offset = static_cast<uint32_t>(offsetof(CharVertexGPU, texCoords))},
+        {.location = 5, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = static_cast<uint32_t>(offsetof(CharVertexGPU, tangent))},
+        {.location = 6, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,     .offset = static_cast<uint32_t>(offsetof(CharVertexGPU, texCoords2))},
+        {.location = 7, .binding = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 0},
+    };
+    VkRenderPass mainPass = renderPassOverride_ ? renderPassOverride_ : vkCtx_->getImGuiRenderPass();
+    VkSampleCountFlagBits samples = renderPassOverride_ ? msaaSamplesOverride_ : vkCtx_->getMsaaSamples();
+    auto build = [&](VkPipelineColorBlendAttachmentState blendState, bool depthWrite,
+                     bool alphaToCoverage) -> VkPipeline {
+        PipelineBuilder builder;
+        builder.setShaders(vert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
+                           frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+            .addTessellation(tesc.stageInfo(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT),
+                             tese.stageInfo(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT), 3)
+            .setVertexInput(bindings, attrs)
+            .setTopology(VK_PRIMITIVE_TOPOLOGY_PATCH_LIST)
+            .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE)
+            .setDepthTest(true, depthWrite, VK_COMPARE_OP_LESS)
+            .setDepthBias(0.0f, 0.0f)
+            .setColorBlendAttachment(blendState)
+            .setMultisample(samples);
+        if (alphaToCoverage) builder.setAlphaToCoverage(true);
+        return builder
+            .setLayout(pipelineLayout_)
+            .setRenderPass(mainPass)
+            .setDynamicStates({VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_DEPTH_BIAS})
+            .build(device, vkCtx_->getPipelineCache());
+    };
+    tessOpaquePipeline_ = build(PipelineBuilder::blendDisabled(), true, false);
+    tessAlphaTestPipeline_ = build(PipelineBuilder::blendDisabled(), true, true);
+    tessAlphaPipeline_ = build(PipelineBuilder::blendAlpha(), false, false);
+    tessTranslucentPipeline_ = build(PipelineBuilder::blendAlpha(), true, false);
+    vert.destroy(); tesc.destroy(); tese.destroy(); frag.destroy();
+    if (!tessOpaquePipeline_ || !tessAlphaTestPipeline_ || !tessAlphaPipeline_ || !tessTranslucentPipeline_) {
+        LOG_ERROR("Smoother characters: tessellation pipelines failed to build; stock mesh kept");
+        destroyFidelityPipelines();
+        return;
+    }
+    fidelityPipelinesFailed_ = false;
+    LOG_INFO("Smoother characters: tessellation pipelines built");
+}
+
+void CharacterRenderer::destroyFidelityPipelines() {
+    if (!vkCtx_) return;
+    VkDevice device = vkCtx_->getDevice();
+    destroy(device, tessOpaquePipeline_);
+    destroy(device, tessAlphaTestPipeline_);
+    destroy(device, tessAlphaPipeline_);
+    destroy(device, tessTranslucentPipeline_);
+}
+
+VkPipeline CharacterRenderer::fidelityTwin(VkPipeline stock) const {
+    if (stock == opaquePipeline_) return tessOpaquePipeline_;
+    if (stock == alphaTestPipeline_) return tessAlphaTestPipeline_;
+    if (stock == alphaPipeline_) return tessAlphaPipeline_;
+    if (stock == translucentPipeline_) return tessTranslucentPipeline_;
+    return stock;
+}
+
+namespace {
+
+/// Per vertex, the unit normal shared by all the vertices at its position, and
+/// in w how much that corner may be rounded by the Phong projection: 1 where
+/// the copies agree (a UV seam, or no copy at all), easing to 0 where they
+/// disagree by 15-35 degrees or more (a crease: a boot's cuff, a belt's edge,
+/// the two faces of a hair card), so hard edges stay hard. A function of the
+/// position alone, so the split copies get the same value and both sides of
+/// a seam tessellate to the same curve.
+std::vector<glm::vec4> weldNormals(const pipeline::M2Model& model) {
+    const size_t n = model.vertices.size();
+    std::vector<glm::vec4> out(n, glm::vec4(0.0f, 0.0f, 1.0f, 0.0f));
+    struct Key {
+        uint32_t x, y, z;
+        bool operator==(const Key&) const = default;
+    };
+    struct KeyHash {
+        size_t operator()(const Key& k) const {
+            return (static_cast<size_t>(k.x) * 73856093u) ^ (static_cast<size_t>(k.y) * 19349663u) ^
+                   (static_cast<size_t>(k.z) * 83492791u);
+        }
+    };
+    auto keyOf = [](const glm::vec3& p) {
+        Key k{};
+        std::memcpy(&k.x, &p.x, 4);
+        std::memcpy(&k.y, &p.y, 4);
+        std::memcpy(&k.z, &p.z, 4);
+        return k;
+    };
+    std::unordered_map<Key, std::vector<uint32_t>, KeyHash> groups;
+    groups.reserve(n);
+    for (uint32_t i = 0; i < n; ++i) groups[keyOf(model.vertices[i].position)].push_back(i);
+    for (const auto& [key, members] : groups) {
+        glm::vec3 sum(0.0f);
+        for (uint32_t i : members) {
+            const glm::vec3 nn = model.vertices[i].normal;
+            const float len = glm::length(nn);
+            if (len > 1e-6f) sum += nn / len;
+        }
+        const float sumLen = glm::length(sum);
+        if (sumLen < 1e-4f) continue;  // opposed copies: a two-sided card; w 0
+        const glm::vec3 avg = sum / sumLen;
+        float minDot = 1.0f;
+        for (uint32_t i : members) {
+            const glm::vec3 nn = model.vertices[i].normal;
+            const float len = glm::length(nn);
+            if (len > 1e-6f) minDot = std::min(minDot, glm::dot(nn / len, avg));
+        }
+        const float w = glm::smoothstep(0.8192f, 0.9659f, minDot);
+        for (uint32_t i : members) out[i] = glm::vec4(avg, w);
+    }
+    return out;
+}
+
+}  // namespace
+
+bool CharacterRenderer::ensureWeldBuffer(M2ModelGPU& gm) {
+    if (gm.weldBuffer) return true;
+    if (gm.weldFailed || gm.data.vertices.empty() || !gm.vertexBuffer) return false;
+    const std::vector<glm::vec4> weld = weldNormals(gm.data);
+    auto wb = uploadBuffer(*vkCtx_, weld.data(), weld.size() * sizeof(glm::vec4),
+                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    if (!wb.buffer) { gm.weldFailed = true; return false; }
+    gm.weldBuffer = wb.buffer;
+    gm.weldAlloc = wb.allocation;
+    return true;
+}
+
 bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout,
                                     pipeline::AssetManager* am,
                                     VkRenderPass renderPassOverride,
@@ -626,6 +785,7 @@ void CharacterRenderer::shutdown() {
     destroyPipeline(addOnePipeline_);
     destroyPipeline(modPipeline_);
     destroyPipeline(mod2xPipeline_);
+    destroyFidelityPipelines();
 
     destroy(device, pipelineLayout_);
 
@@ -812,6 +972,16 @@ void CharacterRenderer::destroyModelGPU(M2ModelGPU& gpuModel, bool defer) {
     gpuModel.vertexAlloc = VK_NULL_HANDLE;
     gpuModel.indexBuffer = VK_NULL_HANDLE;
     gpuModel.indexAlloc = VK_NULL_HANDLE;
+    // Smoother characters' weld normals, when this model was ever drawn
+    // tessellated; freed with the rest.
+    if (gpuModel.weldBuffer) {
+        ::VkBuffer wb = gpuModel.weldBuffer;
+        VmaAllocation wbAlloc = gpuModel.weldAlloc;
+        gpuModel.weldBuffer = VK_NULL_HANDLE;
+        gpuModel.weldAlloc = VK_NULL_HANDLE;
+        if (!defer) vmaDestroyBuffer(alloc, wb, wbAlloc);
+        else vkCtx_->deferAfterAllFrameFences([alloc, wb, wbAlloc]() { vmaDestroyBuffer(alloc, wb, wbAlloc); });
+    }
 
     if (!defer) {
         // Safe after vkDeviceWaitIdle (shutdown / clear paths)
@@ -1280,6 +1450,144 @@ int impliedScale(const AtlasRegion256& region, int overlayWidth) {
 
 }  // namespace
 
+namespace {
+
+/// Smoother, sharper characters: the composite again at twice the stock size.
+///
+/// The stock bake (above) is recorded as it runs: each layer and the rectangle
+/// of the stock canvas it lands in, in order. The sharper bake replays that
+/// list on a canvas twice the size, resampling each layer from its own pixels
+/// into twice its rectangle with a Catmull-Rom filter on premultiplied colour.
+/// So every layer is placed exactly where the stock one is - nothing moves -
+/// and none of it passes through the stock bake's nearest-neighbour steps
+/// (the 256 body grown to 512, a half-size or odd-size overlay stretched),
+/// whose blocky texels and stair-stepped armour edges are what the larger
+/// picture removes. Nothing is invented: a 2x Catmull-Rom of the art.
+/// Used only with the row on; the stock bake is the stock code either way.
+struct BakeRecorder {
+    struct Placement { const pipeline::BLPImage* image; int x, y, w, h; };
+    std::deque<pipeline::BLPImage> kept;
+    std::vector<Placement> list;
+    void add(const pipeline::BLPImage& image, int x, int y, int w, int h) {
+        if (!image.isValid() || w <= 0 || h <= 0) return;
+        kept.push_back(image);
+        list.push_back({.image = &kept.back(), .x = x, .y = y, .w = w, .h = h});
+    }
+};
+
+/// Catmull-Rom weights for the four taps around t in [0, 1).
+inline void catmullRom(float t, float w[4]) {
+    const float t2 = t * t, t3 = t2 * t;
+    w[0] = 0.5f * (-t3 + 2.0f * t2 - t);
+    w[1] = 0.5f * (3.0f * t3 - 5.0f * t2 + 2.0f);
+    w[2] = 0.5f * (-3.0f * t3 + 4.0f * t2 + t);
+    w[3] = 0.5f * (t3 - t2);
+}
+
+/// One axis of the resample: for each of `outN` destination texels, the
+/// first of its four source taps and their weights.
+struct AxisTaps { std::vector<int> first; std::vector<float> w; };
+AxisTaps axisTaps(int srcN, int outN) {
+    AxisTaps a;
+    a.first.resize(static_cast<size_t>(outN));
+    a.w.resize(static_cast<size_t>(outN) * 4);
+    const float scale = static_cast<float>(srcN) / static_cast<float>(outN);
+    for (int i = 0; i < outN; ++i) {
+        const float s = (static_cast<float>(i) + 0.5f) * scale - 0.5f;
+        const float f = std::floor(s);
+        a.first[static_cast<size_t>(i)] = static_cast<int>(f) - 1;
+        catmullRom(s - f, &a.w[static_cast<size_t>(i) * 4]);
+    }
+    return a;
+}
+
+/// `src` resampled to w x h, premultiplied in float during the filter and
+/// handed back straight RGBA8, edges clamped.
+std::vector<uint8_t> resampleCatmullRom(const pipeline::BLPImage& src, int w, int h) {
+    const int sw = src.width, sh = src.height;
+    // Premultiplied source.
+    std::vector<float> pm(static_cast<size_t>(sw) * sh * 4);
+    for (size_t i = 0; i < static_cast<size_t>(sw) * sh; ++i) {
+        const float a = src.data[i * 4 + 3] / 255.0f;
+        pm[i * 4 + 0] = src.data[i * 4 + 0] / 255.0f * a;
+        pm[i * 4 + 1] = src.data[i * 4 + 1] / 255.0f * a;
+        pm[i * 4 + 2] = src.data[i * 4 + 2] / 255.0f * a;
+        pm[i * 4 + 3] = a;
+    }
+    // Horizontal pass: sh rows of w.
+    const AxisTaps ax = axisTaps(sw, w);
+    std::vector<float> rows(static_cast<size_t>(w) * sh * 4);
+    for (int y = 0; y < sh; ++y) {
+        for (int x = 0; x < w; ++x) {
+            float acc[4] = {0, 0, 0, 0};
+            for (int k = 0; k < 4; ++k) {
+                const int sx = std::clamp(ax.first[static_cast<size_t>(x)] + k, 0, sw - 1);
+                const float wk = ax.w[static_cast<size_t>(x) * 4 + k];
+                const float* p = &pm[(static_cast<size_t>(y) * sw + sx) * 4];
+                for (int c = 0; c < 4; ++c) acc[c] += p[c] * wk;
+            }
+            float* o = &rows[(static_cast<size_t>(y) * w + x) * 4];
+            for (int c = 0; c < 4; ++c) o[c] = acc[c];
+        }
+    }
+    // Vertical pass, and back to straight colour.
+    const AxisTaps ay = axisTaps(sh, h);
+    std::vector<uint8_t> out(static_cast<size_t>(w) * h * 4);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            float acc[4] = {0, 0, 0, 0};
+            for (int k = 0; k < 4; ++k) {
+                const int sy = std::clamp(ay.first[static_cast<size_t>(y)] + k, 0, sh - 1);
+                const float wk = ay.w[static_cast<size_t>(y) * 4 + k];
+                const float* p = &rows[(static_cast<size_t>(sy) * w + x) * 4];
+                for (int c = 0; c < 4; ++c) acc[c] += p[c] * wk;
+            }
+            const float a = std::clamp(acc[3], 0.0f, 1.0f);
+            uint8_t* o = &out[(static_cast<size_t>(y) * w + x) * 4];
+            if (a <= 0.5f / 255.0f) { o[0] = o[1] = o[2] = o[3] = 0; continue; }
+            for (int c = 0; c < 3; ++c)
+                o[c] = static_cast<uint8_t>(std::clamp(acc[c] / a, 0.0f, 1.0f) * 255.0f + 0.5f);
+            o[3] = static_cast<uint8_t>(a * 255.0f + 0.5f);
+        }
+    }
+    return out;
+}
+
+/// The recorded bake on a `width` x `height` canvas (twice the stock one):
+/// the first placement is the body and is copied in; every later one is laid
+/// over it with the stock blend (blitOverlay: colour over, alpha the max).
+std::vector<uint8_t> replayBake(const BakeRecorder& rec, int width, int height, int factor) {
+    std::vector<uint8_t> canvas(static_cast<size_t>(width) * height * 4, 0);
+    bool first = true;
+    for (const auto& pl : rec.list) {
+        const int w = pl.w * factor, h = pl.h * factor;
+        const int x0 = pl.x * factor, y0 = pl.y * factor;
+        const std::vector<uint8_t> img = resampleCatmullRom(*pl.image, w, h);
+        for (int y = 0; y < h; ++y) {
+            const int dy = y0 + y;
+            if (dy < 0 || dy >= height) continue;
+            for (int x = 0; x < w; ++x) {
+                const int dx = x0 + x;
+                if (dx < 0 || dx >= width) continue;
+                const uint8_t* s = &img[(static_cast<size_t>(y) * w + x) * 4];
+                uint8_t* d = &canvas[(static_cast<size_t>(dy) * width + dx) * 4];
+                if (first) { std::memcpy(d, s, 4); continue; }
+                const uint8_t a = s[3];
+                if (a == 0) continue;
+                if (a == 255) { std::memcpy(d, s, 4); continue; }
+                const float alpha = a / 255.0f, inv = 1.0f - alpha;
+                for (int c = 0; c < 3; ++c)
+                    d[c] = static_cast<uint8_t>(s[c] * alpha + d[c] * inv);
+                d[3] = std::max(d[3], a);
+            }
+        }
+        first = false;
+    }
+    return canvas;
+}
+
+}  // namespace
+
 VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& layerPaths) {
     if (layerPaths.empty() || !assetManager || !assetManager->isInitialized()) {
         return whiteTexture_.get();
@@ -1288,7 +1596,10 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
     // Composite key is deterministic from layer set; if we've already built it,
     // reuse the existing GPU texture to keep live instance pointers valid.
     std::string cacheKey = "__composite__";
+    // The sharper bake is a different texture from the same layers.
+    if (fidelity_) cacheKey += "2x";
     for (const auto& lp : layerPaths) { cacheKey += '|'; cacheKey += lp; }
+    std::unique_ptr<BakeRecorder> bake = fidelity_ ? std::make_unique<BakeRecorder>() : nullptr;
     auto cachedComposite = textureCache.find(cacheKey);
     if (cachedComposite != textureCache.end()) {
         cachedComposite->second.lastUse = ++textureCacheCounter_;
@@ -1433,6 +1744,7 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
         width = height = newSize;
         coordScale = requiredScale;
     }
+    if (bake) bake->add(base, 0, 0, width, height);
 
     // Alpha-blend each overlay onto the composite
     for (auto& loaded : overlays) {
@@ -1444,6 +1756,7 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
         if (overlay.width == width && overlay.height == height) {
             // Same size: full alpha-blend
             blitOverlay(composite, width, height, overlay, 0, 0);
+            if (bake) bake->add(overlay, 0, 0, width, height);
         } else {
             // Where this layer belongs, from the one table that also sized the
             // canvas above.
@@ -1455,6 +1768,7 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
                 core::Logger::getInstance().info("Composite: UNKNOWN region for '",
                     loaded.path, "', centering at (", cx, ",", cy, ")");
                 blitOverlay(composite, width, height, overlay, cx, cy);
+                if (bake) bake->add(overlay, cx, cy, overlay.width, overlay.height);
                 continue;
             }
             int dstX = region.x, dstY = region.y;
@@ -1498,12 +1812,23 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
             if (needsResample) {
                 blitOverlayResampled(composite, width, height, overlay,
                                      dstX, dstY, expectedW, expectedH);
+                if (bake) bake->add(overlay, dstX, dstY, expectedW, expectedH);
             } else {
                 blitOverlay(composite, width, height, overlay, dstX, dstY);
+                if (bake) bake->add(overlay, dstX, dstY, overlay.width, overlay.height);
             }
         }
     }
 
+    if (bake && !bake->list.empty()) {
+        const auto t0 = std::chrono::steady_clock::now();
+        composite = replayBake(*bake, width * 2, height * 2, 2);
+        width *= 2;
+        height *= 2;
+        LOG_INFO("Sharper character bake: ", width, "x", height, " from ", bake->list.size(),
+                  " layers in ", std::chrono::duration<float, std::milli>(
+                      std::chrono::steady_clock::now() - t0).count(), " ms");
+    }
     bleedAndStripMagentaKey(composite, width, height);
     const bool hasAlpha = hasNonOpaqueAlpha(composite);
 
@@ -1557,7 +1882,9 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
                                                 const std::vector<std::string>& baseLayers,
                                                 const std::vector<std::pair<int, std::string>>& regionLayers) {
     // Build cache key from all inputs to avoid redundant compositing
-    std::string cacheKey = basePath;
+    // (the sharper bake is a different texture from the same layers).
+    std::string cacheKey = fidelity_ ? "2x|" + basePath : basePath;
+    std::unique_ptr<BakeRecorder> bake = fidelity_ ? std::make_unique<BakeRecorder>() : nullptr;
     for (const auto& bl : baseLayers) { cacheKey += '|'; cacheKey += bl; }
     cacheKey += '#';
     for (const auto& rl : regionLayers) {
@@ -1665,6 +1992,7 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
     } else {
         composite = base.data;
     }
+    if (bake) bake->add(base, 0, 0, width, height);
 
     // Blend face, facial hair and underwear overlays, each into its region at
     // the region's size on this canvas.
@@ -1689,6 +2017,7 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
 
         if (overlay.width == width && overlay.height == height) {
             blitOverlay(composite, width, height, overlay, 0, 0);
+            if (bake) bake->add(overlay, 0, 0, width, height);
         } else {
             // The same region table compositeTextures uses. This path kept its
             // own copy, which knew no facial hair: FacialUpperHair (a human's
@@ -1703,6 +2032,8 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
             if (!region.known) {
                 blitOverlay(composite, width, height, overlay,
                             (width - overlay.width) / 2, (height - overlay.height) / 2);
+                if (bake) bake->add(overlay, (width - overlay.width) / 2, (height - overlay.height) / 2,
+                                    overlay.width, overlay.height);
                 continue;
             }
             const int dstX = region.x * coordScale;
@@ -1714,6 +2045,7 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
             } else {
                 blitOverlayResampled(composite, width, height, overlay, dstX, dstY, dstW, dstH);
             }
+            if (bake) bake->add(overlay, dstX, dstY, dstW, dstH);
         }
     }
 
@@ -1768,9 +2100,11 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
         if (overlay.width == expectedW && overlay.height == expectedH) {
             // Exact match - blit 1:1
             blitOverlay(composite, width, height, overlay, dstX, dstY);
+            if (bake) bake->add(overlay, dstX, dstY, expectedW, expectedH);
         } else if (overlay.width * 2 == expectedW && overlay.height * 2 == expectedH) {
             // Overlay is half size - upscale 2x
             blitOverlayScaled2x(composite, width, height, overlay, dstX, dstY);
+            if (bake) bake->add(overlay, dstX, dstY, expectedW, expectedH);
         } else if (overlay.width > expectedW && overlay.height > expectedH &&
                    expectedW > 0 && expectedH > 0) {
             // Overlay is larger than region (e.g. HD textures for 1024 atlas on 512 canvas)
@@ -1780,8 +2114,10 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
             int ds = std::min(dsX, dsY);
             if (ds >= 2) {
                 blitOverlayDownscaleN(composite, width, height, overlay, dstX, dstY, ds);
+                if (bake) bake->add(overlay, dstX, dstY, overlay.width / ds, overlay.height / ds);
             } else {
                 blitOverlay(composite, width, height, overlay, dstX, dstY);
+                if (bake) bake->add(overlay, dstX, dstY, overlay.width, overlay.height);
             }
         } else {
             // Size mismatch - blit at natural size (may clip or leave gap)
@@ -1789,9 +2125,19 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
                 " at (", dstX, ",", dstY, ") overlay=", overlay.width, "x", overlay.height,
                 " expected=", expectedW, "x", expectedH, " from ", rl.second);
             blitOverlay(composite, width, height, overlay, dstX, dstY);
+            if (bake) bake->add(overlay, dstX, dstY, overlay.width, overlay.height);
         }
     }
 
+    if (bake && !bake->list.empty()) {
+        const auto t0 = std::chrono::steady_clock::now();
+        composite = replayBake(*bake, width * 2, height * 2, 2);
+        width *= 2;
+        height *= 2;
+        LOG_INFO("Sharper character bake: ", width, "x", height, " from ", bake->list.size(),
+                  " layers in ", std::chrono::duration<float, std::milli>(
+                      std::chrono::steady_clock::now() - t0).count(), " ms");
+    }
     bleedAndStripMagentaKey(composite, width, height);
     const bool hasAlpha = hasNonOpaqueAlpha(composite);
 
@@ -3423,6 +3769,25 @@ void CharacterRenderer::prepareRender(uint32_t frameIndex) {
     if (instances.empty() || !opaquePipeline_) return;
     if (frameIndex >= 2 || boneDescPool_ == VK_NULL_HANDLE || boneSetLayout_ == VK_NULL_HANDLE) return;
 
+    // Smoother characters: the pipelines the first time, and the weld normals
+    // of each model the first time a unit of it comes near. Nothing with the
+    // row off.
+    if (fidelity_ && !renderPassOverride_) {
+        buildFidelityPipelines();
+        if (tessOpaquePipeline_) {
+            const float reach = kFidelityTessFar + 4.0f;
+            for (auto& [id, instance] : instances) {
+                if (!instance.visible || !instance.cachedModel || instance.cachedModel->weldBuffer ||
+                    instance.cachedModel->weldFailed) continue;
+                if (instance.hasOverrideModelMatrix) continue;  // attached items: never
+                const glm::vec3 d = instance.position - lastCameraPos_;
+                if (glm::dot(d, d) > reach * reach) continue;
+                auto mit = models.find(instance.modelId);
+                if (mit != models.end()) ensureWeldBuffer(mit->second);
+            }
+        }
+    }
+
     // Pre-allocate bone SSBOs + descriptor sets on main thread (pool ops not thread-safe)
     for (auto& [id, instance] : instances) {
         int numBones = std::min(static_cast<int>(instance.boneMatrices.size()), MAX_BONES);
@@ -3586,6 +3951,30 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     VkPipeline currentPipeline = opaquePipeline_;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, currentPipeline);
 
+    // Smoother characters: the budget. The tessellated pipelines cost the
+    // same per unit whatever the level (the patch stages themselves are the
+    // price on the Iris Xe), so only the nearest few on screen get them: the
+    // radius is the kFidelityMaxUnits-th nearest candidate's distance, and
+    // each unit's rounding eases out over kFidelityFade inside it.
+    float fidelityRadius = 0.0f;
+    if (fidelity_ && tessOpaquePipeline_ && !renderPassOverride_) {
+        fidelityDist_.clear();
+        for (const auto& [id, inst] : instances) {
+            if (!inst.visible || inst.hasOverrideModelMatrix || !inst.cachedModel ||
+                !inst.cachedModel->weldBuffer || inst.opacity <= 0.0f) continue;
+            const float d = glm::length(inst.position - camPos);
+            if (d >= kFidelityTessFar || !frustum.intersectsSphere(inst.position, kDefaultCharacterCullRadius))
+                continue;
+            fidelityDist_.push_back(d);
+        }
+        fidelityRadius = kFidelityTessFar;
+        if (fidelityDist_.size() > kFidelityMaxUnits) {
+            auto kth = fidelityDist_.begin() + static_cast<std::ptrdiff_t>(kFidelityMaxUnits - 1);
+            std::nth_element(fidelityDist_.begin(), kth, fidelityDist_.end());
+            fidelityRadius = std::min(kFidelityTessFar, *kth + 1.0f);
+        }
+    }
+
     for (auto& pair : instances) {
         auto& instance = pair.second;
 
@@ -3627,10 +4016,27 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             ? instance.overrideModelMatrix
             : getModelMatrix(instance);
 
+        // Smoother characters: a near unit's surfaces go through the
+        // tessellated twins of the stock pipelines, with its weld normals on
+        // binding 1 and its share of the budget (0-1000) in stages.z, which
+        // only character_tess.vert reads. Not the attached items (shoulders,
+        // helmets, weapons: the instances placed by an override matrix). They
+        // are hard-surface pieces whose rims the art smooths across, and
+        // Phong rounding blew a plate pauldron up into a cushion - a
+        // different shape, not a smoother one (docs/enhancements-plan.md 3.19).
+        bool tessThis = false;
+        int32_t tessScaleQ = 0;
+        if (fidelityRadius > 0.0f && gpuModel.weldBuffer && !instance.hasOverrideModelMatrix) {
+            const float d = glm::length(instance.position - camPos);
+            const float s = 1.0f - glm::smoothstep(fidelityRadius - kFidelityFade, fidelityRadius, d);
+            tessScaleQ = static_cast<int32_t>(s * 1000.0f + 0.5f);
+            tessThis = tessScaleQ > 0;
+        }
+
         // Push model matrix, and a zero UV scroll; batches with a texture
         // animation push their own below.
         struct { glm::mat4 model; glm::vec4 uvOffset; glm::ivec4 stages; } charPush{
-            modelMat, glm::vec4(0.0f), glm::ivec4(0)};
+            modelMat, glm::vec4(0.0f), glm::ivec4(0, 0, tessScaleQ, 0)};
         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(charPush), &charPush);
         glm::vec4 pushedUvOffset(0.0f);
         int32_t pushedStages = 0;
@@ -3657,6 +4063,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         VkDeviceSize offset = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &gpuModel.vertexBuffer, &offset);
         vkCmdBindIndexBuffer(cmd, gpuModel.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+        if (tessThis) vkCmdBindVertexBuffers(cmd, 1, 1, &gpuModel.weldBuffer, &offset);
 
         if (!gpuModel.data.batches.empty()) {
             bool applyGeosetFilter = !instance.activeGeosets.empty();
@@ -3997,6 +4404,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         default: desiredPipeline = alphaPipeline_; break;
                     }
                 }
+                if (tessThis) desiredPipeline = fidelityTwin(desiredPipeline);
                 if (desiredPipeline != currentPipeline) {
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
                     currentPipeline = desiredPipeline;
@@ -4217,7 +4625,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     if (uvOffset != pushedUvOffset || stages != pushedStages) {
                         const int32_t sway = ((stages & kStagesRobeHem) ? 1 : 0) | ((stages & kStagesCape) ? 2 : 0);
                         struct { glm::vec4 uv; glm::ivec4 stages; } push{
-                            uvOffset, glm::ivec4(stages & ~(kStagesRobeHem | kStagesCape), sway, 0, 0)};
+                            uvOffset, glm::ivec4(stages & ~(kStagesRobeHem | kStagesCape), sway, tessScaleQ, 0)};
                         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
                                            sizeof(glm::mat4), sizeof(push), &push);
                         pushedUvOffset = uvOffset;
@@ -4240,6 +4648,7 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             // pick it explicitly so instance fades blend here too.
             VkPipeline fallbackPipeline = (instance.opacity < 0.999f)
                 ? translucentPipeline_ : opaquePipeline_;
+            if (tessThis) fallbackPipeline = fidelityTwin(fallbackPipeline);
             if (fallbackPipeline != currentPipeline) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fallbackPipeline);
                 currentPipeline = fallbackPipeline;
@@ -6655,6 +7064,9 @@ void CharacterRenderer::recreatePipelines() {
     destroy(device, addOnePipeline_);
     destroy(device, modPipeline_);
     destroy(device, mod2xPipeline_);
+    // Rebuilt on the next frame the row is on, against the new pass.
+    destroyFidelityPipelines();
+    fidelityPipelinesFailed_ = false;
 
     // --- Load shaders ---
     rendering::VkShaderModule charVert, charFrag;

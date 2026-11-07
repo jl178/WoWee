@@ -202,6 +202,18 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "steeper than 45 degrees, in the chunks that have such slopes, each layer is also read from the "
                  "side and blended by the slope; off binds the stock terrain.frag",
      .asBool = &Enhancements::cliffProjection},
+    {.key = "characterfidelity", .label = "Smoother, sharper characters", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPage, .section = "",
+     .tooltip = "Characters near you have rounder outlines - shoulders, heads,\n"
+                "arms - where the original shows flat facets, and their skin\n"
+                "and clothing are drawn from a sharper, larger picture. The\n"
+                "same models, textures and light as the original.",
+     // Measured in docs/enhancements-plan.md (3.19).
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "character_fidelity",
+     .controls = "the tessellated character pipelines (built on first use) for units within "
+                 "22 yd and their weld-normal buffers; composites baked at 2x from then on",
+     .restartNote = "The sharper skin reaches characters dressed from now on;\nrestart to see it on everyone.",
+     .asBool = &Enhancements::characterFidelity},
 
     // ------------------------------------------------------------ Sky and air
     {.key = "lightshafts", .label = "Light shafts and mist", .kind = SettingKind::Enum,

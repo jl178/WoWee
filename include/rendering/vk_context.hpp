@@ -298,6 +298,7 @@ public:
 
     // Whether the physical device supports sampler anisotropy.
     [[nodiscard]] bool isSamplerAnisotropySupported() const { return samplerAnisotropySupported_; }
+    [[nodiscard]] bool isTessellationShaderSupported() const { return tessellationShaderSupported_; }
     /// False on hardware without fillModeNonSolid, where a VK_POLYGON_MODE_LINE
     /// pipeline cannot be built and the wireframe views are unavailable.
     [[nodiscard]] bool isWireframeSupported() const { return fillModeNonSolidSupported_; }
@@ -665,6 +666,7 @@ private:
     std::mutex samplerCacheMutex_;
     std::unordered_map<uint64_t, VkSampler> samplerCache_;
     bool samplerAnisotropySupported_ = false;
+    bool tessellationShaderSupported_ = false;
     bool fillModeNonSolidSupported_ = false;
     bool fsr2ComputeFeaturesSupported_ = false;
     bool blockCompressionSupported_ = false;

@@ -19,6 +19,16 @@ PipelineBuilder& PipelineBuilder::setShaders(
     return *this;
 }
 
+PipelineBuilder& PipelineBuilder::addTessellation(VkPipelineShaderStageCreateInfo control,
+    VkPipelineShaderStageCreateInfo evaluation, uint32_t patchControlPoints)
+{
+    // Stage order does not matter to Vulkan; kept vertex, control,
+    // evaluation, fragment for whoever reads a capture.
+    shaderStages_.insert(shaderStages_.end() - 1, {control, evaluation});
+    patchControlPoints_ = patchControlPoints;
+    return *this;
+}
+
 PipelineBuilder& PipelineBuilder::setVertexInput(
     const std::vector<VkVertexInputBindingDescription>& bindings,
     const std::vector<VkVertexInputAttributeDescription>& attributes)
@@ -211,6 +221,12 @@ VkPipeline PipelineBuilder::build(VkDevice device, VkPipelineCache cache) const 
     pipelineInfo.pDepthStencilState = &depthStencil;
     pipelineInfo.pColorBlendState = colorBlendAttachments_.empty() ? nullptr : &colorBlending;
     pipelineInfo.pDynamicState = dynamicStates_.empty() ? nullptr : &dynamicState;
+    VkPipelineTessellationStateCreateInfo tessellation{};
+    if (patchControlPoints_ > 0) {
+        tessellation.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+        tessellation.patchControlPoints = patchControlPoints_;
+        pipelineInfo.pTessellationState = &tessellation;
+    }
     pipelineInfo.layout = pipelineLayout_;
     pipelineInfo.flags = flags_;
     pipelineInfo.basePipelineHandle = basePipelineHandle_;
