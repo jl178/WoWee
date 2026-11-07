@@ -1177,9 +1177,11 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         }
     }
 
-    // Start intro pan right before entering gameplay so it's visible after loading.
-    if (renderer_->getCameraController()) {
-        renderer_->getCameraController()->startIntroPan(2.8f, 140.0f);
+    // The sweep round the character on entering the world is this client's,
+    // not stock's (the stock camera starts behind the character and stays),
+    // so it belongs to the "Idle orbit" setting and is off with it.
+    if (auto* cam = renderer_->getCameraController(); cam && cam->isIdleOrbitEnabled()) {
+        cam->startIntroPan(2.8f, 140.0f);
     }
 
     showProgress("Entering world...", 1.0f);

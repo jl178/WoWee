@@ -2305,6 +2305,12 @@ void QuestHandler::applyQuestStateFromFields(const FlatFieldMap& fields) {
             }
             clearPendingQuestAccept(questId);
         }
+        // The accept is answered once the slots hold the quest. acceptQuest
+        // adds the quest to the local log at once, so the branch above was
+        // skipped for every ordinary accept and the pending timer always ran
+        // out into a resync - whose quest query the server answers with
+        // "You are already on that quest".
+        clearPendingQuestAccept(questId);
 
         // VALUES updates are authoritative quest progress too. Some servers do
         // not emit (or clients may miss) a separate ADD_KILL notification for
@@ -2482,15 +2488,15 @@ void QuestHandler::triggerQuestAcceptResync(uint32_t questId, uint64_t npcGuid, 
     LOG_INFO("Quest accept resync: questId=", questId, " reason=", reason ? reason : "unknown");
     requestQuestQuery(questId, true);
 
+    // Only the quest's data and the giver's marker. No CMSG_QUESTGIVER_QUERY_QUEST:
+    // stock sends that only when the player picks the quest from a giver, and
+    // for a quest already in the log the server answers it with
+    // QUEST_INVALID 13, which the player reads as "You are already on that
+    // quest" seconds after accepting.
     if (npcGuid != 0) {
         network::Packet qsPkt(wireOpcode(Opcode::CMSG_QUESTGIVER_STATUS_QUERY));
         qsPkt.writeUInt64(npcGuid);
         owner_.getSocket()->send(qsPkt);
-
-        auto queryPkt = owner_.getPacketParsers()
-            ? owner_.getPacketParsers()->buildQueryQuestPacket(npcGuid, questId)
-            : QuestgiverQueryQuestPacket::build(npcGuid, questId);
-        owner_.getSocket()->send(queryPkt);
     }
 }
 
