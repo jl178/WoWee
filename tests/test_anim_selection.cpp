@@ -4,6 +4,7 @@
 // stealth rules of 0x717050, and the stand-state transitions.
 #include <catch_amalgamated.hpp>
 
+#include "anim_test_support.hpp"
 #include "rendering/animation/anim_selection.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "rendering/animation/character_animator.hpp"
@@ -32,14 +33,7 @@ void loadAnimationDataRows() {
     for (const auto& r : rows) a::setDbcFallbackRow(r.id, r.fallback, r.flags);
 }
 
-auto hasIds(std::initializer_list<uint32_t> ids) {
-    std::vector<uint32_t> v(ids);
-    return [v](uint32_t id) {
-        for (uint32_t x : v)
-            if (x == id) return true;
-        return false;
-    };
-}
+using anim_test::hasIds;
 
 M2Sequence seq(uint32_t id, uint32_t variation, int16_t freq, int16_t next, uint32_t flags = 0x20) {
     M2Sequence s{};

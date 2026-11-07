@@ -1,5 +1,6 @@
 #include "core/env_flag.hpp"
 #include "core/entity_spawner.hpp"
+#include "audio/game_object_sounds.hpp"
 #include "core/hitch_legacy.hpp"
 #include "pipeline/m2_asset_loader.hpp"
 #include "rendering/m2_model_classifier.hpp"
@@ -445,7 +446,6 @@ void EntitySpawner::resetAllState() {
     gameObjectDisplayIdWmoCache_.clear();
     gameObjectDisplayIdFailedCache_.clear();
     // Instance ids in here belong to a renderer that has just been cleared.
-    gameObjectPendingAnimPolicy_.clear();
 }
 
 void EntitySpawner::rebuildLookups() {

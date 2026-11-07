@@ -123,31 +123,13 @@ void EntitySpawnCallbackHandler::setupCallbacks() {
         entitySpawner_.despawnGameObject(guid);
     });
 
-    // GameObject metadata arrival - settles the animation policy for models that
-    // spawned before their type was known.
-    gameHandler_.setGameObjectInfoCallback([this](uint32_t entry) {
-        entitySpawner_.onGameObjectInfoReceived(entry);
-    });
-
     // GameObject custom animation callback: Custom0-3 (153-156) from
     // SMSG_GAMEOBJECT_CUSTOM_ANIM, Despawn (157) from ..._DESPAWN_ANIM.
     gameHandler_.setGameObjectCustomAnimCallback([this](uint64_t guid, uint32_t animId) {
-        auto& goInstances = entitySpawner_.getGameObjectInstances();
-        auto it = goInstances.find(guid);
-        if (it == goInstances.end()) return;
-        auto& info = it->second;
-        if (info.isWmo) return;
-        auto* m2r = renderer_.getM2Renderer();
-        // A model without the sequence plays nothing, as in the game. This
-        // used to unfreeze it instead, which set a shut door looping its swing.
-        if (!m2r || !m2r->hasAnimation(info.instanceId, animId)) return;
-        if (animId == rendering::anim::DESPAWN) {
-            // The object is removed when it ends; hold the last frame so it
-            // does not pop back to its idle in between.
-            m2r->setInstanceAnimationHeld(info.instanceId, animId, false);
-        } else {
-            m2r->setInstanceAnimation(info.instanceId, animId, false);
-        }
+        // The stock handler's custom kinds (0x70c480): played only by a model
+        // that has the sequence, back to the state's own pose when it ends;
+        // Despawn held at its end until the object is removed.
+        entitySpawner_.playGameObjectCustomAnim(guid, animId);
     });
 
     // GameObject state change callback: a door, a chest, a destructible is a

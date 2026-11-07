@@ -429,3 +429,211 @@ Still different:
   (dismounts); with Auto Dismount off, the chest says "You can't do that while
   mounted."
 - Auto-attack a mob and right-click a chest: the attack keeps going.
+
+## 12. Game object presentation
+
+How a game object looks and sounds once it is in the world: its animation,
+its model's events, the freeze flag and the quest sparkle. Read from
+`GameObject_C.cpp` (0x70b000-0x716000). The rules live in
+`include/rendering/animation/game_object_anim.hpp`,
+`include/rendering/m2_object_events.hpp` and
+`include/audio/game_object_sounds.hpp` (tested by
+`tests/test_game_object_anim.cpp`).
+
+### The type handler
+
+`CGGameObject_C` (vtable 0xa34640) builds a handler per `GameObjectType` at
+creation (0x714250, `obj+0x1a0`). Every type's handler is built on the base
+one (0x7124b0, vtable 0xa33c38). Twelve handler vtables put the default
+event slot 0x70d7b0 at +0x40 (0xa33b80 .. 0xa34588); DOOR's (0x712520, vtable
+0xa33b80) shows the slots:
+
+| Slot | Default | Does |
+|---|---|---|
+| +0x28 | 0x70d160 | `GAMEOBJECT_FLAGS` changed: `GO_FLAG_FREEZE_ANIMATION` (0x80) sets or clears the model's pause (`model+0x64`) while a motion plays |
+| +0x2c | 0x70fd10 | replay the current kind (model reloaded) |
+| +0x30 | 0x70d690 | the state changed (old, new): stop the handle's loop, pick a kind |
+| +0x40 | 0x70d7b0 | a model event -> 0x70c050 with the handler's sound handle (+0x1c) |
+| +0x48 | 0x70d7e0 | the sequence ended: the next kind |
+| +0x4c | 0x70c480 | play a kind if the model has its sequence (custom animations) |
+| +0xb0 | 0x70d8d0 -> 0x70d510 | set the kind and play it |
+
+The exceptions: TRANSPORT 11 (0x713820, vtable 0xa34808) and MO_TRANSPORT 15
+(0x7141d0, vtable 0xa348c0) have an empty event slot (0x6b1b80) and pose their
+model from the path (TransportAnimation); DUNGEON_DIFFICULTY 31 (vtable
+0xa34420) fires events only when its +0x38 says so; DESTRUCTIBLE_BUILDING 33
+(0x7128d0, vtable 0xa344d0) keeps its handle at +0x74 and swaps WMO doodad sets
+by damage (0x70e6a0, 0x70e750).
+
+### Kinds (0x70d1e0)
+
+The handler keeps one kind (`+0x10`), an index into 0xada938:
+
+| Kind | Animation | | Kind | Animation |
+|---|---|---|---|---|
+| 0 | Spawn 145 | | 7 | Rebuild 152 |
+| 1 | Closed 147 | | 8-11 | Custom0-3 153-156 |
+| 2 | Open 148 | | 12 | Despawn 157 |
+| 3 | Opened 149 | | | |
+| 4 | Close 146 | | | |
+| 5 | Destroy 150 | | | |
+| 6 | Destroyed 151 | | | |
+
+- **First sight** (0x70d600, from the constructor): ACTIVE -> Opened, READY ->
+  Closed, ACTIVE_ALTERNATIVE -> Destroyed; the motion (Open, Close, Destroy)
+  instead when the descriptor's progress (the high half of
+  `GAMEOBJECT_DYNAMIC`, `desc+0x22`) is not 0xFFFF. AzerothCore sends 0xFFFF
+  for everything but transports.
+- **A state change** (0x70d690(old, new), called by 0x70f81a only when the
+  state differs from `obj+0x204`; never with `obj+0x20c & 0x20000`): the
+  handle's loop stops (0x4c6390). New ACTIVE: Open from READY, else Opened.
+  New ACTIVE_ALTERNATIVE: Destroy from READY, else Destroyed. New READY:
+  Close from ACTIVE, Rebuild from ACTIVE_ALTERNATIVE, else Closed (with a
+  progress set, as from ACTIVE).
+- **The end of a sequence** (0x70d7e0): Open -> Opened, Close and Rebuild ->
+  Closed, Destroy -> Destroyed; a loop replays itself; Spawn and the customs
+  re-apply the state to itself (0x70d690(state, state): the state's loop).
+  Despawn has no successor.
+- **The same kind again** plays nothing (0x70d510). A motion that undoes the
+  one under way (Open <-> Close, Destroy <-> Rebuild, with no progress set)
+  starts where the other had got to, mirrored (0x70d010(1 - fraction)).
+- **The sequence for a kind**, when the model lacks the kind's own:
+  - Close missing and Open missing: Closed.
+  - Closed missing: Close if the model has it (the AnimationData chain then
+    holds its last frame), else Open at speed 0 (its first frame), else Stand.
+  - Open missing and Close missing: Destroy if the model has it, else Opened.
+  - Opened missing: Open if the model has it (its last frame, by the chain),
+    else Close at speed 0, else Destroyed.
+  - Then SetBoneSequence's AnimationData walk (0x826350, `anim::resolveFallback`:
+    0x10 reverses, 0x20 holds; nothing found -> Stand, else Closed, else the
+    first sequence). So a door without Close (RazorfenDoor01) closes by
+    playing Open backwards; Destroy on a door is Open; a model with only Stand
+    (a brazier, the bobber, a lift door) plays Stand for every state.
+  - A substitute that is already playing is not restarted.
+- **Motions** (2, 4, 5, 7) start at `progress / 65535` of their length and clear
+  the progress; with `GO_FLAG_FREEZE_ANIMATION` the model is paused at once.
+  Blending is on for every kind but Spawn.
+- **Spawn** (kind 0) plays when the model loads for an object the handler is
+  told is new (0x712f30 -> slot +0x74, 0x70c370); otherwise the first kind is
+  0x70d600's.
+- **Custom animations**: `SMSG_GAMEOBJECT_CUSTOM_ANIM` (0x70be90) plays
+  Custom0 + n for n < 4 (table 0xa335e8: kinds 8-11) through 0x70c480, which
+  plays only a sequence the model has - no fallback. If the model is not
+  loaded yet the request waits (`obj+0x208`). `SMSG_GAMEOBJECT_DESPAWN_ANIM`
+  plays Despawn (kind 12) the same way.
+
+### Model events
+
+Every game object's model gets the event callback 0x70cac0 and the
+sequence-end callback 0x70cb10 (set in 0x712f30); 0x70cac0 hands the event to
+the handler's +0x40. Map doodads get 0x7bd5a0 instead. An event fires when its
+time in the playing sequence falls between the last animate and this one
+(0x832260 -> 0x830fb0, every lap of a looping sequence, scaled by the speed);
+an event with no stamps in the sequence never fires.
+
+| Tag | Game object (0x70c050) | Map doodad (0x7bd5a0) |
+|---|---|---|
+| `$GO0`-`$GO5` | GameObjectDisplayInfo Sound[0-5] (0x70bf70) | - |
+| `$GC0`-`$GC3` | Sound[6-9] | - |
+| `$DSL` | the data's loop on the handler's handle: not while it sounds, not when the same row plays within 6 yd (0x4cfe00, 36 at 0x9e8cf8), props 1.0 s fade in and out, loop, keep-alive | the same on the doodad's handle (`+0x158`), 3 s fade in (0x9ebbc4) |
+| `$DSE` | - | stop the doodad's loop |
+| `$DSO`, `$SND` | the data's row once at the event | `$DSO` only |
+| `$SHK` | SpellEffectCameraShakes row (0xad4854), three shakes (0x4f5960, 0x606410) | - |
+| `$EAC`, `$EDC`, `$EMV`, `$ETW` | - | map object (WMO) group toggles (0x6f7270, 0x6f61d0) |
+
+0x70bf70 reads `Sound[n]` of the object's display (`desc+0x8`): a row with the
+loop flag (0x200, 0x4c5bf0) goes on the handler's handle under the same two
+checks, with loop and keep-alive and no fades; any other row plays once at
+the event with default properties. Distances are the row's (MinDistance,
+DistanceCutoff).
+
+In the 3.3.5 data (3,790 displays; 513 of them have `$GO`/`$GC` events): `$GO1` sits in
+Open (148, 270 models), `$GO3` in Close (146, 194), `$GO0` in Stand or Closed
+(0/147), `$GO2` in Opened (149), `$GO4` in Destroy (150), `$GC0` in Custom0
+(153) - each at the frame the swing starts (StormwindDoor: Open 3000 ms with
+`$GO1` at 0 -> Sound[1] 8015 StormwindDoorOpen; Close 667 ms, `$GO3` at 0 ->
+8016). Chest01: Open `$GO1` -> 1277 ChestOpen, Close `$GO3` -> 1278. The
+fishing bobber: Custom0 (153) `$GC0` at 200 ms -> Sound[6] 3355 Fishing
+Hooked. 585 `$DSL` events on game object models (braziers, cauldrons).
+
+### Transports, elevators, ships
+
+- Their handlers fire nothing: a transport's own model is silent.
+  GameObjectDisplayInfo gives the ships, zeppelins, the icebreaker and the
+  Undercity lifts (455, 462) no sounds.
+- The ships and zeppelins are WMOs. Their doodads sound through 0x7bd5a0:
+  `ZepAnimation.m2` (in `transport_zeppelin.wmo`) has `$DSL` 5457
+  ZeppelinEngineLoop at 800 ms into ShipStart (162) and at 0 in ShipMoving
+  (163), `$DSO` 5458 ZeppelinHeliumOneShots at 33 ms into ShipMoving, `$DSE`
+  at 1966 ms into ShipStop (164); the icebreaker's paddlewheel `$DSL` 11840 in
+  ShipMoving. The classic ship (`transportship.wmo`) has no sounding doodad.
+- The arrival horns and bells are the server's (TaxiPathNode arrival and
+  departure events -> event scripts -> SMSG_PLAY_SOUND).
+- The 3.3 gunships and vehicles with a GameObjectDisplayInfo
+  ObjectEffectPackageID (18 displays: 8253 Orgrim's Hammer, 8254 The
+  Skybreaker, 9001/9002 the gunships...) get an effect package (0x712400 ->
+  0x6f7420) whose ObjectEffectGroup is switched per animation in 0x70d1e0
+  (0x6f17f0, 0x6f61d0 stop the old one, 0x6f7270 start the new one).
+
+### The sparkle
+
+`GAMEOBJECT_DYNAMIC` changes go to 0x712b40: a change of bit 0x8
+(`GO_DYNFLAG_LO_SPARKLE`, which the server sets for a player whose quest
+needs the object) calls 0x711210. Set - or, for the active player, the object
+is a FISHINGHOLE (25) or interactable and its lock has a skill key whose
+LockType is in the player's resource tracking (0x6dca90, `PLAYER_TRACK_RESOURCES`)
+- it flags the object (0x400000) and creates SpellVisualEffectName "HARDCODED
+Loot Art" (`Particles\LootFX.mdl`, table 0xada764 index 4, 0x6f75b0) on the
+object's model (attachment 0x13, at the origin when the model has none), at
+the object's scale x 1.15 (0xa33564), clamped (0x482940). Cleared: the
+effect is removed.
+
+### Wowee against this
+
+| Item | Stock | Wowee before | Now |
+|---|---|---|---|
+| Object model events | `$GO`/`$GC` -> Sound[n], `$DSL`/`$DSO`/`$SND` | not read: every door, chest, trap and cauldron silent | `M2Model::objectEvents`, fired by `M2Renderer` for game object instances (`setInstanceFiresObjectEvents`, `stepObjectEvents`, `passObjectEvents`) and played by `audio::GameObjectSounds` (one handle per object, the 6-yard rule, the loop flag) |
+| Loop on state change | stopped (0x70d690) | - | `GameObjectSounds::stopLoop` from `applyGameObjectState` |
+| Transport doodads | `$DSL`/`$DSE`/`$DSO` | silent | the transport WMO's doodads with events fire them; the loop follows the ship |
+| Fishing bite | the bobber's `$GC0` | "Fishing Hooked" played by hand at the bobber | the model's event (the hand-played sound removed) |
+| State animation | the kinds and the substitutes above, AnimationData chain with reverse and hold | Open/Close/Destroy with a guessed fallback; types frozen at the bind pose until their type was known; a model with one sequence held at its end when open | `goanim::kindForState`/`kindForStateChange`/`resolveKind` -> `M2Renderer::playInstanceSequence` (forward, backward, held first or last frame, then the state's loop in its mode); no type freezing |
+| Reversal mid-swing | mirrored start | from the start | mirrored (`instanceOneShotProgress`) |
+| Custom animations | n < 4, only a sequence the model has, back to the state | the sequence once, back to the idle (not the state) | the kind, back to the state's loop; Despawn held |
+| GO_FLAG_FREEZE_ANIMATION | pauses a motion | ignored | `setInstanceAnimationPaused` while the flag is up |
+| Quest sparkle | dynamic 0x8 -> Loot Art at scale x 1.15 | none on objects | `EntitySpawner::sparklingGameObjects` into the corpse sparkle (`LootSparkles`) |
+| Chest lids | animate (Closed, Open, Close) | every model named "chest" kept from animating (`m2_model_classifier`) | animate |
+
+Still different:
+
+- **Spawn** (kind 0) for a newly created object: the spawn path does not
+  carry the "new object" flag 0x712f30 receives, so it is not played.
+- **The descriptor's progress** (a motion caught mid-way when first seen) is
+  0xFFFF from AzerothCore for every non-transport and is not read.
+- **`$SHK`** on game objects is not played (no camera shake path for them).
+- **The tracking sparkle** (herbs and ore under Find Herbs / Find Minerals,
+  0x6dca90) and the sparkle's attachment 0x13 are not done: the sparkle sits
+  at the object's origin.
+- **Transport doodads' sequences**: Wowee plays ShipMoving (163) on every
+  transport doodad for good; stock switches ShipStart/ShipStop as the
+  transport starts and stops (not traced), so the zeppelin's engine loop
+  never ends at a dock here.
+- **ObjectEffectPackage** (the 3.3 gunships) and **DESTRUCTIBLE_BUILDING**'s
+  damage states (0x70e6a0: doodad sets and the destroyed WMO by
+  `GAMEOBJECT_FLAGS` 0x200/0x400) are not done.
+- **Elevators** (type 11) keep Wowee's transport-driven pose; the stock
+  handler (0x710820) times the model by the path and its state, not traced.
+- **The sparkle in game**: AzerothCore sent the Milly's Harvest crates only
+  0x1 (the GM's ACTIVATE) after `.quest add 3904`, never 0x8, so the client
+  side (which follows the flag) was not seen glittering; each change of an
+  object's dynamic flags is logged ("GO dynamic flags").
+
+### Testing in game
+
+- `.gobject set state <db guid> 0 <0|1|2>` drives a door or chest's state,
+  `.gobject set state <guid> 4 <n>` its custom animation, `-1` its despawn
+  animation. The Officer's Door in Stormwind (26262): the swing and its
+  sound on each change, no slam when shut half way open, Open run back for
+  ACTIVE_ALTERNATIVE -> READY. The Stolen Chest in Elwynn (26993, Chest01):
+  the lid and ChestOpen / ChestClose once each.
+- The Tirisfal and Grom'gol zeppelins: ZeppelinEngineLoop on the ship as it
+  comes in, ZeppelinHeliumOneShots every 4 s.

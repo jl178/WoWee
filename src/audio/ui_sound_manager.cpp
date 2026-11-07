@@ -44,11 +44,6 @@ bool UiSoundManager::initialize(pipeline::AssetManager* assets) {
     questFailedSounds_.resize(1);
     bool questFailedLoaded = loadSound("Sound\\Interface\\igQuestFailed.wav", questFailedSounds_[0], assets);
 
-    fishingBiteSounds_.resize(3);
-    loadSound("Sound\\Spells\\FishingBobber_Ver2_1.wav", fishingBiteSounds_[0], assets);
-    loadSound("Sound\\Spells\\FishingBobber_Ver2_2.wav", fishingBiteSounds_[1], assets);
-    loadSound("Sound\\Spells\\FishingBobber_Ver2_3.wav", fishingBiteSounds_[2], assets);
-
     lootCoinSmallSounds_.resize(1);
     bool lootCoinSmallLoaded = loadSound("Sound\\Interface\\LootCoinSmall.wav", lootCoinSmallSounds_[0], assets);
 
@@ -216,7 +211,6 @@ void UiSoundManager::setVolumeScale(float scale) {
 // Quest sounds
 void UiSoundManager::playQuestComplete() { playStock("igQuestListComplete", questCompleteSounds_); }
 void UiSoundManager::playQuestFailed() { playStock("igQuestFailed", questFailedSounds_); }
-void UiSoundManager::playFishingBite() { playStock("Fishing Hooked", fishingBiteSounds_); }
 
 // Loot sounds
 void UiSoundManager::playLootCoinSmall() { playStock("LOOTWINDOWCOINSOUND", lootCoinSmallSounds_); }

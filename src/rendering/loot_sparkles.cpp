@@ -55,7 +55,9 @@ void LootSparkles::update(M2Renderer* m2, pipeline::AssetManager* assets,
 
     std::unordered_set<uint64_t> lootable;
     lootable.reserve(corpses.size());
-    for (const auto& [guid, position] : corpses) {
+    for (const auto& corpse : corpses) {
+        const uint64_t guid = corpse.first;
+        const glm::vec3& position = corpse.second;
         lootable.insert(guid);
         auto it = instances_.find(guid);
         if (it != instances_.end() && m2->hasInstance(it->second)) {
@@ -63,7 +65,7 @@ void LootSparkles::update(M2Renderer* m2, pipeline::AssetManager* assets,
             m2->setInstancePosition(it->second, position);
             continue;
         }
-        const uint32_t id = m2->createInstance(MODEL_ID, position, glm::vec3(0.0f), 1.0f);
+        const uint32_t id = m2->createInstance(MODEL_ID, position, glm::vec3(0.0f), corpse.scale);
         if (id != 0) instances_[guid] = id;
     }
 

@@ -338,7 +338,6 @@ M2ClassificationResult classifyM2Model(
                               || has(n, "cauldron") || has(n, "cannon")
                               || has(n, "wagon") || has(n, "cart")
                               || has(n, "table") || has(n, "desk");
-    const bool chestName      = has(n, "chest");
 
     r.collisionSteppedFountain    = has(n, "fountain");
     r.collisionSteppedLowPlatform = !r.collisionSteppedFountain
@@ -585,7 +584,10 @@ M2ClassificationResult classifyM2Model(
     // stands down for clutter instead; see the isFoliage == 2 path in
     // m2.vert.glsl, which brushes it aside for the player and leaves the
     // authored motion alone.
-    r.disableAnimation = r.isFoliageLike || chestName;
+    // Chests animate: the stock client plays their Closed/Stand loop and
+    // their lid's Open and Close from the object's state (game_object_anim.hpp);
+    // a chest doodad plays its default sequence as any doodad does.
+    r.disableAnimation = r.isFoliageLike;
     // Ground clutter is foliage whether or not its name says so: the detail
     // doodads the ground-effect scatterer places are grass, weeds and flowers,
     // and most of them are named for their tileset rather than for a plant

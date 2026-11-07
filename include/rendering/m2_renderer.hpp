@@ -204,6 +204,9 @@ struct M2ModelGPU {
     std::vector<pipeline::M2Bone> bones;
     std::vector<pipeline::M2Sequence> sequences;
     std::vector<uint32_t> globalSequenceDurations;  // Loop durations for global sequence tracks
+    /// The object events per sequence index (M2Model::objectEvents): fired at
+    /// run time for the instances that ask for them (setInstanceFiresObjectEvents).
+    std::vector<std::vector<pipeline::M2Model::ObjectEvent>> objectEvents;
     bool hasAnimation = false;  // True if any bone has keyframes
     /// Every bone track holds at most one key per sequence (global ones
     /// included) and no bone billboards, so the pose depends on which
@@ -605,6 +608,20 @@ struct alignas(64) M2Instance {
 
     // megaBoneOffset sits after modelMatrix, with the other fields the draw reads.
 
+    /// How the thenLoopSequence plays once the held one-shot ends: an
+    /// anim::PlayMode (0 forward, 1 backward, 2 held on the first frame,
+    /// 3 held on the last) - an AnimationData fallback can hold or reverse it.
+    uint8_t thenLoopMode = 0;
+    /// A motion paused by GO_FLAG_FREEZE_ANIMATION: the direction it had,
+    /// restored when the flag goes (0 = not paused).
+    int8_t pausedDir = 0;
+    /// Fires its model's object events (game objects, transport doodads).
+    bool firesObjectEvents = false;
+    /// The sequence and the time up to which its events have been fired; a
+    /// sequence index that is not the current one means "from its start".
+    int16_t eventSeq = -1;
+    float eventCursorMs = 0.0f;
+
     void updateModelMatrix();
 };
 
@@ -915,6 +932,50 @@ public:
                                   bool skipToEnd,
                                   uint32_t thenLoopAnimationId = UINT32_MAX);
 
+    /// Play a game object's kind (anim/game_object_anim.hpp): `animationId`
+    /// in `mode` (an anim::PlayMode, as the AnimationData fallback chose it),
+    /// then, when `thenAnimationId` is given, that one in `thenMode` for good.
+    /// A forward or backward one-shot starts `startFraction` of the way in
+    /// (a door told to shut half way through opening). `blend` cross-fades;
+    /// `fireEvents` fires the new sequence's events from its start - not for
+    /// a pose that is only being shown (first sight). False when the model
+    /// has no sequence of that id.
+    bool playInstanceSequence(uint32_t instanceId, uint32_t animationId, uint8_t mode,
+                              uint32_t thenAnimationId, uint8_t thenMode, float startFraction,
+                              bool blend, bool fireEvents);
+    /// How far the one-shot playing now has got, 0..1 along its direction;
+    /// nullopt when no one-shot is playing.
+    [[nodiscard]] std::optional<float> instanceOneShotProgress(uint32_t instanceId) const;
+    /// GO_FLAG_FREEZE_ANIMATION: stop a moving sequence where it is, and let
+    /// it go on again.
+    void setInstanceAnimationPaused(uint32_t instanceId, bool paused);
+    /// The first sequence's id (anim::resolveFallback's last resort), or 0.
+    [[nodiscard]] uint32_t firstSequenceId(uint32_t instanceId) const;
+    /// The id of the sequence playing now, nullopt when there is none.
+    [[nodiscard]] std::optional<uint32_t> currentSequenceId(uint32_t instanceId) const;
+
+    /// An object event that fired this frame (isM2ObjectEventTag), where it
+    /// sits now in render coordinates.
+    struct FiredObjectEvent {
+        uint32_t instanceId = 0;
+        uint32_t tag = 0;
+        uint32_t data = 0;
+        glm::vec3 position{0.0f};
+    };
+    /// Fire the instance's model events as its sequences reach them (the
+    /// stock M2 event pass, 0x832260 -> 0x830fb0: an event whose time falls
+    /// in (last frame, this frame] of the playing sequence, every lap).
+    void setInstanceFiresObjectEvents(uint32_t instanceId, bool fires);
+    [[nodiscard]] bool instanceHasObjectEvents(uint32_t instanceId) const;
+    /// The instance's model matrix (render space); false when it is gone.
+    bool getInstanceModelMatrix(uint32_t instanceId, glm::mat4& out) const;
+    /// The events fired since the last call, in order.
+    std::vector<FiredObjectEvent> takeObjectEvents() {
+        std::vector<FiredObjectEvent> out;
+        out.swap(firedObjectEvents_);
+        return out;
+    }
+
     /// Light an instance while it is being pressed on. 0 clears it.
     void setInstanceHighlight(uint32_t instanceId, float amount);
     /// See M2Instance::fade.
@@ -984,12 +1045,6 @@ public:
     std::optional<float> getInstanceFloorHeight(uint32_t instanceId,
                                                 float glX, float glY, float glZ) const;
 
-    /// The id of an instance's only animation, where it has exactly one.
-    ///
-    /// A door with no OPEN or CLOSE sequence of its own carries one animation
-    /// and that animation is the opening. Undercity's lift doors are the case:
-    /// one bone, one sequence, id 0, 3333ms.
-    [[nodiscard]] std::optional<uint32_t> soleSequenceId(uint32_t instanceId) const;
     /// True while the instance is still live in the renderer. Owners that cache
     /// instance IDs (game objects, transports) use this to notice an instance
     /// that was dropped underneath them - e.g. by a renderer-wide clear - and
@@ -1801,6 +1856,14 @@ private:
 
     // Fast-path instance index lists (rebuilt in rebuildSpatialIndex / on create)
     std::vector<size_t> animatedInstanceIndices_;   // hasAnimation && !disableAnimation
+    /// Instances that fire object events, by id (a few hundred game objects
+    /// and transport doodads at most), and what they fired this frame.
+    std::unordered_set<uint32_t> objectEventInstances_;
+    std::vector<FiredObjectEvent> firedObjectEvents_;
+    /// After the bones: step the clocks of the event instances nothing else
+    /// steps and fire what their sequences passed.
+    void stepObjectEvents();
+    void fireObjectEvents(M2Instance& inst);
     std::vector<size_t> boatInstanceIndices_;       // cachedIsBoat: the afloat check
     std::vector<size_t> lightInstanceIndices_;      // lanterns, torches, braziers, forges, lava: gatherLocalLights
     bool lightFlicker_ = false;   // lamps gutter (enhancement)
@@ -1833,9 +1896,15 @@ private:
         const float dt = static_cast<float>(sceneTimeMs_ - inst.clockStampMs);
         if (dt <= 0.0f) return;
         inst.clockStampMs = sceneTimeMs_;
-        inst.animTime += dt;
         inst.globalSequenceTime += dt;
         const bool stepped = inst.cachedHasAnimation && !inst.cachedDisableAnimation;
+        if (!stepped && inst.firesObjectEvents) {
+            // Its sequences still pass their events: at its own speed (held,
+            // backwards), and its ends are stepObjectEvents' to handle.
+            inst.animTime += dt * inst.animSpeed;
+            return;
+        }
+        inst.animTime += dt;
         if (!stepped && inst.animDuration > 0.0f && inst.animTime >= inst.animDuration) {
             inst.animTime = std::fmod(inst.animTime, inst.animDuration);
         }
