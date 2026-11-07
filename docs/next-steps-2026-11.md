@@ -407,4 +407,19 @@ rework (2.1) owns its files until it lands.
 Parallel-safe at any time: the wowpack lane; RE-only spec writing (Ghidra,
 no source edits); doc work.
 
+## Queued (Jered, Nov 6)
+
+- Cloth motion pass, starts after the GO and macro agents land (shares character_renderer):
+  1. Stronger, more visible cloak motion with a strength slider (E7 "Capes, tails and hair").
+  2. Robes and skirts sway with the legs: a small sway on the hem vertices' leg bones.
+  3. Tabard and belt flaps, loincloths, and cape-vs-body collision.
+  4. Shoulder pads and dangling armor bits: try last, keep only if it looks good.
+
 ## Log
+- Nov 06 14:34: 6 agents running (charge/cast-death, defaults, shadows rework, game objects, ASan soak, macros/bindings). Lab has IP+City Siege+Tol Barad pack 0.3.0; live deploy awaits Jered.
+- Nov 06 15:34: 6 agents still running; none reported. Load ~25.
+- Nov 06 15:35: Jered's defaults committed.
+- Nov 06 16:05: shadow fixes committed (bias units bug, sharper kept map, cheaper filter); contact shadows off by default. Note: test clients open on Jered's workspace 2 - keep test windows small/rare while he plays.
+- Nov 06 18:21: 5-hour usage limit stopped charge, macros, ASan (and probably GO) at ~16:20; resumed all four after the reset.
+- Nov 06 18:30: charge/cast-death fixed (fake client charge removed, player follows server splines with SPLINE_DONE, knockback, E10 smoothing only reported corrections, cancelSpellCast). Held: shares application/character_renderer/spell_handler/game_handler/debug_lua_hook with the GO and macro agents still running; commit together after a full build.
+- Nov 06 18:34: GO, macros, ASan agents running; charge work held for joint commit.
