@@ -10,6 +10,7 @@
 #include "ui/ui_colors.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "ui/keybinding_manager.hpp"
+#include <unordered_map>
 #include <chrono>
 #include <cfloat>
 #include <cctype>
@@ -37,6 +38,8 @@
 #include <imgui.h>
 #include <fstream>
 #include "core/app_clock.hpp"
+#include "core/application.hpp"
+#include "pipeline/asset_manager.hpp"
 #include "core/config_paths.hpp"
 #include "core/env_flag.hpp"
 #include <filesystem>
@@ -3886,7 +3889,25 @@ int lua_Texture_SetTexture(lua_State* L) {
         w->solidColor = false;
         w->texturePath = luaL_optstring(L, 2, "");
     }
-    return 0;
+    // Stock answers 1 when the texture is there and nil when it is not, and
+    // FrameXML tests it: LFDDungeonReadyDialog falls back to the Deadmines
+    // picture when SetTexture fails. Returning nothing made every call a
+    // failure - Halls of Lightning's ready popup showed the Deadmines.
+    if (w->solidColor) { lua_pushnumber(L, 1); return 1; }
+    if (w->texturePath.empty()) return 0;
+    auto* assets = core::Application::getInstance().getAssetManager();
+    if (!assets) { lua_pushnumber(L, 1); return 1; }
+    static std::unordered_map<std::string, bool> known;
+    auto [it, fresh] = known.try_emplace(w->texturePath, false);
+    if (fresh) {
+        std::string path = w->texturePath;
+        const size_t slash = path.find_last_of("\\/");
+        if (path.find('.', slash == std::string::npos ? 0 : slash) == std::string::npos) path += ".blp";
+        it->second = assets->fileExists(path);
+    }
+    if (!it->second) return 0;
+    lua_pushnumber(L, 1);
+    return 1;
 }
 int lua_Texture_GetTexture(lua_State* L) {
     const auto* w = widgetOf(L, 1);
