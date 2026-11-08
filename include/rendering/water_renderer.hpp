@@ -90,6 +90,13 @@ constexpr int kMaxWakePoints = 32;
 
 struct WaterFrameUBOData {
     glm::mat4 reflViewProj{1.0f};
+    // The view-projection the scene depth/colour copy (set 2 bindings 0-1)
+    // was rendered with. With MSAA or an upscaler the copy is last frame's,
+    // so a lookup at this frame's screen position read the scene from where
+    // the camera was: the shoreline band and caustics trailed a moving
+    // camera. The shaders project the surface with this to find its pixel
+    // in the copy. Equal to this frame's matrix when the copy is fresh.
+    glm::mat4 historyViewProj{1.0f};
     glm::vec4 wakeBounds{0.0f};              // xy = centre, z = cull radius, w = count
     glm::vec4 wakePoints[kMaxWakePoints]{};  // xy = pos, z = age 0..1, w = strength
     // Light.dbc liquid colours: rgb, a = LightParams' shallow alpha on the
@@ -186,6 +193,9 @@ public:
     /// No reflection this frame: the matrix goes to zero, which the shader
     /// reads as "nothing drawn" (w <= 0), so a pass that did not run - the
     /// setting off, the camera under the surface - leaves no stale sky.
+    /// This frame's view-projection, as the scene is rendered with it; the
+    /// scene copy taken this frame is tagged with it (historyViewProj).
+    void setFrameViewProj(const glm::mat4& viewProj) { frameViewProj_ = viewProj; }
     void clearReflection() { frameUBO_.reflViewProj = glm::mat4(0.0f); }
 
     /// Feed the surface disturbance left by something moving through the water.
@@ -400,6 +410,8 @@ private:
     };
     std::vector<WakePoint> wakePoints_;
     WaterFrameUBOData frameUBO_{};
+    glm::mat4 frameViewProj_{1.0f};
+    glm::mat4 historyViewProj_[SCENE_HISTORY_FRAMES] = {glm::mat4(1.0f), glm::mat4(1.0f)};
     glm::vec2 lastWakeEmitPos_{0.0f};
     bool hasWakeEmitPos_ = false;
 

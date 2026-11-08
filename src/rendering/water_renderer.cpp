@@ -1921,6 +1921,10 @@ void WaterRenderer::captureSceneHistory(VkCommandBuffer cmd,
     }
 
     sceneHistoryReady = true;
+    // The camera this slot's copy was rendered with, for the shaders to find
+    // the surface's pixel in it (WaterFrameUBOData::historyViewProj).
+    historyViewProj_[fi] = frameViewProj_;
+    uploadFrameUBO();
 }
 
 // ==============================================================
@@ -2452,6 +2456,7 @@ void WaterRenderer::updateReflectionUBO(const glm::mat4& reflViewProj) {
 void WaterRenderer::uploadFrameUBO() {
     if (!reflectionUBOMapped || !vkCtx) return;
     const uint32_t slot = vkCtx->getCurrentFrame() % SCENE_HISTORY_FRAMES;
+    frameUBO_.historyViewProj = historyViewProj_[slot];
     std::memcpy(static_cast<char*>(reflectionUBOMapped) + slot * kFrameUBOStride,
                 &frameUBO_, sizeof(frameUBO_));
 }

@@ -65,6 +65,7 @@ const int MAX_WAKE_POINTS = 32;
 
 layout(set = 2, binding = 3) uniform WaterFrameData {
     mat4 reflViewProj;
+    mat4 historyViewProj;  // the camera SceneDepth/SceneColor were rendered with
     vec4 wakeBounds;                  // xy = centre, z = cull radius, w = count
     vec4 wakePoints[MAX_WAKE_POINTS]; // xy = world pos, z = age 0..1, w = strength
     // Light.dbc liquid colours (LightIntBand 14-17), rgb, with LightParams'
@@ -138,6 +139,27 @@ vec3 dualScrollWaveNormal(vec2 p, float time) {
 // ============================================================
 float linearizeDepth(float d, float near, float far) {
     return near * far / (far - d * (far - near));
+}
+
+// Where a surface point lies in the scene copy (SceneDepth), and that copy's
+// camera depth of it. With MSAA or an upscaler the copy is an earlier frame's
+// (WaterFrameUBOData::historyViewProj), so reading it at this frame's pixel
+// read the scene from where the camera had been: the shoreline band trailed
+// a turning camera and settled when it stopped. The point is projected by
+// both cameras and this pixel's uv moved by the difference, which needs no
+// assumption about the target's y direction and is nothing when the copy is
+// this frame's.
+void historyLookup(vec3 worldPos, vec2 screenUV, out vec2 uv, out float linDepth) {
+    vec4 cc = projection * (view * vec4(worldPos, 1.0));
+    vec4 hc = historyViewProj * vec4(worldPos, 1.0);
+    uv = screenUV;
+    linDepth = cc.w;
+    if (cc.w <= 1e-4 || hc.w <= 1e-4) return;
+    vec2 ndcC = cc.xy / cc.w;
+    vec2 ndcH = hc.xy / hc.w;
+    float ySign = abs(screenUV.y - (ndcC.y * 0.5 + 0.5)) <= abs(screenUV.y - (0.5 - ndcC.y * 0.5)) ? 1.0 : -1.0;
+    uv = screenUV + vec2(ndcH.x - ndcC.x, (ndcH.y - ndcC.y) * ySign) * 0.5;
+    linDepth = hc.w;
 }
 
 // ============================================================
@@ -370,7 +392,10 @@ void main() {
         float near = push.depthRange.x;
         float far = push.depthRange.y;
         float waterLinDepth = linearizeDepth(gl_FragCoord.z, near, far);
-        float depthBelow = waterDepthBelow(screenUV, waterLinDepth, near, far, abs(viewDir.z));
+        vec2 historyUV;
+        float historyLin;
+        historyLookup(FragPos, screenUV, historyUV, historyLin);
+        float depthBelow = waterDepthBelow(historyUV, historyLin, near, far, abs(viewDir.z));
         if (depthBelow >= 0.0) {
             float near01 = 1.0 - smoothstep(40.0, 150.0, dist);
             float phase = noiseValue(FragPos.xy * 0.07) * 6.28318;

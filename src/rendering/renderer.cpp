@@ -651,6 +651,7 @@ void Renderer::updatePerFrameUBO() {
 
     currentFrameData.view = camera->getViewMatrix();
     currentFrameData.projection = camera->getProjectionMatrix();
+    if (waterRenderer) waterRenderer->setFrameViewProj(currentFrameData.projection * currentFrameData.view);
     // w, which no shader read, is the ground's relief; see setTerrainRelief.
     currentFrameData.viewPos = glm::vec4(camera->getPosition(), terrainRelief_);
     currentFrameData.fogParams.z = globalTime;
