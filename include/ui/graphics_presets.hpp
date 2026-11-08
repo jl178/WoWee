@@ -117,6 +117,13 @@ constexpr rendering::Enhancements enhancedEnhancements() {
     e.softParticles = true;
     e.hdWater = true;
     e.waterReflections = true;
+    // And how it plays (docs/re/enhanced-combat.md, kEnhancedCombatValues):
+    // fades from the drawn pose, smoothed other units, the 400 ms spell
+    // queue and the swing timer.
+    e.poseBlend = true;
+    e.remoteSmoothing = true;
+    e.spellQueueWindow = 400;
+    e.swingTimer = true;
     return e;
 }
 
