@@ -20,8 +20,14 @@ namespace rendering {
 
 class VkContext;
 
+/// The same frame serves the "Ambient occlusion" row (ambient_occlusion.frag):
+/// another fragment shader with the same inputs and the same dst * src blend,
+/// named at construction.
 class ContactShadowPass {
 public:
+    explicit ContactShadowPass(const char* fragSpv = "assets/shaders/contact_shadow.frag.spv",
+                               const char* name = "Contact shadows")
+        : fragSpv_(fragSpv), name_(name) {}
     ~ContactShadowPass() { shutdown(); }
 
     /// The depth set, the layout and the pipeline for `pass` (the overlay
@@ -37,6 +43,8 @@ public:
                 const glm::mat4& invViewProj, float darkness);
 
 private:
+    const char* fragSpv_;
+    const char* name_;
     VkContext* ctx_ = nullptr;
     SoftParticlePass depth_;
     VkPipelineLayout layout_ = VK_NULL_HANDLE;

@@ -50,6 +50,12 @@ struct Enhancements {
     /// light away where it is blocked (contact_shadows.hpp, E14). Only with
     /// `shadows`; off is the shadow map alone.
     bool  contactShadows = false;
+    /// Corners, creases, the ground under a tree's roots and the foot of a
+    /// wall lose some of the sky's light, as the reference client's ASSAO darkens them
+    /// (ambient_occlusion.hpp, docs/re/enhanced-lighting.md section 4). Only
+    /// the ambient share of each pixel's light is taken; sunlit faces keep
+    /// the sun. Off is stock: no occlusion.
+    bool  ambientOcclusion = false;
     /// Units and doodads inside a building take the light of the room around
     /// them, read from a grid of probes baked from the group's MOCV and MODD
     /// colours at load: warm in a tavern, cold in a crypt, darker in a corner
@@ -92,6 +98,14 @@ struct Enhancements {
     /// above 0.8 instead, scaled to the glow's own reach (highlight_rolloff.hpp,
     /// E18). Nothing below 0.8 changes, and with no glow nothing changes.
     bool  highlightRollOff = false;
+    /// the reference client's daytime colour grade on the two continents: its noon
+    /// LUT's per-channel curve, weighted by the hour (enhanced_grade.hpp).
+    /// Off is the stock picture, ungraded.
+    bool  colorGrade = false;
+    /// The day's light shifted the way the reference client re-authored 1.12's on the
+    /// two continents: a whiter sun, brighter fill light, a brighter and
+    /// bluer sky and haze (enhanced_palette.hpp). Off is Light.dbc's colours.
+    bool  enhancedDaylight = false;
 
     // ---- Water and weather -------------------------------------------------
     bool  shorelineFoam = false;

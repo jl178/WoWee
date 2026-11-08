@@ -225,7 +225,8 @@ public:
         MEDIUM = 2,
         HIGH = 3,
         ULTRA = 4,
-        CLASSIC = 5   ///< the stock picture; see kGraphicsPresets
+        CLASSIC = 5,  ///< the stock picture; see kGraphicsPresets
+        ENHANCED = 6   ///< the the reference client look; see enhancedEnhancements
     };
     GraphicsPreset currentGraphicsPreset = GraphicsPreset::CUSTOM;
     GraphicsPreset pendingGraphicsPreset = GraphicsPreset::CUSTOM;

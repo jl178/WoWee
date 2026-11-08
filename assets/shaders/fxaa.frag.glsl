@@ -34,13 +34,13 @@ layout(push_constant) uniform PC {
     float glowAmount;   // LightParams.Glow: the blur, squared, added at this strength
     float glowBlend;    // how far the picture is swapped for its blur (water, drink)
     float glowSource;   // 1 when uGlow holds this frame's boxed-down scene
-    float pad2;
+    float gradeWeight;  // Enhanced's colour grade (enhanced_grade.hpp): 0 = off
     float netherFade;   // ScreenEffect type 2: ffxnethercombine's c0.w, 0 = off
     float waveOn;       // 1 under liquid: the glow's last pass is ffxglowwave
     float waveU;        // the wave map's scroll, (t mod 3.174 s) / 3.174
     float waveV;        //                        (t mod 2.805 s) / 2.805
     float effectTime;   // seconds, for the nether blur's moving taps
-    float pad3;
+    float gradeCurve;   // 0 the Eastern Kingdoms curve, 1 Kalimdor's
     float pad4;
     float pad5;
 } pc;
@@ -170,9 +170,41 @@ vec3 highlightRollOff(vec3 x) {
     return mix(x, knee + (1.0 - knee) * s, greaterThan(x, vec3(knee)));
 }
 
+// the reference client's daytime colour grade (not stock; enhanced_grade.hpp has the
+// values and where they come from): one curve per channel, read from its LUTs
+// 8286666 (Eastern Kingdoms) and 8286665 (Kalimdor), over the finished
+// picture clamped to 0..1 as ffxcolorgrading.bls reads it. The weight is the
+// hour's share of the noon keyframe that carries it, outdoors only.
+const float kGradeEK[32] = float[](
+    0.000, 0.031, 0.063, 0.094, 0.129, 0.165, 0.200, 0.235,
+    0.267, 0.306, 0.341, 0.376, 0.412, 0.451, 0.490, 0.529,
+    0.565, 0.604, 0.647, 0.686, 0.725, 0.765, 0.804, 0.851,
+    0.890, 0.929, 0.957, 0.980, 0.988, 0.996, 0.996, 1.000);
+const float kGradeKal[32] = float[](
+    0.000, 0.031, 0.063, 0.094, 0.129, 0.165, 0.196, 0.231,
+    0.263, 0.302, 0.337, 0.373, 0.408, 0.443, 0.482, 0.518,
+    0.553, 0.588, 0.631, 0.667, 0.706, 0.741, 0.780, 0.824,
+    0.863, 0.902, 0.937, 0.969, 0.988, 0.996, 0.996, 1.000);
+
+float gradeChannel(float x, bool kalimdor) {
+    float t = clamp(x, 0.0, 1.0) * 31.0;
+    int i = min(int(t), 30);
+    float f = t - float(i);
+    float a = kalimdor ? kGradeKal[i] : kGradeEK[i];
+    float b = kalimdor ? kGradeKal[i + 1] : kGradeEK[i + 1];
+    return mix(a, b, f);
+}
+
+vec3 enhancedGrade(vec3 c) {
+    bool kal = pc.gradeCurve > 0.5;
+    vec3 g = vec3(gradeChannel(c.r, kal), gradeChannel(c.g, kal), gradeChannel(c.b, kal));
+    return mix(c, g, pc.gradeWeight);
+}
+
 vec3 stockScreenEffect(vec3 c, vec2 uv) {
     vec3 r = stockScreenEffectComposite(c, uv);
     if (pc.rollWhite > 0.0) r = highlightRollOff(r);
+    if (pc.gradeWeight > 0.0) r = enhancedGrade(r);
     return r;
 }
 

@@ -1699,6 +1699,13 @@ wowee_add_test(test_phase2_surfaces
 wowee_add_test(test_phase2_light
     SOURCES test_phase2_light.cpp)
 
+# ── test_enhanced_look ───────────────────────────────────────
+# The Enhanced look (docs/re/enhanced-lighting.md): the colour grade's curves,
+# its hour weight and its copy in fxaa.frag, and the Enhanced preset row.
+wowee_add_test(test_enhanced_look
+    SOURCES test_enhanced_look.cpp)
+target_compile_definitions(test_enhanced_look PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
 # ── test_weather_fx ─────────────────────────────────────────
 # The weather page (E23-E31, rendering/weather_fx.hpp): the intensity slider
 # is the stock count at 1, the preview's rows, the zones' climates, the

@@ -2032,13 +2032,13 @@ void PostProcessPipeline::renderFXAAPass() {
         glowWanted() ? glowAmount_ : 0.0f,
         glowWanted() ? glowBlend_ : 0.0f,
         fxaa_.glowImage.image ? 1.0f : 0.0f,
-        0.0f,
+        gradeWeight_,
         nether_,
         wave ? 1.0f : 0.0f,
         static_cast<float>(nowMs % 3174u) / 3174.0f,
         static_cast<float>(nowMs % 2805u) / 2805.0f,
         static_cast<float>(nowMs % 3600000u) * 0.001f,
-        0.0f, 0.0f, 0.0f
+        gradeKalimdor_ ? 1.0f : 0.0f, 0.0f, 0.0f
     };
     vkCmdPushConstants(currentCmd_, fxaa_.pipelineLayout,
                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), pc);

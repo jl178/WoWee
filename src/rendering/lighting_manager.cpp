@@ -1,5 +1,6 @@
 #include "core/local_time.hpp"
 #include "rendering/lighting_manager.hpp"
+#include "rendering/enhanced_palette.hpp"
 #include "rendering/light_coords.hpp"
 #include "rendering/light_band_block.hpp"
 #include "rendering/stock_day_night.hpp"
@@ -609,6 +610,21 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         const float scale = 1.0f / strength;
         newParams.fogStart *= scale;
         newParams.fogEnd = std::min(newParams.fogEnd * scale, std::max(viewDistance_, 1.0f));
+    }
+
+    // Enhanced daylight (not stock; enhanced_palette.hpp): the reference client's
+    // re-authored lights against 1.12's, as a trend, by day on the two
+    // continents. The sky's fog band takes the fog colour's change too.
+    if (enhancedDaylight_ && !authoredFogOnly && enhanced_palette::appliesToMap(mapId)) {
+        namespace fp = enhanced_palette;
+        const float w = glm::clamp(dayIntensity, 0.0f, 1.0f);
+        newParams.diffuseColor = fp::apply(newParams.diffuseColor, fp::kDirect, w);
+        newParams.ambientColor = fp::apply(newParams.ambientColor, fp::kAmbient, w);
+        newParams.skyTopColor = fp::apply(newParams.skyTopColor, fp::kSkyTop, w);
+        newParams.skyMiddleColor = fp::apply(newParams.skyMiddleColor, fp::kSkyMiddle, w);
+        newParams.fogColor = fp::apply(newParams.fogColor, fp::kSkyFog, w);
+        newParams.skyFogColor = fp::apply(newParams.skyFogColor, fp::kSkyFog, w);
+        newParams.sunColor = fp::apply(newParams.sunColor, fp::kSun, w);
     }
 
     // No headroom scaling of ambient + diffuse: the stock shaders clamp

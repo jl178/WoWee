@@ -20,8 +20,9 @@ namespace wowee {
 namespace ui {
 
 /// What each quality preset means, in the order Low, Medium, High, Ultra,
-/// Classic. Classic is last because it was added last, not because it is the
-/// most demanding: it is off the Low-to-Ultra ladder (see kClassicPresetIndex).
+/// Classic, Enhanced. Classic and Enhanced come last because they were added
+/// last, not because of what they ask: both are off the Low-to-Ultra ladder
+/// (see kClassicPresetIndex).
 ///
 /// That order is what the config file holds. graphics_preset is written as an
 /// index - 0 for Custom, then one per row here - so a preset added at the front
@@ -95,6 +96,30 @@ constexpr rendering::Enhancements presetEnhancements(int level /* 0 Low .. 3 Ult
     return e;
 }
 
+/// The Enhanced look: Ultra plus what the reference client (1.60.1) draws that the
+/// ladder leaves out, at Enhanced's own values where they are known
+/// (docs/re/enhanced-lighting.md section 8). Its ambient occlusion (ASSAO,
+/// SSAOSettings 116), its noon colour grade and its daylight are rows of
+/// their own; its "Compute Effects 3" volumetric fog is the light volume
+/// at twice the mist; its
+/// "Depth Based Opacity" is the soft particles; its PBR water and screen-space
+/// reflections are the HD water and the sky in it.
+constexpr rendering::Enhancements enhancedEnhancements() {
+    rendering::Enhancements e = presetEnhancements(3);
+    e.ambientOcclusion = true;
+    e.colorGrade = true;
+    e.enhancedDaylight = true;
+    // Enhanced's haze is thick and golden toward the sun; Medium's volume
+    // at twice the mist reads closest side by side, and High's volume costs
+    // 2.5 ms more GPU (1280x540, Jered's laptop) for little visible change.
+    e.lightShafts = 2;
+    e.mistDensity = 2.0f;
+    e.softParticles = true;
+    e.hdWater = true;
+    e.waterReflections = true;
+    return e;
+}
+
 // The quality columns. Shadows are on from Low up (an enhancement row, so
 // Classic has the stock blob instead); Low leans on its short shadow distance,
 // which is where the cost is. FXAA is off on every row: Ultra used to turn it
@@ -116,6 +141,10 @@ constexpr GraphicsPresetValues kGraphicsPresets[] = {
     /* High   */ {.viewDistance = 1600.0f, .shadowDistance = 350.0f, .antiAliasing = 2, .fxaa = false, .groundClutter = 100, .enh = presetEnhancements(2)},
     /* Ultra  */ {.viewDistance = 2400.0f, .shadowDistance = 500.0f, .antiAliasing = 3, .fxaa = false, .groundClutter = 150, .enh = presetEnhancements(3)},
     /* Classic */ {.viewDistance = kDefaultViewDistance, .shadowDistance = 350.0f, .antiAliasing = 2, .fxaa = false, .groundClutter = 100, .enh = rendering::Enhancements{}},
+    // Enhanced: Ultra's distances and clutter, and FXAA in place of
+    // multisampling, as Enhanced's own edge filter (CMAA2) is a post pass -
+    // which also leaves a one-sample depth for the occlusion pass to read.
+    /* Enhanced */ {.viewDistance = 2400.0f, .shadowDistance = 500.0f, .antiAliasing = 0, .fxaa = true, .groundClutter = 150, .enh = enhancedEnhancements()},
 };
 
 /// The number of presets, not counting Custom - which is not a set of values
@@ -124,9 +153,11 @@ inline constexpr int kGraphicsPresetCount =
     static_cast<int>(sizeof(kGraphicsPresets) / sizeof(kGraphicsPresets[0]));
 
 /// Classic's row. The ones before it are the Low-to-Ultra ladder, each asking
-/// for more than the last; Classic stands beside it.
+/// for more than the last; Classic stands beside it, and Enhanced after it.
 inline constexpr int kClassicPresetIndex = 4;
-static_assert(kClassicPresetIndex == kGraphicsPresetCount - 1, "Classic is the last row");
+/// The Enhanced look's row: the whole set of Enhanced-matched enhancements.
+inline constexpr int kEnhancedPresetIndex = 5;
+static_assert(kEnhancedPresetIndex == kGraphicsPresetCount - 1, "Enhanced is the last row");
 
 }  // namespace ui
 }  // namespace wowee

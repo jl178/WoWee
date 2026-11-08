@@ -2327,7 +2327,7 @@ void GameScreen::loadSettings() {
             else if (key == "auto_face_target") settingsPanel_.pendingAutoFaceTarget = (std::stoi(val) != 0);
             else if (key == "graphics_preset") {
                 int presetVal = std::clamp(std::stoi(val), 0,
-                                           static_cast<int>(SettingsPanel::GraphicsPreset::CLASSIC));
+                                           static_cast<int>(SettingsPanel::GraphicsPreset::ENHANCED));
                 settingsPanel_.currentGraphicsPreset = static_cast<SettingsPanel::GraphicsPreset>(presetVal);
                 settingsPanel_.pendingGraphicsPreset = settingsPanel_.currentGraphicsPreset;
             }

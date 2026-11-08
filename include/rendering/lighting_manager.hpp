@@ -326,6 +326,8 @@ public:
     /// default; 1 is the sky itself. A Wowee option. See
     /// LightingManager::update.
     void setFogSkyBlend(float blend) { fogSkyBlend_ = blend; }
+    /// the reference client's daylight trend over 1.12's lights (enhanced_palette.hpp).
+    void setEnhancedDaylight(bool on) { enhancedDaylight_ = on; }
     [[nodiscard]] float getFogSkyBlend() const { return fogSkyBlend_; }
     /// How much distance fog, as a multiplier on the zone's own fog distances.
     /// 1 is the DBC unchanged (stock, and the default), above 1 is thicker,
@@ -490,6 +492,7 @@ private:
     std::string wmoSkybox_;
     bool playerDead_ = false;
     float fogSkyBlend_ = 0.0f;
+    bool enhancedDaylight_ = false;
     float fogStrength_ = 1.0f;
     /// stock_light::usesFarClipFog for the map being drawn; read by
     /// sampleLightParams, which shapes each light's fog the way 0x7ecd80

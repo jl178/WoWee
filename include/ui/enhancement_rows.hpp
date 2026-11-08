@@ -130,6 +130,16 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "ContactShadowPass (built on first use): one full-screen pass after the "
                  "scene closes, a short ray per pixel within 24 yd, dst * src",
      .enabledWhen = "shadows", .asBool = &Enhancements::contactShadows},
+    {.key = "ambientocclusion", .label = "Ambient occlusion", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPage, .section = "",
+     .tooltip = "Corners, creases, the ground between roots and the foot of a\n"
+                "wall lose some of the sky's light, so things sit in the world\n"
+                "instead of floating on it. Sunlit faces keep the sun. Tuned to\n"
+                "the reference client's settings (screen-space ambient occlusion).",
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "ambient_occlusion",
+     .controls = "AmbientOcclusionPass (built on first use): one full-screen pass after "
+                 "the scene closes, eight depth taps per pixel within 1 yd, dst * src",
+     .asBool = &Enhancements::ambientOcclusion},
     {.key = "indoorlight", .label = "Room light indoors", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPage, .section = "",
      .tooltip = "Characters and objects inside buildings take the colour of\n"
@@ -280,6 +290,26 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "highlight_rolloff.hpp): a push constant; off and in a zone with "
                  "no glow the composite is the stock one",
      .asBool = &Enhancements::highlightRollOff},
+    {.key = "colorgrade", .label = "Colour grade (the reference client)", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageSky, .section = "",
+     .tooltip = "the reference client's daytime grade in Azeroth and Kalimdor: brighter\n"
+                "mid-tones and richer colour around midday, easing off toward\n"
+                "morning and evening. Indoors, at night and in dungeons the\n"
+                "picture is unchanged.",
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "color_grade",
+     .controls = "the curve at the end of the glow composite (fxaa.frag, "
+                 "enhanced_grade.hpp): two push constants; keeps that pass running",
+     .asBool = &Enhancements::colorGrade},
+    {.key = "enhanceddaylight", .label = "Daylight (the reference client)", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageSky, .section = "",
+     .tooltip = "Daylight in Azeroth and Kalimdor shifted the way the reference client\n"
+                "repainted it: a whiter sun, brighter fill light in the shade,\n"
+                "a brighter sky and haze. Night, dungeons and Outland are\n"
+                "unchanged.",
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "enhanced_daylight",
+     .controls = "LightingManager: the day's light colours scaled by the measured "
+                 "Enhanced trend (enhanced_palette.hpp) after the band blend",
+     .asBool = &Enhancements::enhancedDaylight},
 
     // --------------------------------------------------------------- Distance
     {.key = "streamfadein", .label = "Fade in new scenery", .kind = SettingKind::Bool,

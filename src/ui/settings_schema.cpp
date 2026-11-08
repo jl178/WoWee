@@ -39,12 +39,14 @@ constexpr SettingDesc kSchema[] = {
     // no line here needs to say what it depends on.
     // Classic is last because the stored index is the row's place; see
     // graphics_presets.hpp.
-    {"graphicspreset", "Quality preset", SettingKind::Enum, 0, 5, 1, "Graphics", "Quality",
+    {"graphicspreset", "Quality preset", SettingKind::Enum, 0, 6, 1, "Graphics", "Quality",
      "Sets every graphics option at once. Classic is the stock 3.3.5\n"
      "picture: every enhancement off - a round shadow under each\n"
      "character, no wind, mist, flare, surface bumps, foam or point\n"
-     "lights on the ground. Change any option and this reads Custom.",
-     "Custom|Low|Medium|High|Ultra|Classic", 0},
+     "lights on the ground. Enhanced is Ultra with the reference client's\n"
+     "occlusion, colour grade, mist and water on top.\n"
+     "Change any option and this reads Custom.",
+     "Custom|Low|Medium|High|Ultra|Classic|Enhanced", 0},
     // Shadows off used to lose the device, and the row was taken away; off
     // now only stops the scene sampling the map, with the shadow pass run as
     // it is when they are on. See Renderer::renderShadowPass.

@@ -1,5 +1,6 @@
 #include "rendering/renderer.hpp"
 #include "rendering/sun_direction.hpp"
+#include "rendering/enhanced_grade.hpp"
 
 #include <cstddef>
 #include <cstring>
@@ -1651,6 +1652,7 @@ void Renderer::applyEnhancementsToSubsystems() {
     if (lightingManager) {
         lightingManager->setFogStrength(e.fogStrength);
         lightingManager->setFogSkyBlend(e.fogSkyBlend);
+        lightingManager->setEnhancedDaylight(e.enhancedDaylight);
     }
 
     // Water, weather and motion. The water and swim switches are handed on
@@ -2969,6 +2971,7 @@ void Renderer::update(float deltaTime) {
                 : gameTime;
         lightingManager->update(characterPosition, mapId, resolvedZoneId,
                                 lightTime, stormIntensity, isUnderwater);
+        lightMapId_ = mapId;
         // The water's Light.dbc colours and alphas follow the same lights.
         if (waterRenderer) waterRenderer->setLiquidLighting(lightingManager->getLightingParams());
         // Window glass (MOMT F_SIDN) glows by the stock night table
@@ -3995,6 +3998,14 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             // enhancement Wowee's own blur stands in for it, as before.
             stock_screen_fx::glowBlend(cameraUnderwater_, enh_.drunkWobble ? 0.0f : drunkLevel_));
         postProcessPipeline_->setUnderwaterWave(cameraUnderwater_);
+        // the reference client's colour grade: the noon keyframe's curve for this
+        // continent, weighted by the hour, outdoors and above water only.
+        const float* curve = enhanced_grade::curveForMap(static_cast<int>(lightMapId_));
+        const float gradeWeight = (enh_.colorGrade && curve && !cameraUnderwater_)
+            ? enhanced_grade::timeWeight(lightingManager->getTimeOfDay()) *
+                  (1.0f - glm::clamp(indoorFactor_, 0.0f, 1.0f))
+            : 0.0f;
+        postProcessPipeline_->setColorGrade(enh_.colorGrade, gradeWeight, curve == enhanced_grade::kKalimdor);
     }
 
     uint32_t frameIdx = vkCtx->getCurrentFrame();

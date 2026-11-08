@@ -52,8 +52,8 @@ bool ContactShadowPass::ensure(VkContext* ctx, VkDescriptorSetLayout perFrameLay
     }
     VkShaderModule vert, frag;
     if (!vert.loadFromFile(device, "assets/shaders/postprocess.vert.spv") ||
-        !frag.loadFromFile(device, "assets/shaders/contact_shadow.frag.spv")) {
-        LOG_WARNING("Contact shadows: contact_shadow.frag.spv missing - no contact shadows");
+        !frag.loadFromFile(device, fragSpv_)) {
+        LOG_WARNING(name_, ": ", fragSpv_, " missing - pass off");
         vert.destroy();
         frag.destroy();
         failed_ = true;
@@ -83,12 +83,12 @@ bool ContactShadowPass::ensure(VkContext* ctx, VkDescriptorSetLayout perFrameLay
     vert.destroy();
     frag.destroy();
     if (pipeline_ == VK_NULL_HANDLE) {
-        LOG_WARNING("Contact shadows: the pipeline could not be made");
+        LOG_WARNING(name_, ": the pipeline could not be made");
         failed_ = true;
         return false;
     }
     builtFor_ = pass;
-    LOG_INFO("Contact shadows: pass made");
+    LOG_INFO(name_, ": pass made");
     return true;
 }
 

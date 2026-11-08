@@ -386,10 +386,18 @@ private:
     // Contact shadows (the "Contact shadows" row, E14, ContactShadowPass):
     // decided once a frame beside the soft particles, recorded where the
     // scene pass closes, just before the late particles.
-    std::unique_ptr<ContactShadowPass> contactShadowPass_;
-    bool contactShadowsFrame_ = false;
-    bool contactShadowsDone_ = false;
-    uint32_t contactShadowsOffFrames_ = 0;
+    // Ambient occlusion (the "Ambient occlusion" row) runs through the same
+    // frame with its own shader, just before them.
+    struct DepthLightPassState {
+        std::unique_ptr<ContactShadowPass> pass;
+        bool frame = false;
+        bool done = false;
+        uint32_t offFrames = 0;
+    };
+    DepthLightPassState contactShadows_;
+    DepthLightPassState ambientOcclusion_;
+    [[nodiscard]] bool depthLightPassPossible() const;
+    bool decideDepthLightPass(bool want, DepthLightPassState& s, const char* fragSpv, const char* name);
     void decideContactShadows();
     void recordContactShadowPass(VkCommandBuffer cmd);
     /// Room light indoors (E12): each unit's own indoor light, read from the
@@ -778,6 +786,7 @@ private:
     std::unique_ptr<PostProcessPipeline> postProcessPipeline_;
 
     float indoorFactor_ = 0.0f;           // 0 outdoors .. 1 inside an interior group, eased
+    uint32_t lightMapId_ = 0;             // the map the light was last resolved on (colour grade)
     float foliageWindSetting_ = 1.0f;     // the "Foliage and cloth wind" setting
     float windStrength_ = 1.0f;           // setting x weather x outdoors, eased over ~4 s
     float clothWindStrength_ = 1.0f;      // setting x weather, eased: cloth breathes indoors too

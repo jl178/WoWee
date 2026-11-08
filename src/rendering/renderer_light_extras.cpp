@@ -1,5 +1,5 @@
-// Renderer's part of two enhancements: contact shadows (E14) and the room
-// light indoors (E12). Kept out of renderer.cpp; see contact_shadows.hpp and
+// Renderer's part of three enhancements: contact shadows (E14), ambient
+// occlusion and the room light indoors (E12). Kept out of renderer.cpp; see contact_shadows.hpp and
 // indoor_probes.hpp for what each does.
 #include "rendering/renderer.hpp"
 
@@ -16,45 +16,26 @@
 namespace wowee {
 namespace rendering {
 
-// Contact shadows need the sun's shadows on, the overlay pass, a one-sample
-// depth to read (as the soft particles do) and the player not wholly indoors,
-// where the sun lights nothing. Everything is let go eight frames after they
-// stop being wanted.
-void Renderer::decideContactShadows() {
-    contactShadowsFrame_ = false;
-    contactShadowsDone_ = false;
-    bool want = enh_.contactShadows && shadowsEnabled && vkCtx &&
-                vkCtx->getOverlayRenderPass() != VK_NULL_HANDLE && indoorFactor_ < 0.99f;
-    if (want) {
-        const bool offscreen = postProcessPipeline_ &&
-                               postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE;
-        if (offscreen) {
-            want = postProcessPipeline_->getSceneColorImageView() != VK_NULL_HANDLE &&
-                   postProcessPipeline_->getSceneDepthImage() != VK_NULL_HANDLE &&
-                   !postProcessPipeline_->sceneDepthIsMsaa();
-        } else {
-            want = !vkCtx->getOverlayFramebuffers().empty() && !vkCtx->isDepthCopySourceMsaa();
-        }
+// Contact shadows and ambient occlusion are the same kind of pass: a
+// full-screen triangle over the scene's resolved colour once the scene pass
+// has closed, reading its one-sample depth (as the soft particles do),
+// blended dst * src. Both need the overlay pass and that depth; each is let
+// go eight frames after it stops being wanted.
+bool Renderer::depthLightPassPossible() const {
+    if (!vkCtx || vkCtx->getOverlayRenderPass() == VK_NULL_HANDLE) return false;
+    const bool offscreen = postProcessPipeline_ &&
+                           postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE;
+    if (offscreen) {
+        return postProcessPipeline_->getSceneColorImageView() != VK_NULL_HANDLE &&
+               postProcessPipeline_->getSceneDepthImage() != VK_NULL_HANDLE &&
+               !postProcessPipeline_->sceneDepthIsMsaa();
     }
-    if (want) {
-        if (!contactShadowPass_) contactShadowPass_ = std::make_unique<ContactShadowPass>();
-        want = contactShadowPass_->ensure(vkCtx, perFrameSetLayout, vkCtx->getOverlayRenderPass());
-    }
-    contactShadowsFrame_ = want;
-    if (want) {
-        contactShadowsOffFrames_ = 0;
-    } else if (contactShadowPass_ && ++contactShadowsOffFrames_ > 8) {
-        contactShadowPass_.reset();
-        contactShadowsOffFrames_ = 0;
-    }
+    return !vkCtx->getOverlayFramebuffers().empty() && !vkCtx->isDepthCopySourceMsaa();
 }
 
-void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
-    if (!contactShadowsFrame_ || contactShadowsDone_ || !worldDrawnThisFrame_ || !contactShadowPass_ ||
-        !vkCtx || cmd == VK_NULL_HANDLE) {
-        return;
-    }
-    contactShadowsDone_ = true;
+namespace {
+SoftParticlePass::Target depthLightPassTarget(VkContext* vkCtx, PostProcessPipeline* postProcessPipeline_,
+                                              uint32_t currentImageIndex) {
     SoftParticlePass::Target t;
     t.pass = vkCtx->getOverlayRenderPass();
     if (postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE) {
@@ -67,12 +48,59 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
         t.extent = vkCtx->getSwapchainExtent();
         t.depth = vkCtx->getDepthCopySourceImage();
     }
+    return t;
+}
+}  // namespace
+
+bool Renderer::decideDepthLightPass(bool want, DepthLightPassState& s, const char* fragSpv, const char* name) {
+    s.frame = false;
+    s.done = false;
+    want = want && depthLightPassPossible();
+    if (want) {
+        if (!s.pass) s.pass = std::make_unique<ContactShadowPass>(fragSpv, name);
+        want = s.pass->ensure(vkCtx, perFrameSetLayout, vkCtx->getOverlayRenderPass());
+    }
+    s.frame = want;
+    if (want) {
+        s.offFrames = 0;
+    } else if (s.pass && ++s.offFrames > 8) {
+        s.pass.reset();
+        s.offFrames = 0;
+    }
+    return want;
+}
+
+// Contact shadows also need the sun's shadows on and the player not wholly
+// indoors, where the sun lights nothing.
+void Renderer::decideContactShadows() {
+    decideDepthLightPass(enh_.contactShadows && shadowsEnabled && indoorFactor_ < 0.99f, contactShadows_,
+                         "assets/shaders/contact_shadow.frag.spv", "Contact shadows");
+    // Ambient occlusion takes only the sky's share, indoors and out.
+    decideDepthLightPass(enh_.ambientOcclusion, ambientOcclusion_,
+                         "assets/shaders/ambient_occlusion.frag.spv", "Ambient occlusion");
+}
+
+void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
+    if (!worldDrawnThisFrame_ || !vkCtx || cmd == VK_NULL_HANDLE) return;
     const glm::mat4 invViewProj = glm::inverse(currentFrameData.projection * currentFrameData.view);
-    // Light.dbc's shadow band x the player's setting, as the shadow map's
-    // (shadowParams.y), and none of it indoors.
-    const float darkness = currentFrameData.shadowParams.y * (1.0f - glm::clamp(indoorFactor_, 0.0f, 1.0f));
-    if (contactShadowPass_->record(cmd, t, perFrameDescSets[vkCtx->getCurrentFrame()], invViewProj, darkness)) {
-        vkCtx->gpuMark(cmd, "contact shadows");
+    const VkDescriptorSet perFrame = perFrameDescSets[vkCtx->getCurrentFrame()];
+    const SoftParticlePass::Target target = depthLightPassTarget(vkCtx, postProcessPipeline_.get(), currentImageIndex);
+    // Occlusion first: it scales the sky's light, which the contact shadow's
+    // ratio of lit to unlit then reads as it stands.
+    if (ambientOcclusion_.frame && !ambientOcclusion_.done && ambientOcclusion_.pass) {
+        ambientOcclusion_.done = true;
+        if (ambientOcclusion_.pass->record(cmd, target, perFrame, invViewProj, 1.0f)) {
+            vkCtx->gpuMark(cmd, "ambient occlusion");
+        }
+    }
+    if (contactShadows_.frame && !contactShadows_.done && contactShadows_.pass) {
+        contactShadows_.done = true;
+        // Light.dbc's shadow band x the player's setting, as the shadow map's
+        // (shadowParams.y), and none of it indoors.
+        const float darkness = currentFrameData.shadowParams.y * (1.0f - glm::clamp(indoorFactor_, 0.0f, 1.0f));
+        if (contactShadows_.pass->record(cmd, target, perFrame, invViewProj, darkness)) {
+            vkCtx->gpuMark(cmd, "contact shadows");
+        }
     }
 }
 

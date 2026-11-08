@@ -187,6 +187,14 @@ public:
     /// a shoulder above 0.8 instead of clipped (highlight_rolloff.hpp). Off,
     /// and with no glow drawing, the composite is stock.
     void setHighlightRollOff(bool on) { highlightRollOff_ = on; }
+    /// the reference client's colour grade (enhanced_grade.hpp). `enabled` keeps the
+    /// pass alive while the row is on, whatever the hour; `weight` (0..1) is
+    /// this frame's share and `kalimdor` picks that continent's curve.
+    void setColorGrade(bool enabled, float weight, bool kalimdor) {
+        gradeEnabled_ = enabled;
+        gradeWeight_ = enabled ? glm::clamp(weight, 0.0f, 1.0f) : 0.0f;
+        gradeKalimdor_ = kalimdor;
+    }
     [[nodiscard]] bool isGlowEnabled() const { return glowEnabled_; }
 
 private:
@@ -210,6 +218,9 @@ private:
     // zone with no glow does not tear the pass down and stall the device.
     bool glowEnabled_ = true;
     bool highlightRollOff_ = false;
+    bool gradeEnabled_ = false;
+    float gradeWeight_ = 0.0f;
+    bool gradeKalimdor_ = false;
     float glowAmount_ = 0.0f;
     float glowBlend_ = 0.0f;
     float nether_ = 0.0f;
@@ -220,7 +231,7 @@ private:
 
     [[nodiscard]] bool needsFXAAPass() const {
         return fxaa_.enabled || drawnIntoxication() > 0.001f || ghost_ > 0.001f || glowWanted() ||
-               nether_ > 0.0f;
+               nether_ > 0.0f || (gradeEnabled_ && !(fsr_.enabled && !fsr2_.enabled));
     }
 
     // FSR 1.0 upscaling state
