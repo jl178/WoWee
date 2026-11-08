@@ -398,6 +398,8 @@ void AnimationCallbackHandler::setupCallbacks() {
         // target-based guess below stays as the fallback. Only the spell
         // cast families are taken (a kit can name a melee swing).
         rendering::SpellVisualSystem::KitAnimations kitAnims;
+        // Whether the spell is known: then its kits alone say what plays.
+        bool kitSpellKnown = false;
         {
             uint32_t kitSpell = isLocalPlayer ? gameHandler_.getCurrentCastSpellId() : 0;
             // A cast just sent: the build-up starts before SMSG_SPELL_START,
@@ -409,14 +411,13 @@ void AnimationCallbackHandler::setupCallbacks() {
             if (kitSpell != 0 && svs) {
                 gameHandler_.loadSpellNameCache();
                 auto it = gameHandler_.spellNameCacheRef().find(kitSpell);
-                if (it != gameHandler_.spellNameCacheRef().end() && it->second.spellVisualId)
-                    kitAnims = svs->getKitAnimations(it->second.spellVisualId);
+                if (it != gameHandler_.spellNameCacheRef().end()) {
+                    kitSpellKnown = true;
+                    if (it->second.spellVisualId)
+                        kitAnims = svs->getKitAnimations(it->second.spellVisualId);
+                }
             }
             using namespace rendering::anim;
-            auto keep = [&](uint32_t& a, std::initializer_list<uint32_t> family) {
-                if (std::find(family.begin(), family.end(), a) == family.end() ||
-                    !cr->hasAnimation(instanceId, a)) a = 0;
-            };
             // The build-up holds whatever its kit names, as the stock client
             // plays a kit's AnimID as it is (Wow.exe 0x73B140): UseStandingLoop
             // for an item being used, ReadyThrown, ChannelCastOmni for a
@@ -430,7 +431,10 @@ void AnimationCallbackHandler::setupCallbacks() {
             };
             keepHold(kitAnims.precast);
             keepHold(kitAnims.channel);
-            keep(kitAnims.cast, {SPELL_CAST_DIRECTED, SPELL_CAST_OMNI, SPELL_CAST_AREA});
+            // The release too is the kit's AnimID as it is: Victory Rush and
+            // Execute name 57, a weapon special, not a spell cast. Only the
+            // SpellCast family was taken, so they threw a spell instead.
+            keepHold(kitAnims.cast);
         }
 
         if (start) {
@@ -658,7 +662,11 @@ void AnimationCallbackHandler::setupCallbacks() {
             // The kits' own animations over the guesses above.
             if (isChannel ? kitAnims.channel : kitAnims.precast)
                 castAnim = isChannel ? kitAnims.channel : kitAnims.precast;
-            if (finalizeAnim && kitAnims.cast) finalizeAnim = kitAnims.cast;
+            // The release is the cast kit's AnimID and nothing else (0x73B140):
+            // a known spell whose cast kit names none - Berserker Rage - or
+            // that has no visual at all - Bloodrage - plays no release. The
+            // guess above stands only for a spell this client cannot look up.
+            if (finalizeAnim && kitSpellKnown) finalizeAnim = kitAnims.cast;
 
             if (isLocalPlayer) {
                 auto* ac = renderer_.getAnimationController();
