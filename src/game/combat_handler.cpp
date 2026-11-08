@@ -1328,6 +1328,8 @@ void CombatHandler::handleUpdateComboPoints(network::Packet& packet) {
     // for, and a WotLK one never registers it - so the combo frame stayed dark.
     if (isPreWotlk()) owner_.fireAddonEvent("PLAYER_COMBO_POINTS", {});
     else              owner_.fireAddonEvent("UNIT_COMBO_POINTS", {"player"});
+    // Finishing moves (and Overpower) are usable only with points.
+    owner_.fireAddonEvent("ACTIONBAR_UPDATE_USABLE", {});
 }
 
 // SMSG_PVP_CREDIT (Wow.exe 0x526530 case 0x28C -> 0x50B6D0): honor, the
@@ -1777,6 +1779,7 @@ void CombatHandler::setTarget(uint64_t guid) {
         LOG_INFO("Target set: 0x", std::hex, guid, std::dec);
     }
     owner_.fireAddonEvent("PLAYER_TARGET_CHANGED", {});
+    owner_.fireAddonEvent("ACTIONBAR_UPDATE_USABLE", {});
 
     // Report the interface once, the first time there is a target to report it
     // against. A target frame is only right or wrong with something targeted,
@@ -1817,6 +1820,7 @@ void CombatHandler::clearTarget() {
         // targetGuid before the event).
         owner_.setTargetGuidRaw(0);
         owner_.fireAddonEvent("PLAYER_TARGET_CHANGED", {});
+        owner_.fireAddonEvent("ACTIONBAR_UPDATE_USABLE", {});
     } else {
         owner_.setTargetGuidRaw(0);
     }

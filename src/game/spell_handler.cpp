@@ -293,6 +293,12 @@ std::string castFailureMessage(const GameHandler& owner, uint32_t spellId,
     // (SPELL_FAILED_NO_DUELING -> "Dueling isn't allowed here.").
     if (const char* name = spellCastResultName(result); name && *name) {
         std::string text = globalString(owner.services().assetManager, name);
+        // A format whose argument could not be named is shown without it,
+        // never with a bare "%s": "Missing reagent".
+        if (const auto pct = text.find('%'); pct != std::string::npos) {
+            text.erase(pct);
+            while (!text.empty() && (text.back() == ' ' || text.back() == ':')) text.pop_back();
+        }
         if (!text.empty()) return text;
     }
     const char* reason = getSpellCastResultString(result, powerType);
@@ -1616,6 +1622,27 @@ bool SpellHandler::showCastFailure(uint32_t spellId, uint8_t result, uint32_t mi
     constexpr uint8_t kCastResultReagents = 0x64, kCastResultNeedMoreItems = 0x37;
     if ((result == kCastResultReagents || result == kCastResultNeedMoreItems) && miscArg != 0) {
         owner_.ensureItemInfo(miscArg);
+    }
+    // The reagent named by the packet may not be cached yet (or the packet
+    // names none): the spell's own reagent the bags are short of, by a name
+    // already known, says the same thing.
+    if (result == kCastResultReagents) {
+        const auto* named = miscArg != 0 ? owner_.getItemInfo(miscArg) : nullptr;
+        if (!named || !named->valid) {
+            owner_.loadSpellNameCache();
+            auto it = owner_.spellNameCacheRef().find(spellId);
+            if (it != owner_.spellNameCacheRef().end()) {
+                for (const auto& r : it->second.reagents) {
+                    if (r.itemId == 0 || static_cast<int32_t>(r.count) <= 0) continue;
+                    owner_.ensureItemInfo(r.itemId);
+                    const auto* info = owner_.getItemInfo(r.itemId);
+                    if (owner_.getInventory().countItem(r.itemId) < r.count && info && info->valid) {
+                        miscArg = r.itemId;
+                        break;
+                    }
+                }
+            }
+        }
     }
     const int powerType = playerPowerType();
     std::string errMsg;
@@ -5148,6 +5175,13 @@ void SpellHandler::loadSpellNameCache() const {
     const uint32_t channelInterruptFlagsField = wotlkColumn("ChannelInterruptFlags", 33);
     const uint32_t spellFamilyNameField = wotlkColumn("SpellFamilyName", 208);
     const uint32_t spellFamilyFlagsField = wotlkColumn("SpellFamilyFlags", 209);
+    const uint32_t stancesField = wotlkColumn("Stances", 12);
+    const uint32_t stancesNotField = wotlkColumn("StancesNot", 14);
+    const uint32_t casterAuraStateField = wotlkColumn("CasterAuraState", 20);
+    const uint32_t casterAuraStateNotField = wotlkColumn("CasterAuraStateNot", 22);
+    const uint32_t targetAuraStateNotField = wotlkColumn("TargetAuraStateNot", 23);
+    const uint32_t casterAuraSpellField = wotlkColumn("CasterAuraSpell", 24);
+    const uint32_t effectClassMaskField = wotlkColumn("EffectSpellClassMaskA", 122);
 
     uint32_t count = dbc->getRecordCount();
     for (uint32_t i = 0; i < count; ++i) {
@@ -5192,6 +5226,26 @@ void SpellHandler::loadSpellNameCache() const {
             }
             if (targetAuraStateField != 0xFFFFFFFF && targetAuraStateField < fieldCount) {
                 entry.targetAuraState = dbc->getUInt32(i, targetAuraStateField);
+            }
+            auto readField = [&](uint32_t field) -> uint32_t {
+                return field < fieldCount ? dbc->getUInt32(i, field) : 0u;
+            };
+            entry.stances = readField(stancesField);
+            entry.stancesNot = readField(stancesNotField);
+            entry.casterAuraState = readField(casterAuraStateField);
+            entry.casterAuraStateNot = readField(casterAuraStateNotField);
+            entry.targetAuraStateNot = readField(targetAuraStateNotField);
+            if (casterAuraSpellField + 3 < fieldCount) {
+                entry.casterAuraSpell = readField(casterAuraSpellField);
+                entry.targetAuraSpell = readField(casterAuraSpellField + 1);
+                entry.excludeCasterAuraSpell = readField(casterAuraSpellField + 2);
+                entry.excludeTargetAuraSpell = readField(casterAuraSpellField + 3);
+            }
+            // A[0..2], B[0..2], C[0..2]: word w of effect e is at w*3 + e.
+            if (effectClassMaskField + 8 < fieldCount) {
+                for (int e = 0; e < 3; ++e)
+                    for (int w = 0; w < 3; ++w)
+                        entry.effectClassMask[e][w] = readField(effectClassMaskField + w * 3 + e);
             }
             // Load effect base points for $s1/$s2/$s3 tooltip substitution
             if (ebp0Field != 0xFFFFFFFF) entry.effectBasePoints[0] = static_cast<int32_t>(dbc->getUInt32(i, ebp0Field));
@@ -5580,6 +5634,89 @@ uint32_t SpellHandler::getSpellTargetAuraState(uint32_t spellId) const {
     loadSpellNameCache();
     auto it = owner_.spellNameCacheRef().find(spellId);
     return (it != owner_.spellNameCacheRef().end()) ? it->second.targetAuraState : 0;
+}
+
+bool SpellHandler::spellRequirementsMet(uint32_t spellId) const {
+    if (spellId == 0) return true;
+    loadSpellNameCache();
+    const auto& cache = owner_.spellNameCacheRef();
+    auto it = cache.find(spellId);
+    if (it == cache.end()) return true;
+    const auto& e = it->second;
+
+    // An aura of ABILITY_IGNORE_AURASTATE (262) whose effect class mask covers
+    // this spell lifts the aura and combo point conditions (0x72AAF0):
+    // Sudden Death's Execute at any health.
+    auto ignoresAuraState = [&]() {
+        if (e.spellFamilyName == 0) return false;
+        for (const auto& aura : getPlayerAuras()) {
+            if (aura.isEmpty()) continue;
+            auto a = cache.find(aura.spellId);
+            if (a == cache.end() || a->second.spellFamilyName != e.spellFamilyName) continue;
+            for (int k = 0; k < 3; ++k) {
+                if (a->second.effectAuraIds[k] != 262) continue;
+                const auto& m = a->second.effectClassMask[k];
+                if ((m[0] & e.spellFamilyFlags[0]) || (m[1] & e.spellFamilyFlags[1]) ||
+                    (m[2] & e.spellFamilyFlags[2]))
+                    return true;
+            }
+        }
+        return false;
+    };
+    auto hasState = [](const Unit* u, uint32_t state) {
+        return u && state >= 1 && state <= 32 && (u->getAuraState() & (1u << (state - 1))) != 0;
+    };
+    auto carries = [](const std::vector<AuraSlot>& auras, uint32_t id) {
+        for (const auto& a : auras)
+            if (!a.isEmpty() && a.spellId == id) return true;
+        return false;
+    };
+
+    // Stance (0x72BAC0): a stance-only spell outside its stances is greyed
+    // (ONLY_SHAPESHIFT), unless AttributesEx2 NOT_NEED_SHAPESHIFT (0x80000).
+    const uint8_t form = owner_.getShapeshiftFormId();
+    const uint32_t formMask = form != 0 && form <= 32 ? (1u << (form - 1)) : 0u;
+    if (e.stances != 0 && (formMask & e.stances) == 0 && (e.attrEx2 & 0x80000u) == 0)
+        return false;
+
+    auto playerEnt = owner_.getEntityManager().getEntity(owner_.getPlayerGuid());
+    const auto* player = dynamic_cast<const Unit*>(playerEnt.get());
+    const uint64_t targetGuid = owner_.getTargetGuid();
+    auto targetEnt = targetGuid ? owner_.getEntityManager().getEntity(targetGuid) : nullptr;
+    const auto* target = dynamic_cast<const Unit*>(targetEnt.get());
+
+    bool ignoreChecked = false, ignore = false;
+    auto lifted = [&]() {
+        if (!ignoreChecked) { ignore = ignoresAuraState(); ignoreChecked = true; }
+        return ignore;
+    };
+
+    // A finishing move needs points on the current target (AttributesEx
+    // 0x100000 | 0x400000). Overpower is one: the dodge gives the point.
+    if ((e.attrEx & 0x500000u) != 0) {
+        const bool havePoints = owner_.getComboPoints() > 0 && targetGuid != 0 &&
+                                owner_.getComboTarget() == targetGuid;
+        if (!havePoints && !lifted()) return false;
+    }
+    if (player) {
+        if (e.casterAuraState != 0 && !hasState(player, e.casterAuraState) && !lifted()) return false;
+        if (e.casterAuraStateNot != 0 && hasState(player, e.casterAuraStateNot) && !lifted()) return false;
+    }
+    if (e.casterAuraSpell != 0 && !carries(getPlayerAuras(), e.casterAuraSpell) && !lifted()) return false;
+    if (e.excludeCasterAuraSpell != 0 && carries(getPlayerAuras(), e.excludeCasterAuraSpell) && !lifted())
+        return false;
+
+    // The target's side. With no target, a spell that names a target state or
+    // a target aura is greyed.
+    if (e.targetAuraState == 0 && e.targetAuraStateNot == 0 && e.targetAuraSpell == 0 &&
+        e.excludeTargetAuraSpell == 0)
+        return true;
+    if (!target) return e.targetAuraState == 0 && e.targetAuraSpell == 0;
+    if (e.targetAuraState != 0 && !hasState(target, e.targetAuraState) && !lifted()) return false;
+    if (e.targetAuraStateNot != 0 && hasState(target, e.targetAuraStateNot) && !lifted()) return false;
+    if (e.targetAuraSpell != 0 && !carries(getTargetAuras(), e.targetAuraSpell)) return false;
+    if (e.excludeTargetAuraSpell != 0 && carries(getTargetAuras(), e.excludeTargetAuraSpell)) return false;
+    return true;
 }
 
 uint32_t SpellHandler::resolveHighestKnownRank(uint32_t spellId) const {

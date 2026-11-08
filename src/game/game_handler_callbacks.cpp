@@ -4639,6 +4639,27 @@ bool GameHandler::isSpellKnownToClient(uint32_t spellId) const {
     return spellHandler_ && spellHandler_->isSpellKnownToClient(spellId);
 }
 
+uint32_t GameHandler::spellReagentCasts(uint32_t spellId, bool& hasReagents) {
+    hasReagents = false;
+    loadSpellNameCache();
+    auto it = spellNameCache_.find(spellId);
+    if (it == spellNameCache_.end()) return 0;
+    uint32_t casts = UINT32_MAX;
+    for (const auto& r : it->second.reagents) {
+        // 0xFFFFFFFE is a cleared slot in the record.
+        if (r.itemId == 0 || r.itemId == 0xFFFFFFFEu || static_cast<int32_t>(r.count) <= 0) continue;
+        hasReagents = true;
+        ensureItemInfo(r.itemId);
+        const uint32_t have = getInventory().countItem(r.itemId);
+        casts = std::min(casts, have / r.count);
+    }
+    return hasReagents ? casts : 0;
+}
+
+bool GameHandler::spellRequirementsMet(uint32_t spellId) const {
+    return spellHandler_ ? spellHandler_->spellRequirementsMet(spellId) : true;
+}
+
 uint32_t GameHandler::getSpellTargetAuraState(uint32_t spellId) const {
     return spellHandler_ ? spellHandler_->getSpellTargetAuraState(spellId) : 0;
 }

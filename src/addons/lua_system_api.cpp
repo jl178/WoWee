@@ -6241,6 +6241,11 @@ void registerSystemLuaAPI(lua_State* L) {
                 bar[slot].type == game::ActionBarSlot::ITEM) {
                 const auto* info = gh->getItemInfo(bar[slot].id);
                 consumable = info && info->valid && info->itemClass == 0;  // Consumable
+            } else if (slot < static_cast<int>(bar.size()) &&
+                       bar[slot].type == game::ActionBarSlot::SPELL) {
+                // A spell that takes a reagent (0x5A9360): its button shows
+                // the casts left, Levitate's feathers.
+                gh->spellReagentCasts(bar[slot].id, consumable);
             }
             lua_pushboolean(L, consumable);
             return 1;

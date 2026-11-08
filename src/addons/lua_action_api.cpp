@@ -515,6 +515,9 @@ static int lua_IsUsableAction(lua_State* L) {
     bool noMana = false;
     if (action.type == game::ActionBarSlot::SPELL) {
         usable = gh->getKnownSpells().count(action.id) > 0;
+        // Stance, combo points, aura states (0x80B5D0): Execute above 20%,
+        // Victory Rush with no kill, Overpower before a dodge.
+        if (usable && !gh->spellRequirementsMet(action.id)) usable = false;
         // Check power cost
         if (usable && action.id != 0) {
             auto spellData = gh->getSpellData(action.id);
@@ -622,6 +625,10 @@ static int lua_GetActionCount(lua_State* L) {
     const auto& action = bar[slot];
     if (action.type == game::ActionBarSlot::ITEM && action.id != 0) {
         lua_pushnumber(L, gh->getInventory().countItem(action.id));
+    } else if (action.type == game::ActionBarSlot::SPELL && action.id != 0) {
+        // A reagent spell counts the casts its reagents allow (0x7FFA30).
+        bool hasReagents = false;
+        lua_pushnumber(L, gh->spellReagentCasts(action.id, hasReagents));
     } else {
         lua_pushnumber(L, 0);
     }

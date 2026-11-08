@@ -1382,6 +1382,11 @@ static int lua_IsUsableSpell(lua_State* L) {
     float cd = gh->getSpellCooldown(spellId);
     bool onCooldown = (cd > 0.1f);
     bool noMana = false;
+    if (!gh->spellRequirementsMet(spellId)) {
+        lua_pushboolean(L, 0);
+        lua_pushboolean(L, 0);
+        return 2;
+    }
     if (!onCooldown) {
         auto spellData = gh->getSpellData(spellId);
         if (spellData.manaCost > 0) {

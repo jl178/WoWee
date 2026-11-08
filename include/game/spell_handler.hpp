@@ -425,6 +425,10 @@ public:
     /// Spell.dbc Targets mask (SpellCastTargetFlags): 0x10 = TARGET_FLAG_ITEM.
     [[nodiscard]] uint32_t getSpellTargetFlags(uint32_t spellId) const;
     [[nodiscard]] uint32_t getSpellTargetAuraState(uint32_t spellId) const;
+    /// Stock's usable test past the power cost (0x80B5D0): combo points
+    /// for a finishing move, the stance, and the caster's and target's aura
+    /// states and aura spells. False greys an action button out.
+    [[nodiscard]] bool spellRequirementsMet(uint32_t spellId) const;
     /// Spell.dbc RangeIndex resolved via SpellRange.dbc, in yards. Melee ("Combat
     /// Range") is 5; self-only is 0; negative means SpellRange.dbc was unavailable.
     [[nodiscard]] float getSpellMaxRange(uint32_t spellId) const;

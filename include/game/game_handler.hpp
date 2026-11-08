@@ -4021,6 +4021,12 @@ public:
     bool isSpellKnownToClient(uint32_t spellId) const;
     // Spell.dbc TargetAuraState (aura state the target must be in; 0 = no requirement).
     uint32_t getSpellTargetAuraState(uint32_t spellId) const;
+    bool spellRequirementsMet(uint32_t spellId) const;
+    /// The casts the bags hold reagents for (0x7FFA30): the least over the
+    /// spell's reagents of carried / needed, 0 with none. hasReagents says
+    /// whether the spell takes any - what makes it a consumable action
+    /// (0x5A9360). Asks for the reagents' names, so a refusal can name one.
+    uint32_t spellReagentCasts(uint32_t spellId, bool& hasReagents);
 
     struct TrainerTab {
         std::string name;
@@ -4610,6 +4616,21 @@ public:
         // Spell.dbc TargetAuraState: the aura state the target must be in for the spell
         // to be castable (e.g. Execute → AURA_STATE_HEALTHLESS_20_PERCENT). 0 = none.
         uint32_t targetAuraState = 0;
+        /// What stock's usable test (0x80B5D0) reads beyond the power cost:
+        /// Stances/StancesNot (12, 14), CasterAuraState (20),
+        /// CasterAuraStateNot/TargetAuraStateNot (22, 23), the four aura
+        /// spells (24-27), and EffectSpellClassMask A/B/C (122-130), which
+        /// says which spells an aura's effect applies to.
+        uint32_t stances = 0;
+        uint32_t stancesNot = 0;
+        uint32_t casterAuraState = 0;
+        uint32_t casterAuraStateNot = 0;
+        uint32_t targetAuraStateNot = 0;
+        uint32_t casterAuraSpell = 0;
+        uint32_t targetAuraSpell = 0;
+        uint32_t excludeCasterAuraSpell = 0;
+        uint32_t excludeTargetAuraSpell = 0;
+        uint32_t effectClassMask[3][3] = {};
     };
     static constexpr size_t PLAYER_EXPLORED_ZONES_COUNT = 128;
     std::string getAreaName(uint32_t areaId) const;
