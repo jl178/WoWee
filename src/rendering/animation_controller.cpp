@@ -186,6 +186,14 @@ void AnimationController::startSpellCast(uint32_t precastAnimId, uint32_t castAn
 
 void AnimationController::stopSpellCast() {
     characterAnimator_.stopSpellCast();
+    // On the move the release goes on the upper body over the run, as a
+    // swing does (0x7385C0); on the whole body it slid the character along
+    // the ground in the cast pose until the release ended.
+    const auto& combat = characterAnimator_.getCombat();
+    if (combat.getState() == CombatFSM::State::SPELL_FINALIZE &&
+        playSwingOnUpperBody(combat.finalizeAnimId())) {
+        characterAnimator_.abandonSpell();
+    }
 }
 
 void AnimationController::cancelSpellCast() {

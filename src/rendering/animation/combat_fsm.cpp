@@ -325,7 +325,10 @@ void CombatFSM::updateTransitions(const Input& in) {
             break;
 
         case State::SPELL_FINALIZE: {
-            if (in.swimming || (in.jumping && !in.grounded)) {
+            // Starting to move mid-release hands the body to the legs, as
+            // SPELL_CASTING does; a release begun on the move never gets
+            // here (AnimationController puts it on the upper body).
+            if (in.swimming || (in.jumping && !in.grounded) || in.moving) {
                 clearSpellState();
                 state_ = State::INACTIVE;
             } else if (in.haveAnimState && !spellAnimFresh_) {

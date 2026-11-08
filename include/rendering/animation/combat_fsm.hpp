@@ -2,6 +2,7 @@
 
 #include "rendering/animation/anim_capability_set.hpp"
 #include "rendering/animation/anim_event.hpp"
+#include "rendering/animation/animation_ids.hpp"
 #include "rendering/animation/weapon_type.hpp"
 #include <cstdint>
 
@@ -72,6 +73,11 @@ public:
                        const WeaponLoadout& loadout);
 
     [[nodiscard]] State getState() const { return state_; }
+    /// The release SPELL_FINALIZE plays: the kit's, else the cast's, else Spell.
+    [[nodiscard]] uint32_t finalizeAnimId() const {
+        return spellFinalizeAnimId_ ? spellFinalizeAnimId_
+             : (spellCastAnimId_ ? spellCastAnimId_ : anim::SPELL);
+    }
     /// The cast pose a flinch taken during the cast returns to, 0 for none.
     [[nodiscard]] uint32_t resumeAnimAfterHit() const {
         return (state_ == State::HIT_REACTION && resumeSpellAfterHit_) ? spellCastAnimId_ : 0u;
