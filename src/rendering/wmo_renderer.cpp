@@ -5419,6 +5419,20 @@ bool WMORenderer::findCameraGroup(const glm::vec3& camPos, std::optional<float> 
             const uint32_t flags = fi < model.portalGraph.groupFlags.size()
                 ? model.portalGraph.groupFlags[fi] : group.groupFlags;
             if (flags & sp::kGroupNotUnderCamera) continue;
+            // An interior group holds the camera only when the camera is in
+            // its box. Without this, a camera above a city whose ray slipped
+            // past the street (over a roof edge or a gap) met a floor of the
+            // sewers 50 yards down, was put inside them, and the walk from
+            // there sealed the view: Dalaran's whole city vanished while its
+            // loose props floated, depending on where the camera orbited.
+            if (!(flags & sp::kGroupExterior)) {
+                constexpr float kBoxMargin = 0.5f;
+                const glm::vec3 camLocal = glm::vec3(instance.invModelMatrix * glm::vec4(camPos, 1.0f));
+                if (glm::any(glm::lessThan(camLocal, group.boundingBoxMin - glm::vec3(kBoxMargin))) ||
+                    glm::any(glm::greaterThan(camLocal, group.boundingBoxMax + glm::vec3(kBoxMargin)))) {
+                    continue;
+                }
+            }
             if (!trianglesAlongRay(group, localOrigin, localDir, tl_triScratch)) continue;
             const auto& verts = group.collisionVertices;
             const auto& indices = group.collisionIndices;
