@@ -528,12 +528,12 @@ void M2Renderer::updateRibbons(M2Instance& inst, const M2ModelGPU& gpu, float dt
 // Ribbon rendering (0x980B70)
 // ---------------------------------------------------------------------------
 void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    if (!ribbonPipeline_ || !ribbonAdditivePipeline_ || !ribbonVB_ || !ribbonVBMapped_) return;
+    if (!ribbonPipeline_ || !ribbonAdditivePipeline_ || !ribbonVB_[vkCtx_->getCurrentFrame() % 2] || !ribbonVBMapped_[vkCtx_->getCurrentFrame() % 2]) return;
     // Diagnostic: WOWEE_M2_NO_RIBBONS=1 drops every M2 ribbon trail draw.
     static const bool kNoRibbons = envFlagEnabled("WOWEE_M2_NO_RIBBONS");
     if (kNoRibbons) return;
 
-    float* dst = static_cast<float*>(ribbonVBMapped_);
+    float* dst = static_cast<float*>(ribbonVBMapped_[vkCtx_->getCurrentFrame() % 2]);
     size_t written = 0;
     ribbonDraws_.clear();
     auto& draws = ribbonDraws_;
@@ -679,7 +679,7 @@ void M2Renderer::renderM2Ribbons(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
         vkCmdPushConstants(cmd, ribbonPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(material), material);
         VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &ribbonVB_, &offset);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &ribbonVB_[vkCtx_->getCurrentFrame() % 2], &offset);
         vkCmdDraw(cmd, dc.vertexCount, 1, dc.firstVertex, 0);
     }
 }
@@ -1166,14 +1166,14 @@ void M2Renderer::renderSoftParticles(VkCommandBuffer cmd, VkDescriptorSet perFra
     if (!softDeferred_ || !perFrameSet || !depthSet || !hasSoftParticlePipelines()) return;
 
     // The halos first, as recordGlowSprites drew them before the particles.
-    if (glowSoftCount_ > 0 && glowSoftPipeline_ && glowVB_ && glowTexDescSet_) {
+    if (glowSoftCount_ > 0 && glowSoftPipeline_ && glowVB_[vkCtx_->getCurrentFrame() % 2] && glowTexDescSet_) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, glowSoftPipeline_);
         const VkDescriptorSet sets[] = {perFrameSet, glowTexDescSet_, depthSet};
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, glowSoftLayout_, 0, 3, sets, 0, nullptr);
         struct { float tileX, tileY; int alphaKey; } push = {.tileX = 1.0f, .tileY = 1.0f, .alphaKey = 0};
         vkCmdPushConstants(cmd, glowSoftLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
         VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &glowVB_, &offset);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &glowVB_[vkCtx_->getCurrentFrame() % 2], &offset);
         vkCmdDraw(cmd, glowSoftCount_, 1, 0, 0);
     }
     glowSoftCount_ = 0;
@@ -1228,11 +1228,11 @@ void M2Renderer::renderSoftParticles(VkCommandBuffer cmd, VkDescriptorSet perFra
 }
 
 void M2Renderer::renderSmokeParticles(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) {
-    if (smokeParticles.empty() || !smokePipeline_ || !smokeVB_) return;
+    if (smokeParticles.empty() || !smokePipeline_ || !smokeVB_[vkCtx_->getCurrentFrame() % 2]) return;
 
     // Build vertex data: pos(3) + lifeRatio(1) + size(1) + isSpark(1) per particle
     size_t count = std::min(smokeParticles.size(), static_cast<size_t>(MAX_SMOKE_PARTICLES));
-    float* dst = static_cast<float*>(smokeVBMapped_);
+    float* dst = static_cast<float*>(smokeVBMapped_[vkCtx_->getCurrentFrame() % 2]);
     for (size_t i = 0; i < count; i++) {
         const auto& p = smokeParticles[i];
         *dst++ = p.position.x;
@@ -1253,7 +1253,7 @@ void M2Renderer::renderSmokeParticles(VkCommandBuffer cmd, VkDescriptorSet perFr
                        sizeof(float), &screenHeight);
 
     VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &smokeVB_, &offset);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &smokeVB_[vkCtx_->getCurrentFrame() % 2], &offset);
     vkCmdDraw(cmd, static_cast<uint32_t>(count), 1, 0, 0);
 }
 

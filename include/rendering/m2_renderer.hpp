@@ -1509,14 +1509,14 @@ private:
 
     // Dynamic ribbon vertex buffer (CPU-written triangle strip)
     static constexpr size_t MAX_RIBBON_VERTS = 8192;  // 9 floats each
-    ::VkBuffer ribbonVB_ = VK_NULL_HANDLE;
-    VmaAllocation ribbonVBAlloc_ = VK_NULL_HANDLE;
-    void* ribbonVBMapped_ = nullptr;
+    ::VkBuffer ribbonVB_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};  // one per frame in flight
+    VmaAllocation ribbonVBAlloc_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    void* ribbonVBMapped_[2] = {nullptr, nullptr};
 
     // Dynamic particle buffers
-    ::VkBuffer smokeVB_ = VK_NULL_HANDLE;
-    VmaAllocation smokeVBAlloc_ = VK_NULL_HANDLE;
-    void* smokeVBMapped_ = nullptr;
+    ::VkBuffer smokeVB_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};  // one per frame in flight
+    VmaAllocation smokeVBAlloc_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    void* smokeVBMapped_[2] = {nullptr, nullptr};
     // The GPU path's buffers, one of each per frame in flight: the particle
     // records (vertex buffer) and the curves they index (storage buffer,
     // bound as set 2 through instanceSetLayout_'s one-SSBO layout).
@@ -1530,9 +1530,9 @@ private:
     VkDescriptorSet particleCurveSet_[2] = {};
     // Dedicated glow sprite vertex buffer (separate from particle VB to avoid data race)
     static constexpr size_t MAX_GLOW_SPRITES = 8000;
-    ::VkBuffer glowVB_ = VK_NULL_HANDLE;
-    VmaAllocation glowVBAlloc_ = VK_NULL_HANDLE;
-    void* glowVBMapped_ = nullptr;
+    ::VkBuffer glowVB_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};  // one per frame in flight
+    VmaAllocation glowVBAlloc_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    void* glowVBMapped_[2] = {nullptr, nullptr};
 
     std::unordered_map<uint32_t, M2ModelGPU> models;
     // Grace period for model cleanup: track when a model first became instanceless.

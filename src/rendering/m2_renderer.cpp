@@ -1208,8 +1208,12 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
 
         // Smoke particle buffer
         bci.size = MAX_SMOKE_PARTICLES * 6 * sizeof(float);
-        vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &smokeVB_, &smokeVBAlloc_, &allocInfo);
-        smokeVBMapped_ = allocInfo.pMappedData;
+        // One per frame in flight: the CPU writes these every frame while the
+        // GPU may still be drawing the previous frame from them.
+        for (int f = 0; f < 2; ++f) {
+            vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &smokeVB_[f], &smokeVBAlloc_[f], &allocInfo);
+            smokeVBMapped_[f] = allocInfo.pMappedData;
+        }
 
         // The GPU path's records and curves, one of each per frame in flight
         // so a frame's writes never land in what the previous frame is still
@@ -1262,13 +1266,21 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
 
         // Dedicated glow sprite buffer (separate from particle VB to avoid data race)
         bci.size = MAX_GLOW_SPRITES * 9 * sizeof(float);
-        vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &glowVB_, &glowVBAlloc_, &allocInfo);
-        glowVBMapped_ = allocInfo.pMappedData;
+        // One per frame in flight: the CPU writes these every frame while the
+        // GPU may still be drawing the previous frame from them.
+        for (int f = 0; f < 2; ++f) {
+            vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &glowVB_[f], &glowVBAlloc_[f], &allocInfo);
+            glowVBMapped_[f] = allocInfo.pMappedData;
+        }
 
         // Ribbon vertex buffer - triangle strip: pos(3)+color(3)+alpha(1)+uv(2)=9 floats/vert
         bci.size = MAX_RIBBON_VERTS * 9 * sizeof(float);
-        vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &ribbonVB_, &ribbonVBAlloc_, &allocInfo);
-        ribbonVBMapped_ = allocInfo.pMappedData;
+        // One per frame in flight: the CPU writes these every frame while the
+        // GPU may still be drawing the previous frame from them.
+        for (int f = 0; f < 2; ++f) {
+            vmaCreateBuffer(vkCtx_->getAllocator(), &bci, &aci, &ribbonVB_[f], &ribbonVBAlloc_[f], &allocInfo);
+            ribbonVBMapped_[f] = allocInfo.pMappedData;
+        }
     }
 
     // --- Create white fallback texture ---
@@ -1395,9 +1407,9 @@ void M2Renderer::shutdown() {
     glowTexture_.reset();
 
     // Clean up particle/ribbon buffers
-    destroy(alloc, smokeVB_, smokeVBAlloc_);
-    destroy(alloc, glowVB_, glowVBAlloc_);
-    destroy(alloc, ribbonVB_, ribbonVBAlloc_);
+    for (int f = 0; f < 2; ++f) destroy(alloc, smokeVB_[f], smokeVBAlloc_[f]);
+    for (int f = 0; f < 2; ++f) destroy(alloc, glowVB_[f], glowVBAlloc_[f]);
+    for (int f = 0; f < 2; ++f) destroy(alloc, ribbonVB_[f], ribbonVBAlloc_[f]);
     // Particle record and curve buffers (sets freed with their pool)
     for (int i = 0; i < 2; i++) {
         destroy(alloc, particleRecordBuf_[i], particleRecordAlloc_[i]);

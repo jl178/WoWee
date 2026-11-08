@@ -3183,9 +3183,9 @@ void M2Renderer::recordGlowSprites(VkCommandBuffer cmd, VkDescriptorSet perFrame
     // Soft particles: the halos are uploaded here and drawn in the late pass
     // (renderSoftParticles), which reads the scene's depth.
     glowSoftCount_ = 0;
-    if (softDeferred_ && !glowSprites_.empty() && glowVB_ && glowTexDescSet_) {
+    if (softDeferred_ && !glowSprites_.empty() && glowVB_[vkCtx_->getCurrentFrame() % 2] && glowTexDescSet_) {
         const size_t uploadCount = std::min(glowSprites_.size(), MAX_GLOW_SPRITES);
-        float* dst = static_cast<float*>(glowVBMapped_);
+        float* dst = static_cast<float*>(glowVBMapped_[vkCtx_->getCurrentFrame() % 2]);
         for (size_t gi = 0; gi < uploadCount; gi++) {
             const auto& gs = glowSprites_[gi];
             *dst++ = gs.worldPos.x;
@@ -3201,7 +3201,7 @@ void M2Renderer::recordGlowSprites(VkCommandBuffer cmd, VkDescriptorSet perFrame
         glowSoftCount_ = static_cast<uint32_t>(uploadCount);
     } else
     // Render glow sprites as billboarded additive point lights
-    if (!glowSprites_.empty() && particleAdditivePipeline_ && glowVB_ && glowTexDescSet_) {
+    if (!glowSprites_.empty() && particleAdditivePipeline_ && glowVB_[vkCtx_->getCurrentFrame() % 2] && glowTexDescSet_) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, particleAdditivePipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 particlePipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
@@ -3215,7 +3215,7 @@ void M2Renderer::recordGlowSprites(VkCommandBuffer cmd, VkDescriptorSet perFrame
 
         // Write glow vertex data directly to mapped buffer (no temp vector)
         size_t uploadCount = std::min(glowSprites_.size(), MAX_GLOW_SPRITES);
-        float* dst = static_cast<float*>(glowVBMapped_);
+        float* dst = static_cast<float*>(glowVBMapped_[vkCtx_->getCurrentFrame() % 2]);
         for (size_t gi = 0; gi < uploadCount; gi++) {
             const auto& gs = glowSprites_[gi];
             *dst++ = gs.worldPos.x;
@@ -3230,7 +3230,7 @@ void M2Renderer::recordGlowSprites(VkCommandBuffer cmd, VkDescriptorSet perFrame
         }
 
         VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &glowVB_, &offset);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &glowVB_[vkCtx_->getCurrentFrame() % 2], &offset);
         vkCmdDraw(cmd, static_cast<uint32_t>(uploadCount), 1, 0, 0);
     }
 
