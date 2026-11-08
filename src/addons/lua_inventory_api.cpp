@@ -3538,9 +3538,13 @@ const game::LootRollEntry* rollFor(game::GameHandler* gh, int rollId) {
 
 // Which buttons the server said it would accept. The same three bits the
 // roll packet carries.
-constexpr uint8_t kRollNeed       = 0x01;
-constexpr uint8_t kRollGreed      = 0x02;
-constexpr uint8_t kRollDisenchant = 0x04;
+// SMSG_LOOT_START_ROLL's vote mask (AzerothCore ROLL_FLAG_TYPE_*): 0x01 is
+// pass, always set. Read one bit low, Need came from the pass bit (always
+// offered) and Greed from the need bit - an item the class could not need
+// had no Greed button.
+constexpr uint8_t kRollNeed       = 0x02;
+constexpr uint8_t kRollGreed      = 0x04;
+constexpr uint8_t kRollDisenchant = 0x08;
 
 } // namespace
 

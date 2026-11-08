@@ -561,7 +561,10 @@ void InventoryHandler::registerOpcodes(DispatchTable& table) {
         // a fifth waits for one to close.
         int shownRolls = 0;
         for (const auto& r : lootRolls_) if (r.shown) ++shownRolls;
-        roll.shown = shownRolls < stock_death::kMaxShownLootRolls;
+        // An item not cached yet would open as "Item #37000" and stay so: the
+        // window reads the name once. It waits for the query instead.
+        roll.awaitingInfo = !(info && !info->name.empty());
+        roll.shown = !roll.awaitingInfo && shownRolls < stock_death::kMaxShownLootRolls;
         // The roll id the interface will ask every later question by. Its own
         // number: the slot plus one was unique only while one roll was open,
         // and two corpses both rolling their first item shared it.
@@ -1476,7 +1479,7 @@ void InventoryHandler::showPendingLootRolls() {
     for (const auto& r : lootRolls_) if (r.shown) ++shownRolls;
     for (auto& r : lootRolls_) {
         if (shownRolls >= stock_death::kMaxShownLootRolls) return;
-        if (r.shown) continue;
+        if (r.shown || r.awaitingInfo) continue;
         r.shown = true;
         ++shownRolls;
         // With the countdown it arrived with, as 0x6fb180 does; the time left
@@ -5291,8 +5294,26 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
               " class=", data.itemClass, " subClass=", data.subClass,
               " invType=", data.inventoryType, " valid=", data.valid);
 
+    if (!data.valid) {
+        // No such item: a roll that waited for it opens with its number.
+        bool released = false;
+        for (auto& r : lootRolls_) {
+            if (r.awaitingInfo && r.itemId == (data.entry & 0x7FFFFFFFu)) { r.awaitingInfo = false; released = true; }
+        }
+        if (released) showPendingLootRolls();
+    }
     if (data.valid) {
         owner_.itemInfoCacheRef()[data.entry] = data;
+        // Rolls that waited for this item to be named open now.
+        bool rollReady = false;
+        for (auto& r : lootRolls_) {
+            if (!r.awaitingInfo || r.itemId != data.entry) continue;
+            r.awaitingInfo = false;
+            r.itemName = data.name;
+            r.itemQuality = static_cast<uint8_t>(data.quality);
+            rollReady = true;
+        }
+        if (rollReady) showPendingLootRolls();
         rebuildOnlineInventory();
         maybeDetectVisibleItemLayout();
 

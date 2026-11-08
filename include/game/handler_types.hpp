@@ -476,6 +476,9 @@ struct LootRollEntry {
     /// Its GroupLootFrame is up. At most four are (0x6fb2c0); a fifth roll
     /// waits, counting down unseen, until one of them closes (0x6fb180).
     bool shown = false;
+    /// The item was not cached when the roll began: its window waits for the
+    /// item query, as stock fires START_LOOT_ROLL only once it can name the item.
+    bool awaitingInfo = false;
 
     struct PlayerRollResult {
         std::string playerName;
