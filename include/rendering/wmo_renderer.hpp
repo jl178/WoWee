@@ -199,6 +199,14 @@ public:
     bool computeVisibility(const Camera& camera, std::optional<float> groundBelow = std::nullopt);
     /// What computeVisibility found about the outdoors.
     bool outdoorSealed() const { return visSealed_; }
+    /// The outdoors as seen from an interior, in pixels: the union of the
+    /// portal rectangles the walk opened onto it (0x79a790 draws everything
+    /// outside only inside it). Empty when the camera is outside or sees the
+    /// whole screen. setOutdoorScissor takes the framebuffer extent.
+    void setOutdoorScissor(uint32_t width, uint32_t height);
+    [[nodiscard]] bool outdoorClipped() const { return outdoorClip_; }
+    [[nodiscard]] VkRect2D outdoorScissor() const { return outdoorScissor_; }
+    [[nodiscard]] VkRect2D fullScissor() const { return fullScissor_; }
     /// Whether the walk ran (WOWEE_WMO_PORTALS=0 turns it off): without it
     /// outdoorSealed() is always false and says nothing.
     bool portalWalkActive() const { return visActive_; }
@@ -1279,6 +1287,13 @@ private:
     std::vector<InstanceVis> instanceVis_;
     bool visActive_ = false;           ///< the walk ran this frame
     bool visSealed_ = false;
+    /// The camera's interior instance (SIZE_MAX outside) and the NDC
+    /// rectangle the outdoors shows through, from computeVisibility.
+    size_t visCamInstance_ = static_cast<size_t>(-1);
+    float visOutdoorNdc_[4] = {-1.0f, -1.0f, 1.0f, 1.0f};
+    bool outdoorClip_ = false;
+    VkRect2D outdoorScissor_{};
+    VkRect2D fullScissor_{};
     std::string visSkybox_;            ///< MOSB from the walk, camera inside
     /// Doodad visibility by slot, read by M2Renderer's cull.
     std::vector<uint8_t> doodadVisible_;

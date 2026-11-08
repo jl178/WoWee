@@ -2097,6 +2097,32 @@ void WMORenderer::prepareRender() {
     }
 }
 
+void WMORenderer::setOutdoorScissor(uint32_t width, uint32_t height) {
+    fullScissor_ = {{0, 0}, {width, height}};
+    const float* r = visOutdoorNdc_;
+    const bool whole = r[0] <= -1.0f && r[1] <= -1.0f && r[2] >= 1.0f && r[3] >= 1.0f;
+    const bool wasClipped = outdoorClip_;
+    outdoorClip_ = visCamInstance_ != static_cast<size_t>(-1) && !whole && !visSealed_;
+    if (outdoorClip_ != wasClipped) {
+        // Said on each change: whether the outdoors is narrowed to a portal
+        // is otherwise invisible until something looks wrong through it.
+        LOG_INFO("WMO outdoor clip ", outdoorClip_ ? "on" : "off", " (NDC ", r[0], ",", r[1],
+                 " .. ", r[2], ",", r[3], ")");
+    }
+    if (!outdoorClip_) { outdoorScissor_ = fullScissor_; return; }
+    const auto px = [](float ndc, uint32_t size) {
+        const float v = (std::clamp(ndc, -1.0f, 1.0f) + 1.0f) * 0.5f * static_cast<float>(size);
+        return static_cast<int32_t>(v);
+    };
+    // Rounded outwards so the edge of the opening is not shaved off.
+    const int32_t x0 = std::max(0, px(r[0], width) - 1);
+    const int32_t y0 = std::max(0, px(r[1], height) - 1);
+    const int32_t x1 = std::min(static_cast<int32_t>(width), px(r[2], width) + 2);
+    const int32_t y1 = std::min(static_cast<int32_t>(height), px(r[3], height) + 2);
+    outdoorScissor_ = {{x0, y0}, {static_cast<uint32_t>(std::max(0, x1 - x0)),
+                                  static_cast<uint32_t>(std::max(0, y1 - y0))}};
+}
+
 void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
                          const glm::vec3* viewerPos) {
     cullForRecording(camera, viewerPos);
@@ -2392,6 +2418,9 @@ void WMORenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     int currentPipelineKind = wireframeMode ? -1 : 0;
     // Counted here and added once: more than one slice may be recording.
     uint32_t drawCalls = 0;
+    // Which scissor is set: the outdoor opening or the whole target.
+    bool scissorOutdoor = false;
+    if (outdoorClip_) vkCmdSetScissor(cmd, 0, 1, &fullScissor_);
 
     for (size_t li = sliceBegin; li < sliceEnd; ++li) {
         const auto& dl = drawLists_[li];
@@ -2421,6 +2450,19 @@ void WMORenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         for (size_t vg = 0; vg < dl.visibleGroups.size(); ++vg) {
             const uint32_t gi = dl.visibleGroups[vg];
             const auto& group = model.groups[gi];
+            // From inside a building, whatever is outside it - another
+            // building, or this one's own exterior groups - shows only through
+            // the portal opening (0x79a790): Stormwind's bridge group is seen
+            // through the gate, not across the whole screen past its edges.
+            if (outdoorClip_) {
+                const bool outside = dl.instanceIndex != visCamInstance_ ||
+                                     (group.groupFlags & stock_wmo_portal::kGroupExterior) != 0;
+                if (outside != scissorOutdoor) {
+                    const VkRect2D sc = outside ? outdoorScissor_ : fullScissor_;
+                    vkCmdSetScissor(cmd, 0, 1, &sc);
+                    scissorOutdoor = outside;
+                }
+            }
             const stock_wmo_portal::Planes* planes = cullRanges ? &dl.groupPlanes[vg] : nullptr;
 
             // Bind vertex + index buffers
@@ -2499,6 +2541,7 @@ void WMORenderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             }
         }
     }
+    if (scissorOutdoor) vkCmdSetScissor(cmd, 0, 1, &fullScissor_);
     lastDrawCalls.fetch_add(drawCalls, std::memory_order_relaxed);
 }
 
@@ -5522,6 +5565,9 @@ bool WMORenderer::computeVisibility(const Camera& camera, std::optional<float> g
         if (visActive_) std::fill(doodadVisible_.begin(), doodadVisible_.end(), uint8_t{1});
         visActive_ = false;
         visSealed_ = false;
+        visCamInstance_ = static_cast<size_t>(-1);
+        visOutdoorNdc_[0] = -1.0f; visOutdoorNdc_[1] = -1.0f;
+        visOutdoorNdc_[2] = 1.0f; visOutdoorNdc_[3] = 1.0f;
         visSkybox_.clear();
         return false;
     }
@@ -5561,6 +5607,14 @@ bool WMORenderer::computeVisibility(const Camera& camera, std::optional<float> g
     }
     const bool camInside = camInst != std::numeric_limits<size_t>::max();
     visSealed_ = camInside && outdoor.empty();
+    visCamInstance_ = camInside ? camInst : static_cast<size_t>(-1);
+    if (camInside && !outdoor.empty()) {
+        visOutdoorNdc_[0] = outdoor.minX; visOutdoorNdc_[1] = outdoor.minY;
+        visOutdoorNdc_[2] = outdoor.maxX; visOutdoorNdc_[3] = outdoor.maxY;
+    } else {
+        visOutdoorNdc_[0] = -1.0f; visOutdoorNdc_[1] = -1.0f;
+        visOutdoorNdc_[2] = 1.0f; visOutdoorNdc_[3] = 1.0f;
+    }
 
     // Every other instance, and the camera's own exterior, from outside -
     // through the outdoor view when the camera is inside (0x79a790 with the

@@ -4024,6 +4024,16 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     }
     const bool sealedIndoors = wmoRenderer && camera && !skipWMO &&
                                wmoRenderer->computeVisibility(*camera, groundUnderCamera);
+    // The opening the outdoors shows through from an interior, in pixels:
+    // terrain, grass, the sky and every map object outside are drawn only
+    // inside it, as stock 0x79a790 narrows the outdoor pass.
+    if (wmoRenderer) wmoRenderer->setOutdoorScissor(activeRenderExtent_.width, activeRenderExtent_.height);
+    const auto clipToOutdoors = [&](VkCommandBuffer c) {
+        if (wmoRenderer && wmoRenderer->outdoorClipped()) {
+            const VkRect2D sc = wmoRenderer->outdoorScissor();
+            vkCmdSetScissor(c, 0, 1, &sc);
+        }
+    };
     const bool skipTerrain = envSkipTerrain || ablated(AblationPass::Terrain) || sealedIndoors;
     // Under liquid the stock client draws no sky (0x79a870 calls the sky only
     // while 0xcd8794, the camera's liquid, is 0) and clears to the fog colour.
@@ -4122,6 +4132,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                     first = core::ThreadPool::frameWorkers().submit([&]() {
                         VkCommandBuffer cmdA = beginSecondary(SEC_TERRAIN_A);
                         setSecondaryViewportScissor(cmdA);
+                        clipToOutdoors(cmdA);
                         terrainRenderer->recordPart(cmdA, perFrameSet, 0, parts);
                         vkEndCommandBuffer(cmdA);
                     });
@@ -4129,6 +4140,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                 try {
                     VkCommandBuffer cmd = beginSecondary(SEC_TERRAIN);
                     setSecondaryViewportScissor(cmd);
+                    clipToOutdoors(cmd);
                     if (terrainCulled) terrainRenderer->recordPart(cmd, perFrameSet, parts - 1, parts);
                     if (drawGrass) grassRenderer_->render(cmd, frameIdx, perFrameSet);
                     vkEndCommandBuffer(cmd);
@@ -4264,6 +4276,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         {
             VkCommandBuffer cmd = beginSecondary(SEC_SKY);
             setSecondaryViewportScissor(cmd);
+            clipToOutdoors(cmd);
             if (skySystem && camera && !skipSky) {
                 rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
                     timeOfDay,
@@ -4440,6 +4453,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
 
     } else {
         // ── Fallback: single-threaded inline recording (original path) ──
+        clipToOutdoors(currentCmd);
 
         if (terrainRenderer && camera && terrainEnabled && !skipTerrain) {
             auto terrainStart = std::chrono::steady_clock::now();
@@ -4481,6 +4495,10 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             if (vkCtx) vkCtx->gpuMark(currentCmd, "sky");
         }
 
+        if (wmoRenderer && wmoRenderer->outdoorClipped()) {
+            const VkRect2D full = wmoRenderer->fullScissor();
+            vkCmdSetScissor(currentCmd, 0, 1, &full);
+        }
         if (wmoRenderer && camera && !skipWMO) {
             wmoRenderer->prepareRender();
             auto wmoStart = std::chrono::steady_clock::now();
