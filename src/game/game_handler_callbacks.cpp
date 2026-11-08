@@ -3363,6 +3363,15 @@ void GameHandler::addGlobalStringChatLine(const char* key, const std::string& fa
     if (!text.empty()) addSystemChatMessage(text);
 }
 
+void GameHandler::addGlobalStringChatLineAs(game::ChatType type, const char* key,
+                                            const std::string& fallback,
+                                            const std::vector<std::string>& args) {
+    std::string text = globalString(services_.assetManager, key);
+    if (text.empty()) text = fallback;
+    if (!args.empty()) text = formatGlobalString(text, args);
+    if (!text.empty()) addLocalChatLine(type, text);
+}
+
 void GameHandler::displayGameMessageNaming(uint64_t guid, const char* key, const std::string& fallback,
                                            std::vector<std::string> args, bool plain) {
     if (guid == 0) return;

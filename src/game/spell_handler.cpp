@@ -5792,10 +5792,12 @@ void SpellHandler::extractSkillFields(const FlatFieldMap& fields) {
 
             const std::string& skillName = owner_.getSkillName(skillId);
             if (skillName.empty()) continue;
+            // As CHAT_MSG_SKILL, in the skill colour (blue), not a system line.
             if (gained)
-                owner_.displayGameMessage("ERR_SKILL_GAINED_S", "You have gained the " + skillName + " skill.", {skillName});
+                owner_.addGlobalStringChatLineAs(ChatType::SKILL, "ERR_SKILL_GAINED_S",
+                    "You have gained the " + skillName + " skill.", {skillName});
             else
-                owner_.displayGameMessage("ERR_SKILL_UP_SI",
+                owner_.addGlobalStringChatLineAs(ChatType::SKILL, "ERR_SKILL_UP_SI",
                     "Your skill in " + skillName + " has increased to " + std::to_string(skill.value) + ".",
                     {skillName, std::to_string(skill.value)});
         }
