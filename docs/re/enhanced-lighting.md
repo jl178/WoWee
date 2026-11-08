@@ -220,7 +220,7 @@ Two systems:
 
 Wowee already has a froxel volumetric fog (`lightShafts`, `mistDensity`,
 `volumetric_fog_inject.comp`) with shadowed in-scattering, a height falloff
-and HG phase; the Enhanced preset doubles its mist (section 8). Wowee's base
+and HG phase; the Enhanced preset keeps its stock mist (section 8c). Wowee's base
 extinction works out at 0.0013/yd in Elwynn by day, the same order as the
 0.001 that 370 of Enhanced's LightParams carry in `Field_12_0_1_65617_031`
 (a likely volumetric density; unconfirmed).
@@ -229,12 +229,12 @@ extinction works out at 0.0013/yd in Elwynn by day, the same order as the
 `assets/shaders/enhanced_haze.frag.glsl`, a full-screen pass after the
 opaque scene, blended `src.rgb + dst * src.a`): one global layer of the
 model above over the whole view, integrated in closed form along each
-pixel's ray instead of in cells - density `0.0006/yd * exp(-(z - ground) /
-220 yd)`, a 40-yard clear start, sky pixels taken to 5000 yd, in-scattering
-of the fog colour (x0.9) and the sun (x1.1 times HG g 0.7 mixed 60/40 with
+pixel's ray instead of in cells - density `0.00022/yd * exp(-(z - ground) /
+220 yd)` (first 0.0006; section 8c), clear for 120 yd and ramping in over 400, sky pixels taken to 5000 yd, in-scattering
+of the fog colour (x0.35) and the sun (x1.1 times HG g 0.7 mixed 60/40 with
 even scattering; Enhanced's phase table itself was not read), outdoors
 only. Wowee's froxel mist still does the shadowed shafts in the first 400
-yards; with the haze on, the screen-space sun shafts are 1.6x stronger and
+yards; with the haze on, the screen-space sun shafts (no stronger, section 8b)
 keep three quarters of the sun's hue instead of half. 0.06 ms at 1280x540.
 The constants were set side by side against Enhanced's Goldshire afternoon
 (section 9). Not ported: the cubic slice spacing, several layers, the
@@ -288,7 +288,7 @@ that is 0 everywhere. So Enhanced's denser look is its settings
 models, not new placement data. The Enhanced preset uses the clutter maximum.
 
 Wowee's experimental grass generator ("Grass (experimental)") did not stall
-the client: switching it on in Goldshire spends 17-32 ms of the main
+the client (measured before the round-3 change below): switching it on in Goldshire spends 17-32 ms of the main
 thread a frame (`beginFrame/grass+misc`) for about a second while it grows
 the blades around the player (136834 generated, 34173 after culling),
 then costs 0.02 ms a frame. The scripted test driver that switched it on
@@ -296,13 +296,29 @@ stopped advancing at that point, which is what read as a stall; the client
 kept running. It stays out of the preset until its generation is spread
 over frames or moved off the main thread.
 
+Round 3: the generator's slice is now sized by time (`Renderer::
+updateGrassPopulation`, `kGrassSliceMs` 2.5): after each slice the cell
+count is set to what 2.5 ms bought at the rate just measured, rising by at
+most a quarter a frame. Ordinary slices now stay near that budget, but two
+costs are not in the cells and remain: the first sight of each ground
+effect derives its profile from the effect's doodad models (one 40-80 ms
+frame each, seven in Goldshire), and the finished field's upload packs and
+stages 175264 blades (10-13 ms, once per rebuild). Side by side the blades
+also read as dark stubs against an afternoon sun, nothing like Enhanced's
+lit clutter. So the preset carries Enhanced's distance (200 yd, its
+groundEffectDist) and the terrain's own density and height for the grass
+rows but leaves the generator off; prewarming the profiles at zone load,
+packing the upload across frames, and lighting the blades are what it
+needs first.
+
 ## 8. What the Enhanced preset sets
 
 The "Enhanced" quality preset (`kGraphicsPresets[kEnhancedPresetIndex]`,
 `enhancedEnhancements()`): Ultra's rows plus ambient occlusion, the colour
-grade, Enhanced's daylight, the Medium light volume at twice the mist
+grade, Enhanced's daylight, the Medium light volume at the stock mist
 (High's volume cost 2.5 ms more GPU at 1280x540 for little visible
-difference side by side), soft particles (Enhanced's "Depth Based
+difference side by side; twice the mist was too foggy in play, section 8c),
+soft particles (Enhanced's "Depth Based
 Opacity"), HD water and sky reflections (its PBR water and SSR); 2400-yard
 view distance, 500-yard shadows, ground clutter 150%, and FXAA instead of
 MSAA (Enhanced's anti-aliasing is CMAA2, a post filter, and the occlusion
@@ -313,6 +329,57 @@ brighter than 0.8 in nine taps of the glow's quarter-size scene, added on
 its bloom shader was not read, so the knee and spread were set by eye
 against its capture. These four rows live on their own settings page,
 "Enhancements: Enhanced".
+
+## 8b. Round 3: distance, shaft depth, and what blew out
+
+- **Over-bright backlit faces.** A sunlit trunk beside an off-screen
+  afternoon sun went toward white with the stronger screen-space shafts,
+  the fill and the bloom stacked on it. The shafts no longer get stronger
+  with the haze (only golder), the bloom's addition is capped at 0.25 and
+  the fill at 1.5x the light a pixel had.
+- **Shaft depth.** Tried: the froxel mist over 800 yards instead of 400
+  (same cells). Its inject pass went from 0.3 ms to 6.6 ms in Goldshire -
+  more of the volume in the dense part of the frustum gathering local
+  lights and sampling the shadow map - so it was taken out again. Longer
+  shafts need the inject cost per cell cut first (a coarser far half, or
+  the light gather skipped past 200 yd).
+- **Long view (the reference client)** row (`longView`, on the Enhanced page):
+  Enhanced's outdoor fog ends at 18000 yd over a 7000-yard far clip; here the
+  frame fog may end at 18/7 of the view distance instead of at it (maps
+  below 530, not under water), so the land at the edge of the 2400-yard
+  view is hazy rather than gone, and the WDL horizon and the sun haze carry
+  the distance past it. The view distance itself stays at 2400, Wowee's
+  maximum: Enhanced's 1900-yard horizonStart is the range it draws in full
+  detail, which 2400 already covers, and past that both clients draw the
+  low-detail horizon. Raising the detailed range past 2400 means a terrain
+  load radius of seven or more tiles (225 tiles resident against 169) and
+  was not measured here.
+
+## 8c. Too foggy in play (round 2 as Jered first played it)
+
+Jered's first evening in Goldshire on the round-2 preset (17:52, under
+cloud) was a grey wall: low contrast, washed foreground, shade lifted flat.
+Four things stacked, all fixed:
+
+1. The froxel mist at twice its density (chosen in a clear afternoon), and
+   rain thickening it a further 2.2x. Back to the stock 1.
+2. The haze from 40 yards at 0.0006/yd, with a third of its light from the
+   fog colour - grey under cloud. Now 0.00022/yd, clear for 120 yards and
+   ramping in over the next 400, the fog colour's share 0.35, and thinned
+   by 80% in rain or snow; what is left is the sun's forward light, gold
+   toward a low sun and little elsewhere.
+3. The fill light lifting shade by up to 1.5x, sun or not. Now at most
+   1.15x, only by day, and 70% less in rain, so shade stays clearly darker
+   than what the sun reaches.
+4. The daylight trend brightening the fog colour by 30%: the fog colour
+   now keeps Light.dbc's value (the sky bands keep the trend). And the
+   colour grade lays at most 0.6 of Enhanced's curve: Enhanced grades a
+   tone-mapped linear picture, and on 3.3.5's already bright mid-tones the
+   full lift washed them out.
+
+Checked at 8:00, 12:00, 15:00, 17:48, 19:00, 22:30 and in previewed rain
+(`enhanced/lab/shots/tod_sheet.png`): clear and contrasty by day, gold
+toward the evening sun, dark at night, and rain no greyer than Ultra's.
 
 ## 9. Measured cost and the remaining gap
 
@@ -353,6 +420,34 @@ What still separates the two pictures, largest first:
 4. Per-zone light keyframes: only the average trend is ported.
 5. Draw distance: Enhanced draws terrain to 7000 yd with fog ending at 18000;
    Wowee stops at 2400 and its fog ends at the far clip.
+
+## 9b. An HDR/linear path - scoped, not built
+
+What it would take, from reading the pipeline (`post_process_pipeline.cpp`,
+`vk_context.cpp`):
+
+1. Scene targets in RGBA16F instead of the swapchain's B8G8R8A8_UNORM
+   (`initFXAAResources`, the FSR targets): about 2x the colour memory, and
+   every pipeline built against those render passes rebuilt. MSAA resolve
+   and the depth copies are unaffected.
+2. A tone-map step at the end of the composite (`fxaa.frag`) - the only
+   place that writes the swapchain - before the grade, which then sees the
+   same 0..1 picture it does now.
+3. Light in linear units in the lit shaders: today terrain, WMO, M2 and
+   character shaders clamp ambient + diffuse at 1 per channel as stock does
+   (`stock_light::terrainLight`), and their colours are display-encoded.
+   With the Enhanced toggles on, the clamp would lift and the sun take
+   Enhanced's F052 intensity (1.35-1.5 by day); with them off the shaders
+   would write exactly what they write now, so stock stays untouched. Each
+   of the four shader families needs that branch, plus the sky, clouds,
+   water and particles to agree on the scale.
+4. Bloom and the haze reading the unclamped values, so a highlight glows by
+   how bright it is rather than by how close to white.
+
+Roughly: a day for 1-2 and the bloom, several for 3 across every shader
+family, then a tuning pass against Enhanced. The 16F target costs bandwidth
+on the laptop's integrated GPU (an estimated 0.5-1 ms at 2560x1080; not
+measured). It is the change that would close most of gap 2 below.
 
 ## 10. Not done, and why
 

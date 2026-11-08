@@ -119,6 +119,12 @@ struct Enhancements {
     /// Bloom over the highlights, 0 off (fxaa.frag bloomAt). Enhanced ships
     /// its Bloom Intensity at the maximum; stock has only the glow.
     float bloom = 0.0f;
+    /// The distance fog ends well past the view distance, as the reference client's
+    /// does (18000 yards over a 7000-yard far clip), so the land is not
+    /// swallowed by a fog wall at the edge of what is drawn; the WDL horizon
+    /// and the sun haze carry the distance. Off is stock: the fog ends at
+    /// the far clip.
+    bool  longView = false;
 
     // ---- Water and weather -------------------------------------------------
     bool  shorelineFoam = false;

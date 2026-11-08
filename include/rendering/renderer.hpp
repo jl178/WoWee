@@ -1079,6 +1079,9 @@ private:
     uint32_t grassRebuilds_ = 0;
     size_t grassLastCount_ = 0;
     double grassWorstGenerateMs_ = 0.0;
+    /// Lattice cells the grass generator walks a frame, retuned after every
+    /// slice to the time the last one took (updateGrass, kGrassSliceMs).
+    size_t grassCellsPerSlice_ = 8000;
 
     // CPU timing stats (last frame/update).
     double lastUpdateMs = 0.0;

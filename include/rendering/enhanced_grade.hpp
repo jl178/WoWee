@@ -41,6 +41,11 @@ inline constexpr float kKalimdor[kCurveSize] = {
     0.553f, 0.588f, 0.631f, 0.667f, 0.706f, 0.741f, 0.780f, 0.824f,
     0.863f, 0.902f, 0.937f, 0.969f, 0.988f, 0.996f, 0.996f, 1.000f};
 
+/// How much of the curve is laid on at noon. Enhanced grades a picture lit in
+/// linear light and tone-mapped; Wowee's 3.3.5 light is already bright in
+/// the mid-tones, and the full lift washed them out in Jered's first play.
+inline constexpr float kMaxWeight = 0.6f;
+
 /// The curve for a map, or null where Enhanced draws no grade (instances,
 /// Outland and Northrend have no graded light in Enhanced's data).
 inline const float* curveForMap(int mapId) {

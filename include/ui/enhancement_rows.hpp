@@ -743,6 +743,15 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "bloomAt in the glow composite (fxaa.frag): 9 taps of the quarter-size "
                  "scene; keeps that pass running",
      .asFloat = &Enhancements::bloom},
+    {.key = "longview", .label = "Long view (the reference client)", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
+     .tooltip = "The distance fog ends well past the edge of what is drawn, as\n"
+                "the reference client's does, so far hills stand clear in the haze\n"
+                "instead of fading into a wall of fog. Azeroth and Kalimdor.",
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "long_view",
+     .controls = "LightingManager: the frame fog's end at 18/7 of the view distance "
+                 "on maps below 530",
+     .asBool = &Enhancements::longView},
 
     // ------------------------------------------------------------ Experimental
     {.key = "grassenabled", .label = "Grass (experimental)", .kind = SettingKind::Bool,

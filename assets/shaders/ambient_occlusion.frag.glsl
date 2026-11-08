@@ -85,8 +85,12 @@ const float kFadeFrom = 60.0;
 // Fill light: how much of the horizon colour the sky gives an upward face,
 // and how much of the sun the ground sends back up at a typical Elwynn grass
 // and dirt colour. Tuned side by side against Enhanced's shade in Goldshire.
-const float kFillSky = 0.35;
+const float kFillSky = 0.2;
 const float kFillBounce = 0.2;
+// The most the fill may lift a pixel's light, and only in sunlight: shade
+// has to stay clearly darker than what the sun reaches, or the picture
+// goes flat and grey (Jered's Goldshire evening, round 2).
+const float kFillMaxLift = 1.15;
 const vec3 kGroundAlbedo = vec3(0.45, 0.42, 0.28);
 const float kFadeTo = 120.0;
 const int kTaps = 6;
@@ -232,10 +236,12 @@ void main() {
         float up = clamp(n.z * 0.5 + 0.5, 0.0, 1.0);
         vec3 sky = fogColor.rgb * kFillSky;
         vec3 bounce = lightColor.rgb * kGroundAlbedo * (kFillBounce * sunUp);
-        ambNew += (sky * up + bounce * (1.0 - up)) * (pc.target.z * occlusion * (1.0 - indoor));
+        ambNew += (sky * up + bounce * (1.0 - up)) * (pc.target.z * occlusion * (1.0 - indoor) * sunUp);
     }
     vec3 before = amb + dif;
-    vec3 f = clamp((ambNew + dif) / max(before, vec3(1e-3)), 0.0, 2.0);
+    // At most half as bright again: the fill lifts shade, it does not light
+    // a face that is already lit.
+    vec3 f = clamp((ambNew + dif) / max(before, vec3(1e-3)), 0.0, kFillMaxLift);
     if (all(lessThan(abs(f - 1.0), vec3(0.002)))) discard;
     outColor = vec4(f * 0.5, 1.0);
 }

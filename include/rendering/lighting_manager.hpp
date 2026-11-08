@@ -328,6 +328,10 @@ public:
     void setFogSkyBlend(float blend) { fogSkyBlend_ = blend; }
     /// the reference client's daylight trend over 1.12's lights (enhanced_palette.hpp).
     void setEnhancedDaylight(bool on) { enhancedDaylight_ = on; }
+    /// Long view: the fog may end past the far clip (see update()).
+    void setLongView(bool on) { longView_ = on; }
+    /// Enhanced's fog end over its far clip: 18000 / 7000.
+    static constexpr float kLongViewFogReach = 18000.0f / 7000.0f;
     [[nodiscard]] float getFogSkyBlend() const { return fogSkyBlend_; }
     /// How much distance fog, as a multiplier on the zone's own fog distances.
     /// 1 is the DBC unchanged (stock, and the default), above 1 is thicker,
@@ -493,6 +497,7 @@ private:
     bool playerDead_ = false;
     float fogSkyBlend_ = 0.0f;
     bool enhancedDaylight_ = false;
+    bool longView_ = false;
     float fogStrength_ = 1.0f;
     /// stock_light::usesFarClipFog for the map being drawn; read by
     /// sampleLightParams, which shapes each light's fog the way 0x7ecd80

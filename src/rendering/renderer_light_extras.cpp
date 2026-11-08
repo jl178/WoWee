@@ -8,6 +8,7 @@
 #include "rendering/contact_shadow_pass.hpp"
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/vk_context.hpp"
+#include "rendering/weather.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "core/logger.hpp"
 
@@ -101,7 +102,8 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
     if (ambientOcclusion_.frame && !ambientOcclusion_.done && ambientOcclusion_.pass) {
         ambientOcclusion_.done = true;
         const int flags = (enh_.ambientOcclusion ? 1 : 0) | (enh_.fillLight ? 2 : 0);
-        if (ambientOcclusion_.pass->record(cmd, target, perFrame, invViewProj, 1.0f, flags)) {
+        const float wx = weather ? glm::clamp(weather->getIntensity(), 0.0f, 1.0f) : 0.0f;
+        if (ambientOcclusion_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.7f * wx, flags)) {
             vkCtx->gpuMark(cmd, "ambient occlusion");
         }
     }
@@ -116,7 +118,11 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
     }
     if (sunHaze_.frame && !sunHaze_.done && sunHaze_.pass) {
         sunHaze_.done = true;
-        if (sunHaze_.pass->record(cmd, target, perFrame, invViewProj, 1.0f)) {
+        // Rain and snow already close the distance in with their own fog
+        // and sheets: the golden air is a clear day's, so it thins with the
+        // weather rather than adding a grey layer to it.
+        const float wx = weather ? glm::clamp(weather->getIntensity(), 0.0f, 1.0f) : 0.0f;
+        if (sunHaze_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.8f * wx)) {
             vkCtx->gpuMark(cmd, "sun haze");
         }
     }

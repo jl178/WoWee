@@ -104,9 +104,11 @@ TEST_CASE("Enhanced preset: Ultra plus the Enhanced rows, on one-sample depth", 
     CHECK(f.enh.fillLight);
     CHECK(f.enh.sunHaze);
     CHECK(f.enh.bloom > 0.0f);
+    CHECK(f.enh.longView);
+    CHECK(f.enh.grassDistance == 200);
     CHECK(f.enh.shadows);
     CHECK(f.enh.lightShafts >= 2);
-    CHECK(f.enh.mistDensity > 1.0f);
+    CHECK(f.enh.mistDensity <= 1.0f);
     // The occlusion pass reads a one-sample depth: no multisampling.
     CHECK(f.antiAliasing == 0);
     CHECK(f.fxaa);
@@ -119,5 +121,6 @@ TEST_CASE("Enhanced preset: Ultra plus the Enhanced rows, on one-sample depth", 
         CHECK_FALSE(kGraphicsPresets[i].enh.fillLight);
         CHECK_FALSE(kGraphicsPresets[i].enh.sunHaze);
         CHECK(kGraphicsPresets[i].enh.bloom == 0.0f);
+        CHECK_FALSE(kGraphicsPresets[i].enh.longView);
     }
 }

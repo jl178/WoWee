@@ -101,7 +101,7 @@ constexpr rendering::Enhancements presetEnhancements(int level /* 0 Low .. 3 Ult
 /// (docs/re/enhanced-lighting.md section 8). Its ambient occlusion (ASSAO,
 /// SSAOSettings 116), its noon colour grade and its daylight are rows of
 /// their own; its "Compute Effects 3" volumetric fog is the light volume
-/// at twice the mist; its
+/// at the stock mist; its
 /// "Depth Based Opacity" is the soft particles; its PBR water and screen-space
 /// reflections are the HD water and the sky in it.
 constexpr rendering::Enhancements enhancedEnhancements() {
@@ -112,11 +112,25 @@ constexpr rendering::Enhancements enhancedEnhancements() {
     e.fillLight = true;
     e.sunHaze = true;
     e.bloom = 0.6f;
-    // Enhanced's haze is thick and golden toward the sun; Medium's volume
-    // at twice the mist reads closest side by side, and High's volume costs
+    e.longView = true;
+    // Enhanced's ground is covered where 3.3.5's shows bare texture between
+    // tufts. Its clutter data is 1.12's; the cover comes from its settings
+    // (groundEffectDist 200) and models. Wowee's grass field stands in for
+    // it, out to the same 200 yards, at the density and height the terrain
+    // asks for - but stays off for now: side by side its blades read as dark
+    // stubs against the afternoon sun, and the first sight of each ground
+    // effect still costs a 40-80 ms frame deriving its profile (section 7 of
+    // docs/re/enhanced-lighting.md). The values are here for when it is on.
+    e.grass = false;
+    e.grassDensity = 100;
+    e.grassHeight = 100;
+    e.grassDistance = 200;
+    // Medium's light volume at the stock mist: twice the mist, chosen side
+    // by side in an afternoon Goldshire, was a grey wall in Jered's evening
+    // under cloud; the sun haze carries the distance. High's volume costs
     // 2.5 ms more GPU (1280x540, Jered's laptop) for little visible change.
     e.lightShafts = 2;
-    e.mistDensity = 2.0f;
+    e.mistDensity = 1.0f;
     e.softParticles = true;
     e.hdWater = true;
     e.waterReflections = true;

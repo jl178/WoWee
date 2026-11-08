@@ -41,16 +41,24 @@ layout(set = 1, binding = 0) uniform sampler2D uSceneDepth;
 
 layout(push_constant) uniform Push {
     mat4 invViewProj;  // clip -> world, this frame's
-    vec4 target;       // xy the render extent, z strength (0..2), w flags (4 debug)
+    vec4 target;       // xy the render extent, z strength (0..2; weather thins it), w flags (4 debug)
 } pc;
 
 layout(location = 0) out vec4 outColor;
 
-const float kDensity = 0.0006;       // per yard at the ground under the player
+// Thin: Jered's first evening in Goldshire with 0.0006 from 40 yards was
+// a grey wall over the whole view. Enhanced's near field is clear; its air
+// shows over hundreds of yards. Now the density also ramps in over kRamp
+// past the start, so nothing near the player is hazed at all.
+const float kDensity = 0.00022;      // per yard at the ground under the player
 const float kHeightScale = 220.0;    // yards for the air to thin by e
-const float kStart = 40.0;           // yards of clear air in front of the camera
+const float kStart = 120.0;          // yards of clear air in front of the camera
+const float kRamp = 400.0;           // yards over which the haze reaches full density
 const float kSkyDistance = 5000.0;   // how far a sky pixel's ray runs
-const float kSkyScatter = 0.9;       // of the fog colour, light from the sky
+// The haze's colour is the sun's, scattered forward: gold toward a low sun,
+// little elsewhere. The sky's own share is small and taken from the fog
+// colour, which is grey under cloud - most of what made the wall grey.
+const float kSkyScatter = 0.35;      // of the fog colour, light from the sky
 const float kSunScatter = 1.1;       // of the sun colour, at even scattering
 const float kG = 0.7;
 
@@ -73,6 +81,9 @@ void main() {
     float L = d >= 1.0 ? kSkyDistance : len;
     float run = max(L - kStart, 0.0);
     if (run <= 0.0) discard;
+    // The ramp: the first kRamp yards past the start count at a growing
+    // share, as if the start were soft (half of them, in all).
+    run = run > kRamp ? run - 0.5 * kRamp : 0.5 * run * run / kRamp;
 
     float h0 = playerPos.z;
     float base = kDensity * exp(-(cam.z + v.z * kStart - h0) / kHeightScale);

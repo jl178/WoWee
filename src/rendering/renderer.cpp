@@ -1656,6 +1656,7 @@ void Renderer::applyEnhancementsToSubsystems() {
         lightingManager->setFogStrength(e.fogStrength);
         lightingManager->setFogSkyBlend(e.fogSkyBlend);
         lightingManager->setEnhancedDaylight(e.enhancedDaylight);
+        lightingManager->setLongView(e.longView);
     }
 
     // Water, weather and motion. The water and swim switches are handed on
@@ -3887,9 +3888,18 @@ void Renderer::updateGrassPopulation() {
     // every block surveyed becomes a terrain sample, so the budget is set by
     // the cost of sampling rather than of walking: small enough to stay off
     // the frame, large enough that a default window lands in a few slices.
-    constexpr size_t kCellsPerSlice = 64000;
+    //
+    // A fixed 64000 cells cost 17-32 ms a frame on Jered's laptop in
+    // Goldshire - a second of hitching each time the field rebuilt. The slice
+    // is now sized by time instead: after each one the cell count is set to
+    // what kGrassSliceMs would have bought at the rate just measured, so the
+    // field takes more frames to land and no frame pays more than about that.
+    constexpr double kGrassSliceMs = 2.5;
+    constexpr size_t kMinCellsPerSlice = 1000;
+    constexpr size_t kMaxCellsPerSlice = 64000;
+    const size_t cells = grassCellsPerSlice_;
     const auto started = std::chrono::steady_clock::now();
-    const bool done = grassBuilder_.step(sampler, profileFor, kCellsPerSlice);
+    const bool done = grassBuilder_.step(sampler, profileFor, cells);
 
     // Only when it grew, and after every slice rather than at the end: the
     // shaders index this by blade, so it has to reach the device before the
@@ -3900,6 +3910,16 @@ void Renderer::updateGrassPopulation() {
     const double generateMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
     grassWorstGenerateMs_ = std::max(grassWorstGenerateMs_, generateMs);
+    if (generateMs > 0.05) {
+        // Down at once, up by at most a quarter a frame: the cost of a cell
+        // varies several times over across a window (bare road against
+        // dense meadow), and a rate measured on cheap cells overshot on the
+        // next dense ones.
+        const double rate = static_cast<double>(cells) / generateMs;
+        const size_t want = static_cast<size_t>(rate * kGrassSliceMs);
+        grassCellsPerSlice_ = std::clamp(std::min(want, cells + cells / 4), kMinCellsPerSlice,
+                                         kMaxCellsPerSlice);
+    }
     if (!done) return;
 
     std::vector<pipeline::GrassBladeSample>& blades = grassBuilder_.blades();
@@ -4005,7 +4025,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         // continent, weighted by the hour, outdoors and above water only.
         const float* curve = enhanced_grade::curveForMap(static_cast<int>(lightMapId_));
         const float gradeWeight = (enh_.colorGrade && curve && !cameraUnderwater_)
-            ? enhanced_grade::timeWeight(lightingManager->getTimeOfDay()) *
+            ? enhanced_grade::kMaxWeight * enhanced_grade::timeWeight(lightingManager->getTimeOfDay()) *
                   (1.0f - glm::clamp(indoorFactor_, 0.0f, 1.0f))
             : 0.0f;
         postProcessPipeline_->setColorGrade(enh_.colorGrade, gradeWeight, curve == enhanced_grade::kKalimdor);
@@ -6593,10 +6613,12 @@ void Renderer::recordSunShafts() {
             const float peak = std::max({c.r, c.g, c.b, 1e-3f});
             in.tint = glm::mix(glm::vec3(1.0f), c / peak, 0.5f);
             if (enh_.sunHaze) {
-                // With the Enhanced haze the air holds more light: the rays are
-                // stronger and keep more of the sun's gold, as Enhanced's are
-                // through the Goldshire canopy in the afternoon.
-                strength *= 1.6f;
+                // With the Enhanced haze the rays keep more of the sun's gold, as
+                // Enhanced's do through the Goldshire canopy in the afternoon.
+                // Not stronger: 1.6x, then 1.25x, blew a sunlit trunk beside
+                // an off-screen sun toward white with the haze and the bloom
+                // on top of it. The haze's longer shadowed mist (800 yd)
+                // carries the extra light instead.
                 in.tint = glm::mix(glm::vec3(1.0f), c / peak, 0.75f);
             }
             in.sunUV = sun.uv;

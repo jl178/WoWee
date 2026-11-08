@@ -575,7 +575,15 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     // The frame's fog (0x7f16f0): it ends by the far clip - the view
     // distance - and starts at the blended fraction of that end.
     {
-        const float farClip = std::max(viewDistance_, 1.0f);
+        float farClip = std::max(viewDistance_, 1.0f);
+        // Long view (not stock; the Enhanced preset): Enhanced draws to a
+        // 7000-yard far clip and its outdoor fog ends at 18000, so what is
+        // drawn is never swallowed by a fog wall. Here the fog may end at
+        // kLongViewFogReach times the view distance instead of at it, the
+        // WDL horizon carries the land past the clip, and the Enhanced haze
+        // gives the distance its air. Only on the maps whose fog is the
+        // band's own (below 530), never under water.
+        if (longView_ && !farClipFog_ && !isUnderwater) farClip *= kLongViewFogReach;
         stock_light::LightFog blended;
         blended.end = newParams.fogEnd;
         blended.scaler = newParams.fogScaler;
@@ -622,7 +630,6 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         newParams.ambientColor = fp::apply(newParams.ambientColor, fp::kAmbient, w);
         newParams.skyTopColor = fp::apply(newParams.skyTopColor, fp::kSkyTop, w);
         newParams.skyMiddleColor = fp::apply(newParams.skyMiddleColor, fp::kSkyMiddle, w);
-        newParams.fogColor = fp::apply(newParams.fogColor, fp::kSkyFog, w);
         newParams.skyFogColor = fp::apply(newParams.skyFogColor, fp::kSkyFog, w);
         newParams.sunColor = fp::apply(newParams.sunColor, fp::kSun, w);
     }

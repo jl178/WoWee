@@ -227,7 +227,9 @@ vec3 bloomAt(vec2 uv) {
 
 vec3 stockScreenEffect(vec3 c, vec2 uv) {
     vec3 r = stockScreenEffectComposite(c, uv);
-    if (pc.bloom > 0.0) r += bloomAt(uv) * pc.bloom;
+    // Capped: a backlit, haze-lit face beside the sun already sits near
+    // white, and the halo on top of it was what blew it out.
+    if (pc.bloom > 0.0) r += min(bloomAt(uv) * pc.bloom, vec3(0.25));
     if (pc.rollWhite > 0.0) r = highlightRollOff(r);
     if (pc.gradeWeight > 0.0) r = enhancedGrade(r);
     return r;
