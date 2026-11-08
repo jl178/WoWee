@@ -2958,6 +2958,15 @@ static int lua_GetInventoryItemCount(lua_State* L) {
     }
     const auto& slot = *inventorySlotItem(gh->getInventory(), slotId);
     if (slot.empty()) { lua_pushnumber(L, 0); return 1; }
+    // A container answers 0 (Wow.exe 0x5E9E40: an item with the container
+    // type bit reports no stack), so the bag bar and the bank's bag slots,
+    // which draw any count above 0 for a bag, show no "1".
+    constexpr uint8_t kInvTypeBag = 18, kInvTypeQuiver = 27;
+    if (slot.item.bagSlots > 0 || slot.item.inventoryType == kInvTypeBag ||
+        slot.item.inventoryType == kInvTypeQuiver) {
+        lua_pushnumber(L, 0);
+        return 1;
+    }
     // A single item reports a stack of one rather than zero, which is how the
     // count is drawn: zero would print nothing where the client prints nothing
     // for one either, but the two mean different things to a caller.
