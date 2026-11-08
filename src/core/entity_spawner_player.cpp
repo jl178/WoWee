@@ -1104,8 +1104,16 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             if (goEnt && goEnt->hasRotation()) {
                 const float* r = goEnt->rotation();
                 const glm::quat full(r[3], r[0], r[1], r[2]);
-                const glm::quat facing = glm::angleAxis(renderYawM2go, glm::vec3(0.0f, 0.0f, 1.0f));
-                const glm::quat tilt = glm::normalize(full * glm::inverse(facing));
+                // Only the lean is taken from the rotation: its twist about
+                // the vertical is split off (swing-twist) and the facing stays
+                // the orientation's, as before. Taking the facing out by angle
+                // instead turned every object by the difference between the
+                // two yaw conventions - every shop sign in Stormwind.
+                const float twistLen = std::sqrt(full.w * full.w + full.z * full.z);
+                const glm::quat twist = twistLen > 1e-6f
+                    ? glm::quat(full.w / twistLen, 0.0f, 0.0f, full.z / twistLen)
+                    : glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+                const glm::quat tilt = glm::normalize(full * glm::inverse(twist));
                 // Within about a degree of upright: leave the placement alone.
                 if (std::abs(tilt.w) < 0.99996f) {
                     glm::mat4 base(1.0f);
@@ -1154,10 +1162,23 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
             m2Renderer->setInstanceFiresObjectEvents(instanceId, true);
         }
 
-        // ...and the pose the server described before this model existed.
+        // ...and the pose the server described before this model existed:
+        // the state that arrived ahead of it, or else the one the entity
+        // already holds. A model built again for a known object (its render
+        // instance dropped by a renderer clear, a display change) had no
+        // pending state left and came back in its default pose, so a door
+        // the server had opened stood shut until the server spoke again.
         if (auto pending = gameObjectPendingState_.find(guid);
             pending != gameObjectPendingState_.end()) {
             applyGameObjectState(guid, pending->second);
+        } else if (gameHandler_) {
+            const uint16_t bytes1 = game::fieldIndex(game::UF::GAMEOBJECT_BYTES_1);
+            auto entity = gameHandler_->getEntityManager().getEntity(guid);
+            if (bytes1 != 0xFFFF && entity && entity->hasField(bytes1)) {
+                const auto state = static_cast<uint8_t>(entity->getField(bytes1) & 0xFF);
+                gameObjectPendingState_[guid] = state;  // straight to its pose
+                applyGameObjectState(guid, state);
+            }
         }
 
         // Notify transport system for M2 transports (e.g. Deeprun Tram cars)

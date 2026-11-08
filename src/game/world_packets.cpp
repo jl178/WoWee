@@ -1190,6 +1190,22 @@ bool UpdateObjectParser::parseMovementBlock(network::Packet& packet, UpdateBlock
         LOG_DEBUG("  STATIONARY: (", block.x, ", ", block.y, ", ", block.z, "), o=", block.orientation);
     }
 
+    // 0x8 and 0x10, a uint32 each, come before the target, the transport
+    // time and the rotation (AzerothCore Object::BuildMovementUpdate). Read
+    // after them, they were harmless while the rotation was skipped whole -
+    // the byte count came out the same - but once the rotation was decoded
+    // its value was the low guid and half the quaternion, and every game
+    // object with a guid counter leaned at random: Stormwind's shop signs
+    // lay on the street.
+    if (updateFlags & UPDATEFLAG_LOWGUID) {
+        if (rem() < 4) return false;
+        /*uint32_t unknown =*/ packet.readUInt32();
+    }
+    if (updateFlags & UPDATEFLAG_HIGHGUID) {
+        if (rem() < 4) return false;
+        /*uint32_t lowGuid =*/ packet.readUInt32();
+    }
+
     // Target GUID (for units with target)
     if (updateFlags & UPDATEFLAG_HAS_TARGET) {
         if (rem() < 1) return false;
@@ -1222,18 +1238,6 @@ bool UpdateObjectParser::parseMovementBlock(network::Packet& packet, UpdateBlock
         block.hasRotation = true;
         block.rotX = x; block.rotY = y; block.rotZ = z;
         block.rotW = ww > 0.0f ? std::sqrt(ww) : 0.0f;
-    }
-
-    // Low GUID
-    if (updateFlags & UPDATEFLAG_LOWGUID) {
-        if (rem() < 4) return false;
-        /*uint32_t lowGuid =*/ packet.readUInt32();
-    }
-
-    // High GUID
-    if (updateFlags & UPDATEFLAG_HIGHGUID) {
-        if (rem() < 4) return false;
-        /*uint32_t highGuid =*/ packet.readUInt32();
     }
 
     return true;
