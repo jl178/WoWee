@@ -5898,6 +5898,7 @@ void Application::render() {
                     const char* name;
                     ui::UnitPortrait* model;
                     uint32_t* widgetId;
+                    float* facing;
                 };
                 // NOLINTBEGIN(modernize-use-designated-initializers) - a table
                 // whose columns are its field names, with the struct in view
@@ -5999,13 +6000,14 @@ void Application::render() {
                     const char* name;
                     ui::UnitPortrait* model;
                     uint32_t* widgetId;
+                    float* facing;
                 };
                 // NOLINTBEGIN(modernize-use-designated-initializers) - a table
                 // whose columns are its field names, with the struct in view
                 // directly above.
                 const CreatureModel kCreatureModels[] = {
-                    {"PetStableModel",      &stableModel_,    &stableModelWidgetId_},
-                    {"CompanionModelFrame", &companionModel_, &companionModelWidgetId_},
+                    {"PetStableModel",      &stableModel_,    &stableModelWidgetId_,    &stableModelFacing_},
+                    {"CompanionModelFrame", &companionModel_, &companionModelWidgetId_, &companionModelFacing_},
                 };
                 // NOLINTEND(modernize-use-designated-initializers)
                 for (const CreatureModel& cm : kCreatureModels) {
@@ -6022,6 +6024,12 @@ void Application::render() {
                         if (!modelPath.empty()) {
                             sizeFor(*cm.model, frame);
                             cm.model->setFraming(ui::UnitPortrait::Framing::FullBody);
+                            // Model_RotateLeft/Right and the drag turn it by
+                            // SetFacing; the figure ignored it and stood still.
+                            if (frame->modelFacing != *cm.facing) {
+                                cm.model->rotate(frame->modelFacing - *cm.facing);
+                                *cm.facing = frame->modelFacing;
+                            }
                             shown = cm.model->updateCreature(
                                 modelPath,
                                 entitySpawner_->getCreatureSkinPaths(
@@ -6058,6 +6066,10 @@ void Application::render() {
                         }
                         if (!modelPath.empty()) {
                             sizeFor(petModel_, petModel);
+                            if (petModel->modelFacing != petModelFacing_) {
+                                petModel_.rotate(petModel->modelFacing - petModelFacing_);
+                                petModelFacing_ = petModel->modelFacing;
+                            }
                             petModel_.setFraming(ui::UnitPortrait::Framing::FullBody);
                             shown = petModel_.updateCreature(
                                 modelPath,
