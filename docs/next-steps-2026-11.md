@@ -444,3 +444,47 @@ no source edits); doc work.
 - Nov 7 07:40 (Jered): Tol Barad on his client - under the ground, NPCs in the ground, then moved to Hillsbrad. Cause: his client had no Tol Barad pack. His `[server 127.0.0.1:3724]` profile has no pack_url, and the shared override (wowee-dist/.../override) lost the pack files on Nov 6 23:25 when the wowpack agent's cleanup removed what it took for its test install. Without map.dbc for 901 the client draws map 0 terrain at those coordinates (Hillsbrad). Fix: pack_url=http://127.0.0.1:8090/wowpack.json on that profile, then re-select the realm to sync. Follow-ups: the client should refuse or warn when the server puts the player on a map id it has no Map.dbc row for; agent cleanups must never touch the shared override.
 - Nov 7 07:50 (Jered, Tol Barad 0.3.1 played): "awful". Bugs: NPCs sometimes in the floor; quest text and rewards are nonsense; Accept on a quest does nothing (check whether it is the module's quest rows or Wowee's CMSG_QUESTGIVER_ACCEPT_QUEST, and whether quests elsewhere accept). Design: ground textures look bad; no cohesion, assets look randomly placed; the castle on top cannot be entered; reused low-quality assets. Treat the zone as a proof that the pipeline works, not as content; any rework needs a real layout plan with Jered before more placement.
 - Nov 07 21:45: damage meter (663f938), HD water (03d8956), smoother characters (2f83930, 552f14c) merged; full build+ctest of 552f14c before push. Wound down for usage limits. Next session: drift after combat (suspect dd3c1c6 steep-slide latch), ASan soak, 1.3 character lighting (L4, L11, ghost fade, A7), meter "Unknown" names, retired option pages, instance zone channel. Still open for Jered: SW gate bridge clip, new-options-off for existing players, live deploy, mage warrior procs.
+
+## Jered's playtest, Nov 8 (live server 192.168.1.131, priest Kuthelar)
+
+Fixed on the branch (1576bb5..74963b1): screen-wide trail lines (single
+ribbon/glow/smoke vertex buffer with two frames in flight), Dalaran vanishing
+at some camera angles (interior group claimed the camera from a sewer floor
+50 yd down), shoreline line trailing the camera (water read a two-frame-old
+depth copy), ragged shoulder-pad fringe at character select (smooth-leaves
+A2C centred on 0.5, not 224/255), Shift-B / F12 / I default keys (+ migration
+of saved files).
+
+Open, in rough priority:
+- Halls of Lightning door drawn shut while the server let him walk through.
+  Spawn values said state 1 (log "Door state: ... state=1 (shut)"); find the
+  later open (GAMEOBJECT_BYTES_1 update or a custom anim) we did not apply.
+- Clicking an ally in the world targets it, then an enemy right after
+  (mouse, not the unit frame). Look for a second target change on the same
+  click: auto-attack/auto-target or a nearest-enemy fallback.
+- Flash Heal and Prayer of Healing play the directed cast (fireball-like)
+  instead of the omni heal cast. Check how the cast animation is chosen
+  (SpellVisualKit cast anim, SpellCastType OMNI vs DIRECTED for friendly/
+  self-cast spells, 0x7... in the spell_handler notes).
+- Loot roll: no Greed button; item shows as "Item #37000" (name not
+  resolved - query the item and refresh the roll frame when it answers).
+- Party frame combat icon (red circle) offset off the portrait.
+- LFD ready popup shows the Deadmines picture for Halls of Lightning. DBC
+  rows and files are right (207/212 HALLSOFLIGHTNING). Suspect the dungeon id
+  the dialog reads: handleLfgQueueStatus stores lfgDungeonId_ unmasked
+  (social_handler.cpp:4632; every other site masks 0x00FFFFFF), and the list
+  path at :5048 overwrites it.
+- LFD role icon blinks when clicked; world map tiles fill one by one: the UI
+  draws nothing for a texture until it is uploaded (3 per frame, each a
+  device wait). Keep the previous texture until the new one is ready, and
+  upload a newly shown frame's textures as one batch.
+- Moving black marks on spiked shoulder pads in game: suspect contact
+  shadows on characters (asked Jered to toggle it), else Smoother characters.
+- Raid-style party frames and movable party frames (not in stock 3.3.5;
+  an enhancement row - he wants better frames).
+- Stormwind gate span (group 192, interior flag 0x2805) still drawn where
+  stock shows sky; diag patch in scratchpad swgap/diag.patch.
+- Windows package for F:\games\WoW: build with run-windows on 4 cores
+  (--cpuset-cpus), stage without Data/expansions/wotlk/override and without
+  realm settings, serve from wowee-share (:8081) - .97 is a read-only
+  python http.server, no SSH/SMB.
