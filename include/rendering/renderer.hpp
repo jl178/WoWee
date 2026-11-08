@@ -396,8 +396,12 @@ private:
     };
     DepthLightPassState contactShadows_;
     DepthLightPassState ambientOcclusion_;
+    DepthLightPassState sunHaze_;
     [[nodiscard]] bool depthLightPassPossible() const;
-    bool decideDepthLightPass(bool want, DepthLightPassState& s, const char* fragSpv, const char* name);
+    /// `blend` is a ContactShadowPass::Blend, as an int so this header
+    /// needs only the forward declaration.
+    bool decideDepthLightPass(bool want, DepthLightPassState& s, const char* fragSpv, const char* name,
+                              int blend);
     void decideContactShadows();
     void recordContactShadowPass(VkCommandBuffer cmd);
     /// Room light indoors (E12): each unit's own indoor light, read from the

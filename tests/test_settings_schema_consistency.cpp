@@ -347,7 +347,7 @@ TEST_CASE("every panel the client offers still has settings on it", "[settings][
                                  "Combat", "Names", "Nameplates", "Combat Text", "Unit Frames",
                                  "Sound", "Sound Effects", "Chat", "Gameplay",
                                  "Enhancements", "Enhancements: Sky", "Enhancements: Motion",
-                                 "Enhancements: Weather"}) {
+                                 "Enhancements: Weather", "Enhancements: Enhanced"}) {
         INFO("no setting names the category " << category
              << " any more, so that panel is empty or gone");
         CHECK(present.count(category) == 1);
@@ -371,6 +371,8 @@ TEST_CASE("every panel the client offers still has settings on it", "[settings][
     // which need about seventeen hundred units of column between them.
     // Twenty-four with the weather page (docs/enhancements-plan.md E23-E31):
     // the Motion page had no room for a dozen more weather rows.
-    INFO("the schema names " << present.size() << " categories where twenty-four are expected");
-    CHECK(present.size() == 24);
+    // Twenty-five with the Enhanced page (docs/re/enhanced-lighting.md): the
+    // Sky page had no room for its grade, daylight, haze and bloom.
+    INFO("the schema names " << present.size() << " categories where twenty-five are expected");
+    CHECK(present.size() == 25);
 }

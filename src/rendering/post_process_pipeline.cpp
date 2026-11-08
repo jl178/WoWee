@@ -1920,7 +1920,7 @@ void PostProcessPipeline::prepareSceneForFXAA(VkImage scene) {
     if (currentCmd_ == VK_NULL_HANDLE || scene == VK_NULL_HANDLE) return;
     // Without a blur to show, or with nothing to show it for, the plain
     // transition the pass always had.
-    const bool blurWanted = (glowWanted() && (glowAmount_ > 0.0f || glowBlend_ > 0.0f)) ||
+    const bool blurWanted = (glowWanted() && (glowAmount_ > 0.0f || glowBlend_ > 0.0f || bloom_ > 0.0f)) ||
                             ghost_ > 0.001f || nether_ > 0.0f;
     if (!fxaa_.glowImage.image || !blurWanted) {
         transitionImageLayout(currentCmd_, scene,
@@ -2038,7 +2038,7 @@ void PostProcessPipeline::renderFXAAPass() {
         static_cast<float>(nowMs % 3174u) / 3174.0f,
         static_cast<float>(nowMs % 2805u) / 2805.0f,
         static_cast<float>(nowMs % 3600000u) * 0.001f,
-        gradeKalimdor_ ? 1.0f : 0.0f, 0.0f, 0.0f
+        gradeKalimdor_ ? 1.0f : 0.0f, glowWanted() ? bloom_ : 0.0f, 0.0f
     };
     vkCmdPushConstants(currentCmd_, fxaa_.pipelineLayout,
                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), pc);

@@ -1648,7 +1648,10 @@ void Renderer::applyEnhancementsToSubsystems() {
     if (lensFlare) lensFlare->setIntensity(e.lensFlare);
     setSharpStars(e.sharpStars);
     // Soft highlights (E18): the shoulder on the glow composite.
-    if (postProcessPipeline_) postProcessPipeline_->setHighlightRollOff(e.highlightRollOff);
+    if (postProcessPipeline_) {
+        postProcessPipeline_->setHighlightRollOff(e.highlightRollOff);
+        postProcessPipeline_->setBloom(e.bloom);
+    }
     if (lightingManager) {
         lightingManager->setFogStrength(e.fogStrength);
         lightingManager->setFogSkyBlend(e.fogSkyBlend);
@@ -6589,6 +6592,13 @@ void Renderer::recordSunShafts() {
             const glm::vec3 c = lp.diffuseColor;
             const float peak = std::max({c.r, c.g, c.b, 1e-3f});
             in.tint = glm::mix(glm::vec3(1.0f), c / peak, 0.5f);
+            if (enh_.sunHaze) {
+                // With the Enhanced haze the air holds more light: the rays are
+                // stronger and keep more of the sun's gold, as Enhanced's are
+                // through the Goldshire canopy in the afternoon.
+                strength *= 1.6f;
+                in.tint = glm::mix(glm::vec3(1.0f), c / peak, 0.75f);
+            }
             in.sunUV = sun.uv;
             in.strength = strength;
         }

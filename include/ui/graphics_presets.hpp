@@ -109,6 +109,9 @@ constexpr rendering::Enhancements enhancedEnhancements() {
     e.ambientOcclusion = true;
     e.colorGrade = true;
     e.enhancedDaylight = true;
+    e.fillLight = true;
+    e.sunHaze = true;
+    e.bloom = 0.6f;
     // Enhanced's haze is thick and golden toward the sun; Medium's volume
     // at twice the mist reads closest side by side, and High's volume costs
     // 2.5 ms more GPU (1280x540, Jered's laptop) for little visible change.

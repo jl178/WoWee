@@ -41,7 +41,7 @@ layout(push_constant) uniform PC {
     float waveV;        //                        (t mod 2.805 s) / 2.805
     float effectTime;   // seconds, for the nether blur's moving taps
     float gradeCurve;   // 0 the Eastern Kingdoms curve, 1 Kalimdor's
-    float pad4;
+    float bloom;        // Enhanced bloom (not stock): strength, 0 = off
     float pad5;
 } pc;
 
@@ -201,8 +201,33 @@ vec3 enhancedGrade(vec3 c) {
     return mix(c, g, pc.gradeWeight);
 }
 
+// Bloom (not stock; the Enhanced preset's "Bloom Intensity", which Enhanced
+// ships at its maximum): what is brighter than kBloomKnee in a wide tent of
+// the quarter-size scene (nine bilinear taps four texels apart), spread a
+// few dozen pixels and added on. The stock
+// glow above squares its blur, which brightens everything a little; this
+// lifts only the highlights - sunlit leaves, the sky round the sun, the
+// shafts - into a soft halo.
+const float kBloomKnee = 0.8;
+vec3 bloomAt(vec2 uv) {
+    if (pc.glowSource < 0.5) return vec3(0.0);
+    vec2 texel = 1.0 / vec2(textureSize(uGlow, 1));
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            float w = (2.0 - abs(float(x))) * (2.0 - abs(float(y)));
+            vec3 s = textureLod(uGlow, uv + vec2(x, y) * 4.0 * texel, 1.0).rgb;
+            sum += max(s - kBloomKnee, 0.0) * w;
+            wsum += w;
+        }
+    }
+    return sum / wsum / (1.0 - kBloomKnee);
+}
+
 vec3 stockScreenEffect(vec3 c, vec2 uv) {
     vec3 r = stockScreenEffectComposite(c, uv);
+    if (pc.bloom > 0.0) r += bloomAt(uv) * pc.bloom;
     if (pc.rollWhite > 0.0) r = highlightRollOff(r);
     if (pc.gradeWeight > 0.0) r = enhancedGrade(r);
     return r;

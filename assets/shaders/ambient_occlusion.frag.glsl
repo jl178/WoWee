@@ -22,7 +22,8 @@
 // shaders apply its AO was not traced; this is the usual use): the pixel's
 // colour is multiplied by what is left of its light once that share
 // is occluded - the ambient colour against the sun colour times N.L times
-// the shadow map - blended dst * src.
+// the shadow map - blended 2 * dst * src (written at half, so the fill
+// light below can brighten as well as darken).
 
 layout(set = 0, binding = 0) uniform PerFrame {
     mat4 view;
@@ -81,6 +82,12 @@ const float kFloor = 0.6;
 // Where it fades out. ASSAO's defaults are 50 to 300 yards; past 120 a
 // 1-yard disk is under two pixels at 1080 lines, so it stops there.
 const float kFadeFrom = 60.0;
+// Fill light: how much of the horizon colour the sky gives an upward face,
+// and how much of the sun the ground sends back up at a typical Elwynn grass
+// and dirt colour. Tuned side by side against Enhanced's shade in Goldshire.
+const float kFillSky = 0.35;
+const float kFillBounce = 0.2;
+const vec3 kGroundAlbedo = vec3(0.45, 0.42, 0.28);
 const float kFadeTo = 120.0;
 const int kTaps = 6;
 const float kPlaneBias = 0.03;        // yards
@@ -139,7 +146,10 @@ void main() {
 
     // The disk's radius in pixels at this depth.
     float radiusPx = kRadius * abs(projection[1][1]) * 0.5 * pc.target.y / max(dist, 1e-3);
-    bool working = d < 1.0 && dist > 0.0 && dist < kFadeTo && nl2 >= 1e-12 && radiusPx >= 1.0;
+    int flags = int(pc.target.w + 0.5);
+    bool aoOn = (flags & 1) != 0;
+    bool fillOn = (flags & 2) != 0;
+    bool working = aoOn && d < 1.0 && dist > 0.0 && dist < kFadeTo && nl2 >= 1e-12 && radiusPx >= 1.0;
 
     float sum = 0.0;
     if (working) {
@@ -184,29 +194,48 @@ void main() {
     bool takeV = working && abs(dv - dist) < tol;
     float sumQ = sumH + (takeV ? sv : 0.0);
     float wQ = wH + (takeV ? wv : 0.0);
-    if (!working || wQ <= 0.0) discard;
+    if (d >= 1.0 || nl2 < 1e-12) discard;
 
-    float obscurance = sumQ / (wQ * float(kTaps));
-    float fade = clamp((kFadeTo - dist) / (kFadeTo - kFadeFrom), 0.0, 1.0);
-    obscurance = min(obscurance * kStrength, kClamp) * fade;
-    float occlusion = max(pow(clamp(1.0 - obscurance, 0.0, 1.0), kPower), kFloor);
-    if (occlusion >= 0.999) discard;
+    float occlusion = 1.0;
+    if (working && wQ > 0.0) {
+        float obscurance = sumQ / (wQ * float(kTaps));
+        float fade = clamp((kFadeTo - dist) / (kFadeTo - kFadeFrom), 0.0, 1.0);
+        obscurance = min(obscurance * kStrength, kClamp) * fade;
+        occlusion = max(pow(clamp(1.0 - obscurance, 0.0, 1.0), kPower), kFloor);
+    }
+    if (!fillOn && occlusion >= 0.999) discard;
 
-    if (pc.target.w > 0.5) {
-        // WOWEE_CONTACT_SHADOW_DEBUG (both passes read it): the occlusion, grey.
-        outColor = vec4(vec3(occlusion), 1.0);
+    if ((flags & 4) != 0) {
+        // WOWEE_CONTACT_SHADOW_DEBUG (both passes read it): the occlusion,
+        // grey (written at half: this pass blends 2 * dst * src).
+        outColor = vec4(vec3(occlusion * 0.5), 1.0);
         return;
     }
-    // Only the light from all around is occluded. Indoors the sun is out of
-    // it (shadowParams.w, the indoor factor).
+    // The light at this pixel, per channel: the ambient (the light from all
+    // around) and the sun's share, which keeps its value. Indoors the sun
+    // is out of it (shadowParams.w, the indoor factor).
+    float indoor = clamp(shadowParams.w, 0.0, 1.0);
     vec3 ldir = normalize(-lightDir.xyz);
     float ndotl = max(dot(n, ldir), 0.0);
     float sunLit = 1.0;
     if (shadowParams.x > 0.5 && ndotl > 0.0) sunLit = sunShadow(pos, n, ldir);
-    float amb = lum(ambientColor.rgb);
-    float dif = lum(lightColor.rgb) * ndotl * sunLit * (1.0 - clamp(shadowParams.w, 0.0, 1.0));
-    float before = amb + dif;
-    if (before <= 1e-4) discard;
-    float f = clamp((amb * occlusion + dif) / before, 0.0, 1.0);
-    outColor = vec4(f, f, f, 1.0);
+    vec3 amb = ambientColor.rgb;
+    vec3 dif = lightColor.rgb * (ndotl * sunLit * (1.0 - indoor));
+    vec3 ambNew = amb * occlusion;
+    if (fillOn) {
+        // Fill light (a stand-in for Enhanced's probe GI, section 6 of
+        // docs/re/enhanced-lighting.md): the sky's light from above, in the
+        // zone's horizon colour, and the sun's light bounced off the ground
+        // from below, warmed by the ground's colour; a face takes each by how
+        // far it turns toward it. Occluded as the ambient is. Outdoors only.
+        float sunUp = smoothstep(0.0, 0.1, -normalize(lightDir.xyz).z);
+        float up = clamp(n.z * 0.5 + 0.5, 0.0, 1.0);
+        vec3 sky = fogColor.rgb * kFillSky;
+        vec3 bounce = lightColor.rgb * kGroundAlbedo * (kFillBounce * sunUp);
+        ambNew += (sky * up + bounce * (1.0 - up)) * (pc.target.z * occlusion * (1.0 - indoor));
+    }
+    vec3 before = amb + dif;
+    vec3 f = clamp((ambNew + dif) / max(before, vec3(1e-3)), 0.0, 2.0);
+    if (all(lessThan(abs(f - 1.0), vec3(0.002)))) discard;
+    outColor = vec4(f * 0.5, 1.0);
 }

@@ -101,6 +101,9 @@ TEST_CASE("Enhanced preset: Ultra plus the Enhanced rows, on one-sample depth", 
     CHECK(f.enh.ambientOcclusion);
     CHECK(f.enh.colorGrade);
     CHECK(f.enh.enhancedDaylight);
+    CHECK(f.enh.fillLight);
+    CHECK(f.enh.sunHaze);
+    CHECK(f.enh.bloom > 0.0f);
     CHECK(f.enh.shadows);
     CHECK(f.enh.lightShafts >= 2);
     CHECK(f.enh.mistDensity > 1.0f);
@@ -113,5 +116,8 @@ TEST_CASE("Enhanced preset: Ultra plus the Enhanced rows, on one-sample depth", 
         CHECK_FALSE(kGraphicsPresets[i].enh.ambientOcclusion);
         CHECK_FALSE(kGraphicsPresets[i].enh.colorGrade);
         CHECK_FALSE(kGraphicsPresets[i].enh.enhancedDaylight);
+        CHECK_FALSE(kGraphicsPresets[i].enh.fillLight);
+        CHECK_FALSE(kGraphicsPresets[i].enh.sunHaze);
+        CHECK(kGraphicsPresets[i].enh.bloom == 0.0f);
     }
 }

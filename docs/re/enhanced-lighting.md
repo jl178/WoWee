@@ -223,9 +223,22 @@ Wowee already has a froxel volumetric fog (`lightShafts`, `mistDensity`,
 and HG phase; the Enhanced preset doubles its mist (section 8). Wowee's base
 extinction works out at 0.0013/yd in Elwynn by day, the same order as the
 0.001 that 370 of Enhanced's LightParams carry in `Field_12_0_1_65617_031`
-(a likely volumetric density; unconfirmed). Not ported:
-the cubic slice spacing and the layer list, because the per-layer constants
-are in data not decoded here.
+(a likely volumetric density; unconfirmed).
+
+**Ported** as the "Sun haze (the reference client)" row (`sunHaze`,
+`assets/shaders/enhanced_haze.frag.glsl`, a full-screen pass after the
+opaque scene, blended `src.rgb + dst * src.a`): one global layer of the
+model above over the whole view, integrated in closed form along each
+pixel's ray instead of in cells - density `0.0006/yd * exp(-(z - ground) /
+220 yd)`, a 40-yard clear start, sky pixels taken to 5000 yd, in-scattering
+of the fog colour (x0.9) and the sun (x1.1 times HG g 0.7 mixed 60/40 with
+even scattering; Enhanced's phase table itself was not read), outdoors
+only. Wowee's froxel mist still does the shadowed shafts in the first 400
+yards; with the haze on, the screen-space sun shafts are 1.6x stronger and
+keep three quarters of the sun's hue instead of half. 0.06 ms at 1280x540.
+The constants were set side by side against Enhanced's Goldshire afternoon
+(section 9). Not ported: the cubic slice spacing, several layers, the
+height fades' per-zone values, and the phase table - data not decoded.
 
 ## 6. Global illumination ("Secondary Lighting")
 
@@ -254,7 +267,15 @@ So "Secondary Lighting" is world-space irradiance probes, updated by
 software ray tracing, resampled into a froxel volume each frame and added
 as indirect diffuse. Wowee's "Ray traced lighting" row (bounce mode) is the
 nearest thing it has; it is too expensive for Jered's laptop and is not in
-the Enhanced preset. Not ported.
+the Enhanced preset.
+
+**Stand-in** as the "Fill light in shade" row (`fillLight`), in the same
+pass as the ambient occlusion (now blended `2 * dst * src`, so it can
+brighten): each pixel's ambient gains sky light from above in the zone's
+horizon colour (x0.35) and sun bounced off the ground from below
+(sun colour x albedo (0.45, 0.42, 0.28) x 0.2), weighted by how far the
+face turns up or down, occluded as the ambient is, outdoors only. It costs
+nothing over the occlusion pass it rides in.
 
 ## 7. Ground clutter
 
@@ -266,6 +287,15 @@ that is 0 everywhere. So Enhanced's denser look is its settings
 (`groundEffectDensity 48` on retail's scale, `groundEffectDist 200`) and its
 models, not new placement data. The Enhanced preset uses the clutter maximum.
 
+Wowee's experimental grass generator ("Grass (experimental)") did not stall
+the client: switching it on in Goldshire spends 17-32 ms of the main
+thread a frame (`beginFrame/grass+misc`) for about a second while it grows
+the blades around the player (136834 generated, 34173 after culling),
+then costs 0.02 ms a frame. The scripted test driver that switched it on
+stopped advancing at that point, which is what read as a stall; the client
+kept running. It stays out of the preset until its generation is spread
+over frames or moved off the main thread.
+
 ## 8. What the Enhanced preset sets
 
 The "Enhanced" quality preset (`kGraphicsPresets[kEnhancedPresetIndex]`,
@@ -276,7 +306,13 @@ difference side by side), soft particles (Enhanced's "Depth Based
 Opacity"), HD water and sky reflections (its PBR water and SSR); 2400-yard
 view distance, 500-yard shadows, ground clutter 150%, and FXAA instead of
 MSAA (Enhanced's anti-aliasing is CMAA2, a post filter, and the occlusion
-pass needs a one-sample depth).
+pass needs a one-sample depth). Round 2 added the fill light, the sun haze
+(with stronger, golder screen-space shafts) and bloom at 0.6: what is
+brighter than 0.8 in nine taps of the glow's quarter-size scene, added on
+(`fxaa.frag` `bloomAt`). Enhanced ships its Bloom Intensity at the maximum;
+its bloom shader was not read, so the knee and spread were set by eye
+against its capture. These four rows live on their own settings page,
+"Enhancements: Enhanced".
 
 ## 9. Measured cost and the remaining gap
 
@@ -286,13 +322,16 @@ Lab server, Goldshire at 13:00-15:30, 1280x540 window on Jered's laptop,
 | | GPU ms/frame | notes |
 |---|---|---|
 | Ultra (MSAA, its highest step) | 13.5-15.8 | scene pass 11.9-14.8 |
-| Enhanced preset | 10.0 | scene pass 7.3 (no MSAA) |
-| ambient occlusion pass | 0.17-0.43 | scales with pixels: ~0.7-1.7 at 2560x1080 |
-| FXAA + glow + grade pass | 0.81 (Ultra 0.55, no FXAA) | the grade itself is below noise |
+| Enhanced preset | 10.0-10.9 | scene pass 7.3 (no MSAA) |
+| ambient occlusion + fill pass | 0.17-0.48 | scales with pixels: ~0.7-1.9 at 2560x1080 |
+| sun haze pass | 0.06 | |
+| FXAA + glow + grade + bloom pass | 1.04-1.06 (Ultra 0.55, no FXAA) | bloom ~0.2, the grade below noise |
 | volumetric fog inject, Medium | 0.3-0.5 | High was 3.0 (why the preset stays at Medium) |
 | HD water + reflections | 1.6 + 0.3 | where water is on screen |
 
-Screenshots (session scratchpad, `enhanced/lab/shots/`): `attr_1ultra.png`,
+Screenshots (session scratchpad, `enhanced/lab/shots/`): `side_by_side.png`
+(Enhanced's own Goldshire capture beside Wowee's Enhanced preset and Ultra at
+15:23, toward the sun and across it), `attr_1ultra.png`,
 `attr_2enhanced.png`, `attr_3noao.png`, `attr_5nograde.png` (one view, a piece
 off at a time), `aodbg_v2.png` (the occlusion alone), `final_sheet.png`;
 Enhanced itself: `enhanced/shots/enhanced_01.png` (Northshire 14:15),
@@ -300,13 +339,15 @@ Enhanced itself: `enhanced/shots/enhanced_01.png` (Northshire 14:15),
 
 What still separates the two pictures, largest first:
 
-1. Indirect light. Enhanced's probe GI fills shade with bounced green and
-   gold; Wowee's shade is Light.dbc's flat ambient. This is most of why
-   Enhanced reads "lit" and Wowee "painted".
-2. Light toward the sun. Enhanced's layered froxel fog with a phase LUT and
-   linear HDR sun (F052 up to 1.5) gives a strong golden glow and god rays
-   looking west in the afternoon; Wowee's mist at twice the density is
-   thinner and is clamped to LDR.
+1. Indirect light. The fill light lifts and tints the shade, but it is the
+   same everywhere: Enhanced's probes put green under trees and warm stone
+   by a lit wall, and darken a forest floor that the sky cannot see.
+2. Light toward the sun. The haze and stronger shafts now give the golden
+   glow looking into an afternoon sun, but Enhanced's shafts through the
+   canopy are crisper and longer (its fog is shadowed by the cascades
+   across the whole depth, Wowee's only in the first 400 yd), and its
+   linear HDR sun (F052 up to 1.5) lets highlights glow without the
+   orange clipping an 8-bit target gives.
 3. Ground cover. Enhanced's clutter (same placement data, its own models,
    groundEffectDist 200) is denser and taller than Wowee's at 150%.
 4. Per-zone light keyframes: only the average trend is ported.

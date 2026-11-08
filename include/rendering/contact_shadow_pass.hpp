@@ -25,9 +25,14 @@ class VkContext;
 /// named at construction.
 class ContactShadowPass {
 public:
+    /// How the shader's output meets the scene: Multiply is dst * src (only
+    /// darkens), Multiply2x is 2 * dst * src (the shader writes half the
+    /// factor, so it can brighten up to twice), OverTransmittance is
+    /// src.rgb + dst * src.a (light added in front of what it dims).
+    enum class Blend { Multiply, Multiply2x, OverTransmittance };
     explicit ContactShadowPass(const char* fragSpv = "assets/shaders/contact_shadow.frag.spv",
-                               const char* name = "Contact shadows")
-        : fragSpv_(fragSpv), name_(name) {}
+                               const char* name = "Contact shadows", Blend blend = Blend::Multiply)
+        : fragSpv_(fragSpv), name_(name), blendMode_(blend) {}
     ~ContactShadowPass() { shutdown(); }
 
     /// The depth set, the layout and the pipeline for `pass` (the overlay
@@ -38,13 +43,15 @@ public:
     /// Record the pass on `target`: false (nothing recorded) when it is
     /// incomplete or nothing is made. `darkness` is how much of the sun a
     /// full shadow takes away (Light.dbc's shadow band x the player's setting,
-    /// times how far outdoors the player is).
+    /// times how far outdoors the player is). `flags` goes to the shader's
+    /// target.w with 4 added under WOWEE_CONTACT_SHADOW_DEBUG.
     bool record(VkCommandBuffer cmd, const SoftParticlePass::Target& target, VkDescriptorSet perFrameSet,
-                const glm::mat4& invViewProj, float darkness);
+                const glm::mat4& invViewProj, float darkness, int flags = 0);
 
 private:
     const char* fragSpv_;
     const char* name_;
+    Blend blendMode_;
     VkContext* ctx_ = nullptr;
     SoftParticlePass depth_;
     VkPipelineLayout layout_ = VK_NULL_HANDLE;

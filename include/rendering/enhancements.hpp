@@ -56,6 +56,11 @@ struct Enhancements {
     /// the ambient share of each pixel's light is taken; sunlit faces keep
     /// the sun. Off is stock: no occlusion.
     bool  ambientOcclusion = false;
+    /// Shade filled with light from the sky above and the sunlit ground
+    /// below, a cheap stand-in for the reference client's probe GI (the ambient pass,
+    /// ambient_occlusion.frag). Off is stock: the shade is Light.dbc's flat
+    /// ambient colour.
+    bool  fillLight = false;
     /// Units and doodads inside a building take the light of the room around
     /// them, read from a grid of probes baked from the group's MOCV and MODD
     /// colours at load: warm in a tavern, cold in a crypt, darker in a corner
@@ -106,6 +111,14 @@ struct Enhancements {
     /// two continents: a whiter sun, brighter fill light, a brighter and
     /// bluer sky and haze (enhanced_palette.hpp). Off is Light.dbc's colours.
     bool  enhancedDaylight = false;
+    /// the reference client's global fog layer over the whole view: air thickest
+    /// near the ground, lit by the sky and, mostly forward, by the sun, so
+    /// the distance pales and a low sun glows gold (enhanced_haze.frag).
+    /// Off is stock: Light.dbc's distance fog alone.
+    bool  sunHaze = false;
+    /// Bloom over the highlights, 0 off (fxaa.frag bloomAt). Enhanced ships
+    /// its Bloom Intensity at the maximum; stock has only the glow.
+    float bloom = 0.0f;
 
     // ---- Water and weather -------------------------------------------------
     bool  shorelineFoam = false;

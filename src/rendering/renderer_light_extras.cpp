@@ -52,12 +52,16 @@ SoftParticlePass::Target depthLightPassTarget(VkContext* vkCtx, PostProcessPipel
 }
 }  // namespace
 
-bool Renderer::decideDepthLightPass(bool want, DepthLightPassState& s, const char* fragSpv, const char* name) {
+bool Renderer::decideDepthLightPass(bool want, DepthLightPassState& s, const char* fragSpv, const char* name,
+                                    int blend) {
     s.frame = false;
     s.done = false;
     want = want && depthLightPassPossible();
     if (want) {
-        if (!s.pass) s.pass = std::make_unique<ContactShadowPass>(fragSpv, name);
+        if (!s.pass) {
+            s.pass = std::make_unique<ContactShadowPass>(fragSpv, name,
+                                                         static_cast<ContactShadowPass::Blend>(blend));
+        }
         want = s.pass->ensure(vkCtx, perFrameSetLayout, vkCtx->getOverlayRenderPass());
     }
     s.frame = want;
@@ -74,10 +78,17 @@ bool Renderer::decideDepthLightPass(bool want, DepthLightPassState& s, const cha
 // indoors, where the sun lights nothing.
 void Renderer::decideContactShadows() {
     decideDepthLightPass(enh_.contactShadows && shadowsEnabled && indoorFactor_ < 0.99f, contactShadows_,
-                         "assets/shaders/contact_shadow.frag.spv", "Contact shadows");
-    // Ambient occlusion takes only the sky's share, indoors and out.
-    decideDepthLightPass(enh_.ambientOcclusion, ambientOcclusion_,
-                         "assets/shaders/ambient_occlusion.frag.spv", "Ambient occlusion");
+                         "assets/shaders/contact_shadow.frag.spv", "Contact shadows",
+                         static_cast<int>(ContactShadowPass::Blend::Multiply));
+    // Ambient occlusion and the fill light share a pass: both change only
+    // the ambient share of the light, indoors and out.
+    decideDepthLightPass(enh_.ambientOcclusion || enh_.fillLight, ambientOcclusion_,
+                         "assets/shaders/ambient_occlusion.frag.spv", "Ambient occlusion",
+                         static_cast<int>(ContactShadowPass::Blend::Multiply2x));
+    // The Enhanced haze lays light over everything the opaque pass drew.
+    decideDepthLightPass(enh_.sunHaze && indoorFactor_ < 0.99f, sunHaze_,
+                         "assets/shaders/enhanced_haze.frag.spv", "Sun haze",
+                         static_cast<int>(ContactShadowPass::Blend::OverTransmittance));
 }
 
 void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
@@ -89,7 +100,8 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
     // ratio of lit to unlit then reads as it stands.
     if (ambientOcclusion_.frame && !ambientOcclusion_.done && ambientOcclusion_.pass) {
         ambientOcclusion_.done = true;
-        if (ambientOcclusion_.pass->record(cmd, target, perFrame, invViewProj, 1.0f)) {
+        const int flags = (enh_.ambientOcclusion ? 1 : 0) | (enh_.fillLight ? 2 : 0);
+        if (ambientOcclusion_.pass->record(cmd, target, perFrame, invViewProj, 1.0f, flags)) {
             vkCtx->gpuMark(cmd, "ambient occlusion");
         }
     }
@@ -100,6 +112,12 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
         const float darkness = currentFrameData.shadowParams.y * (1.0f - glm::clamp(indoorFactor_, 0.0f, 1.0f));
         if (contactShadows_.pass->record(cmd, target, perFrame, invViewProj, darkness)) {
             vkCtx->gpuMark(cmd, "contact shadows");
+        }
+    }
+    if (sunHaze_.frame && !sunHaze_.done && sunHaze_.pass) {
+        sunHaze_.done = true;
+        if (sunHaze_.pass->record(cmd, target, perFrame, invViewProj, 1.0f)) {
+            vkCtx->gpuMark(cmd, "sun haze");
         }
     }
 }

@@ -62,8 +62,20 @@ bool ContactShadowPass::ensure(VkContext* ctx, VkDescriptorSetLayout perFrameLay
     VkPipelineColorBlendAttachmentState blend{};
     blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT;
     blend.blendEnable = VK_TRUE;
-    blend.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
-    blend.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+    switch (blendMode_) {
+    case Blend::Multiply:
+        blend.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+        blend.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+        break;
+    case Blend::Multiply2x:
+        blend.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+        blend.dstColorBlendFactor = VK_BLEND_FACTOR_SRC_COLOR;
+        break;
+    case Blend::OverTransmittance:
+        blend.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        blend.dstColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        break;
+    }
     blend.colorBlendOp = VK_BLEND_OP_ADD;
     blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
     blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
@@ -109,7 +121,8 @@ void ContactShadowPass::shutdown() {
 static const bool kDebug = core::envFlagEnabled("WOWEE_CONTACT_SHADOW_DEBUG", false);
 
 bool ContactShadowPass::record(VkCommandBuffer cmd, const SoftParticlePass::Target& target,
-                               VkDescriptorSet perFrameSet, const glm::mat4& invViewProj, float darkness) {
+                               VkDescriptorSet perFrameSet, const glm::mat4& invViewProj, float darkness,
+                               int flags) {
     if (pipeline_ == VK_NULL_HANDLE || perFrameSet == VK_NULL_HANDLE || target.pass != builtFor_) return false;
     return depth_.record(cmd, target, [&](VkCommandBuffer c, VkDescriptorSet depthSet) {
         vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
@@ -118,7 +131,7 @@ bool ContactShadowPass::record(VkCommandBuffer cmd, const SoftParticlePass::Targ
         ContactPush push{};
         push.invViewProj = invViewProj;
         push.target = glm::vec4(static_cast<float>(target.extent.width), static_cast<float>(target.extent.height),
-                                darkness, kDebug ? 1.0f : 0.0f);
+                                darkness, static_cast<float>(flags + (kDebug ? 4 : 0)));
         vkCmdPushConstants(c, layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
         vkCmdDraw(c, 3, 1, 0, 0);
     });

@@ -195,6 +195,9 @@ public:
         gradeWeight_ = enabled ? glm::clamp(weight, 0.0f, 1.0f) : 0.0f;
         gradeKalimdor_ = kalimdor;
     }
+    /// Bloom over the highlights (the Enhanced preset's), 0 off. Rides on the
+    /// glow's quarter-size scene, so it shows only where the glow can run.
+    void setBloom(float amount) { bloom_ = glm::clamp(amount, 0.0f, 2.0f); }
     [[nodiscard]] bool isGlowEnabled() const { return glowEnabled_; }
 
 private:
@@ -221,6 +224,7 @@ private:
     bool gradeEnabled_ = false;
     float gradeWeight_ = 0.0f;
     bool gradeKalimdor_ = false;
+    float bloom_ = 0.0f;
     float glowAmount_ = 0.0f;
     float glowBlend_ = 0.0f;
     float nether_ = 0.0f;
