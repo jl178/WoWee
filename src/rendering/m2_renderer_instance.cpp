@@ -1667,6 +1667,12 @@ std::optional<float> M2Renderer::getFloorHeight(float glX, float glY, float glZ,
         // through. Every bush and rug beside it ships zero collision triangles,
         // so they stay soft on their own evidence and need no rule at all.
         const bool authoredCollision = model.collision.valid();
+        // Stock's world set is triangles only (0xADBA34): a model with no
+        // collision mesh adds none and is walked through - the Netherstorm
+        // lightning, a battleground flag. WOWEE_M2_BOX_COLLISION=1 restores
+        // the name-classified bounding boxes.
+        static const bool kBoxCollision = core::envFlagEnabled("WOWEE_M2_BOX_COLLISION", false);
+        if (!authoredCollision && !kBoxCollision) continue;
         if ((model.collisionNoBlock && !authoredCollision) ||
             model.isInvisibleTrap || model.isSpellEffect) continue;
         if (instance.skipCollision) continue;
@@ -1862,6 +1868,12 @@ bool M2Renderer::checkCollision(const glm::vec3& from, const glm::vec3& to,
         // through. Every bush and rug beside it ships zero collision triangles,
         // so they stay soft on their own evidence and need no rule at all.
         const bool authoredCollision = model.collision.valid();
+        // Stock's world set is triangles only (0xADBA34): a model with no
+        // collision mesh adds none and is walked through - the Netherstorm
+        // lightning, a battleground flag. WOWEE_M2_BOX_COLLISION=1 restores
+        // the name-classified bounding boxes.
+        static const bool kBoxCollision = core::envFlagEnabled("WOWEE_M2_BOX_COLLISION", false);
+        if (!authoredCollision && !kBoxCollision) continue;
         if ((model.collisionNoBlock && !authoredCollision) ||
             model.isInvisibleTrap || model.isSpellEffect) continue;
         if (instance.skipCollision) continue;
