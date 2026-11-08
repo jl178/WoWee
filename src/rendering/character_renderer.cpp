@@ -4146,10 +4146,18 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                 // inferring a cutout from "the texture has alpha" discards the whole
                 // building and leaves the sky showing through it. Only an alpha-key
                 // material (blendMode 1) cuts out here.
+                // An opaque two-texture batch is never cut by its texture's
+                // alpha: every stock Opaque_* combiner writes the vertex
+                // alpha (shaders\pixel\*\combiners_opaque_mod2xna_alpha.bls
+                // ends MOV result.color.w, fragment.color.primary), and its
+                // texture alpha is an input - the env shine mask on armour.
+                // Cutting at 224/255 there tore holes through shoulder pads
+                // and staves and showed their dark insides.
+                const bool opaqueTwoStage = blendMode == 0 && twoStages;
                 const bool blendNeedsCutout = instance.isSceneModel
                     ? (blendMode == 1)
                     : ((blendMode == 1) ||
-                       (blendMode == 0 && alphaCutout) ||
+                       (blendMode == 0 && alphaCutout && !opaqueTwoStage) ||
                        (blendMode >= 2 && !alphaCutout) ||
                        hairMaterial);
                 // Stock: only render flag 0x01 is unlit (0x8201A9 moves the

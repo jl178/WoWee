@@ -2188,7 +2188,13 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             // batch's: worked out once for the group's draws.
             M2PushConstants groupSway{};
             fillSway(groupSway, model, skyMode_);
-            const bool particleDominantEffect = model.isSpellEffect &&
+            // Stock draws every batch of a spell model (CM2Model has no
+            // "emission only" class): the flag a battleground carrier holds
+            // is two batches - pole and banner - and an emitter, and was
+            // dropped as a particle model's placeholder mesh.
+            // WOWEE_SPELL_FX_DROP_MESH=1 restores the drop.
+            static const bool kDropFxMesh = core::envFlagEnabled("WOWEE_SPELL_FX_DROP_MESH", false);
+            const bool particleDominantEffect = kDropFxMesh && model.isSpellEffect &&
                 !model.particleEmitters.empty() && model.batches.size() <= 2;
 
             // Collect per-instance data for this model group
@@ -2782,9 +2788,10 @@ void M2Renderer::recordPart(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         uint16_t targetLOD = desiredLOD;
         while (targetLOD > 0 && !(model.availableLODs & (1u << targetLOD))) --targetLOD;
 
-        const bool particleDominantEffect = model.isSpellEffect &&
+        static const bool kDropFxMesh = core::envFlagEnabled("WOWEE_SPELL_FX_DROP_MESH", false);
+        const bool particleDominantEffect = kDropFxMesh && model.isSpellEffect &&
             !model.particleEmitters.empty() && model.batches.size() <= 2;
-        if (particleDominantEffect) continue; // emission-only mesh
+        if (particleDominantEffect) continue; // see the batched pass
 
         const uint32_t slot = static_cast<uint32_t>(blendInstances_.size());
         bool anyBatch = false;

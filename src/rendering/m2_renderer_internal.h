@@ -277,6 +277,7 @@ inline glm::vec3 closestPointOnTriangle(const glm::vec3& p,
 /// left them at and cut through the model they belong to. Orgrimmar's bonfire
 /// keeps its glow on bone 0, flagged 0x8.
 constexpr uint32_t kM2BoneSphericalBillboard = 0x8;
+constexpr uint32_t kM2BoneCylindricalBillboardZ = 0x40;
 
 /// Start a cross-fade before switching `instance` to sequence `newSeq`. Call it
 /// while currentSequenceIndex/animTime still describe the old sequence.
@@ -419,6 +420,24 @@ inline void computeBoneMatrices(const M2ModelGPU& model, M2Instance& instance,
             } else {
                 local *= glm::toMat4(rot);
             }
+        } else if (cameraPosWorld && (bone.flags & kM2BoneCylindricalBillboardZ) != 0) {
+            // Z-locked cylindrical billboard (0x40): turned about the model's
+            // up axis so +X faces the viewer's ground position, the authored
+            // rotation kept under it. Power Word: Shield's rings (bone flags
+            // 0x240) were drawn as authored, edge-on or back-culled from
+            // behind and the sides.
+            const glm::vec3 camModel =
+                glm::vec3(instance.invModelMatrix * glm::vec4(*cameraPosWorld, 1.0f));
+            glm::vec2 toCam(camModel.x - bone.pivot.x, camModel.y - bone.pivot.y);
+            const float len2 = glm::dot(toCam, toCam);
+            if (len2 > 1e-8f) {
+                toCam *= glm::inversesqrt(len2);
+                glm::mat4 face(1.0f);
+                face[0] = glm::vec4(toCam.x, toCam.y, 0.0f, 0.0f);
+                face[1] = glm::vec4(-toCam.y, toCam.x, 0.0f, 0.0f);
+                local *= face;
+            }
+            local *= glm::toMat4(rot);
         } else {
             local *= glm::toMat4(rot);
         }

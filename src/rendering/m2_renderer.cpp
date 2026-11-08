@@ -2241,7 +2241,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
     // each was re-posed every frame it was near and on screen.
     gpuModel.staticPose = gpuModel.hasAnimation && [&model] {
         for (const auto& bone : model.bones) {
-            if ((bone.flags & kM2BoneSphericalBillboard) != 0) return false;
+            if ((bone.flags & (kM2BoneSphericalBillboard | kM2BoneCylindricalBillboardZ)) != 0) return false;
             for (const auto* track : {&bone.translation, &bone.rotation, &bone.scale}) {
                 for (const auto& keys : track->sequences) {
                     if (keys.timestamps.size() > 1) return false;
