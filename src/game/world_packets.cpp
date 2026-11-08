@@ -1212,7 +1212,16 @@ bool UpdateObjectParser::parseMovementBlock(network::Packet& packet, UpdateBlock
     // Rotation (GameObjects)
     if (updateFlags & UPDATEFLAG_ROTATION) {
         if (rem() < 8) return false;
-        /*int64_t rotation =*/ packet.readUInt64();
+        const int64_t packed = static_cast<int64_t>(packet.readUInt64());
+        // z in bits 0-20, y in 21-41 (both over 2^20), x in 42-63 (over 2^21),
+        // each signed; w >= 0, the sign having been folded into the others.
+        const float x = static_cast<float>(packed >> 42) / 2097152.0f;
+        const float y = static_cast<float>(static_cast<int64_t>(static_cast<uint64_t>(packed) << 22) >> 43) / 1048576.0f;
+        const float z = static_cast<float>(static_cast<int64_t>(static_cast<uint64_t>(packed) << 43) >> 43) / 1048576.0f;
+        const float ww = 1.0f - (x * x + y * y + z * z);
+        block.hasRotation = true;
+        block.rotX = x; block.rotY = y; block.rotZ = z;
+        block.rotW = ww > 0.0f ? std::sqrt(ww) : 0.0f;
     }
 
     // Low GUID

@@ -931,6 +931,13 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
             }
         }
         else if (ufi.auraState != 0xFFFF && key == ufi.auraState) {
+            // Execute, Victory Rush and the like turn usable and back on the
+            // player's and the target's aura state (0x80B5D0).
+            if (unit->getAuraState() != val &&
+                (block.guid == owner_.getPlayerGuid() || block.guid == owner_.getTargetGuid())) {
+                pendingEvents_.emit("ACTIONBAR_UPDATE_USABLE", {});
+                pendingEvents_.emit("SPELL_UPDATE_USABLE", {});
+            }
             unit->setAuraState(val);
         }
         else if (key == ufi.bytes0) {
@@ -1164,6 +1171,13 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
             }
         }
         else if (ufi.auraState != 0xFFFF && key == ufi.auraState) {
+            // Execute, Victory Rush and the like turn usable and back on the
+            // player's and the target's aura state (0x80B5D0).
+            if (unit->getAuraState() != val &&
+                (block.guid == owner_.getPlayerGuid() || block.guid == owner_.getTargetGuid())) {
+                pendingEvents_.emit("ACTIONBAR_UPDATE_USABLE", {});
+                pendingEvents_.emit("SPELL_UPDATE_USABLE", {});
+            }
             unit->setAuraState(val);
             // The player's or the target's aura state decides which pet
             // abilities are usable (0x716810 -> PET_BAR_UPDATE_USABLE).
@@ -2382,6 +2396,7 @@ void EntityController::onCreateGameObject(const UpdateBlock& block, std::shared_
                  " pos=(", go->getX(), ", ", go->getY(), ", ", go->getZ(), ")");
         // Note: TransportSpawnCallback will be invoked from Application after WMO instance is created
     }
+    if (block.hasRotation) go->setRotation(block.rotX, block.rotY, block.rotZ, block.rotW);
     if (go->getDisplayId() != 0 && owner_.gameObjectSpawnCallbackRef()) {
         float goScale = 1.0f;
         {

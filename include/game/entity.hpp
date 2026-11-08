@@ -748,10 +748,21 @@ public:
     [[nodiscard]] uint32_t getDisplayId() const { return displayId; }
     void setDisplayId(uint32_t id) { displayId = id; }
 
+    /// The full rotation from the create block (server axes, x y z w), when
+    /// the server sent one. A door or a dome can be tilted; the orientation
+    /// alone is only its facing.
+    void setRotation(float x, float y, float z, float w) {
+        rot[0] = x; rot[1] = y; rot[2] = z; rot[3] = w; hasRot = true;
+    }
+    [[nodiscard]] bool hasRotation() const { return hasRot; }
+    [[nodiscard]] const float* rotation() const { return rot; }
+
 protected:
     std::string name;
     uint32_t entry = 0;
     uint32_t displayId = 0;
+    bool hasRot = false;
+    float rot[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 };
 
 /// What to call this entity on screen, whatever kind it turns out to be.

@@ -547,6 +547,10 @@ struct UpdateBlock {
 
     // Update flags from movement block (for detecting transports, etc.)
     uint16_t updateFlags = 0;
+    // UPDATEFLAG_ROTATION: a game object's full rotation, unpacked from the
+    // 64-bit field (x 22 bits, y and z 21; w from the unit length).
+    bool hasRotation = false;
+    float rotX = 0.0f, rotY = 0.0f, rotZ = 0.0f, rotW = 1.0f;
 
     // Raw movement flags from LIVING block (SWIMMING=0x200000, WALKING=0x100, CAN_FLY=0x800000, FLYING=0x1000000)
     // Used to initialise swim/walk/fly state on entity spawn (cold-join).

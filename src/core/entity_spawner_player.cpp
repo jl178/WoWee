@@ -8,6 +8,8 @@
 
 // M2 attachment 11 is the helm. 0 is the shield mount, which is where head gear
 // was going: it attached, reported success, and hung off the forearm.
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
@@ -1088,6 +1090,33 @@ void EntitySpawner::spawnOnlineGameObject(uint64_t guid, uint32_t entry, uint32_
         if (instanceId == 0) {
             LOG_WARNING("Failed to create gameobject instance for guid 0x", std::hex, guid, std::dec);
             return;
+        }
+
+        // A tilted object - the Eye of the Storm's start domes lean 20 degrees -
+        // is placed by its full rotation, as stock places every game object;
+        // the facing alone stood the dome upright, its walls and floor where
+        // nothing is drawn. The world axes here are the server's, so the
+        // rotation's tilt is what is left of it once the facing is taken out,
+        // applied about the object's position.
+        if (gameHandler_) {
+            auto ent = gameHandler_->getEntityManager().getEntity(guid);
+            const auto* goEnt = dynamic_cast<const game::GameObject*>(ent.get());
+            if (goEnt && goEnt->hasRotation()) {
+                const float* r = goEnt->rotation();
+                const glm::quat full(r[3], r[0], r[1], r[2]);
+                const glm::quat facing = glm::angleAxis(renderYawM2go, glm::vec3(0.0f, 0.0f, 1.0f));
+                const glm::quat tilt = glm::normalize(full * glm::inverse(facing));
+                // Within about a degree of upright: leave the placement alone.
+                if (std::abs(tilt.w) < 0.99996f) {
+                    glm::mat4 base(1.0f);
+                    if (m2Renderer->getInstanceModelMatrix(instanceId, base)) {
+                        const glm::mat4 tilted = glm::translate(glm::mat4(1.0f), renderPos) *
+                                                 glm::mat4_cast(tilt) *
+                                                 glm::translate(glm::mat4(1.0f), -renderPos) * base;
+                        m2Renderer->setInstanceTransform(instanceId, tilted);
+                    }
+                }
+            }
         }
 
         // Server game objects are gameplay props, not scenery: exempt them from the
