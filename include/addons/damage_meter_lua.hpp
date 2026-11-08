@@ -422,7 +422,9 @@ end
 local function build()
     local f = CreateFrame('Frame', '__WoweeDamageMeter', UIParent)
     meter.frame = f
-    f:SetFrameStrata('MEDIUM')
+    -- LOW: under the bags and other windows (MEDIUM, toplevel), which drew
+    -- beneath the meter's text where the two overlapped.
+    f:SetFrameStrata('LOW')
     f:SetClampedToScreen(true)
     f:SetMovable(true)
     f:SetResizable(true)
