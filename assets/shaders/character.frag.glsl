@@ -405,11 +405,14 @@ void main() {
         if (texColor.a < 224.0 / 255.0) discard;
         texColor.a = 1.0;
     } else if (alphaTest != 0) {
-        // Screen-space sharpened alpha for alpha-to-coverage anti-aliasing.
-        // Rescales alpha so the 0.5 cutoff maps to exactly the texel boundary,
-        // giving smooth edges when MSAA + alpha-to-coverage is active.
+        // Screen-space sharpened alpha for alpha-to-coverage anti-aliasing,
+        // around the stock cutoff above: the edge is where stock puts it, only
+        // smoothed across the samples. It was centred on 0.5, which kept every
+        // texel between 0.5 and 224/255 that stock discards - spiked shoulder
+        // pads and the like grew a ragged fringe and loose specks.
+        const float kCutoff = 224.0 / 255.0;
         float aGrad = fwidth(texColor.a);
-        texColor.a = clamp((texColor.a - 0.5) / max(aGrad, 0.001) * 0.5 + 0.5, 0.0, 1.0);
+        texColor.a = clamp((texColor.a - kCutoff) / max(aGrad, 0.001) * 0.5 + 0.5, 0.0, 1.0);
         if (texColor.a < 1.0 / 255.0) discard;
     }
     if (colorKeyBlack != 0) {
