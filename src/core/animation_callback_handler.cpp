@@ -400,6 +400,9 @@ void AnimationCallbackHandler::setupCallbacks() {
         rendering::SpellVisualSystem::KitAnimations kitAnims;
         {
             uint32_t kitSpell = isLocalPlayer ? gameHandler_.getCurrentCastSpellId() : 0;
+            // A cast just sent: the build-up starts before SMSG_SPELL_START,
+            // when only the prediction knows the spell.
+            if (kitSpell == 0 && isLocalPlayer) kitSpell = gameHandler_.getPredictedCastSpellId();
             if (kitSpell == 0)
                 if (const auto* st = gameHandler_.getUnitCastState(guid)) kitSpell = st->spellId;
             auto* svs = renderer_.getSpellVisualSystem();

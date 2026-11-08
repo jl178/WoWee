@@ -1450,6 +1450,13 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     if (!wasCasting && !spellclass::isRangedWeaponAutoAttack(spellId)) {
         const uint32_t castMs = owner_.getSpellData(spellId).castTimeMs;
         triggerCastVisual(spellId, owner_.getPlayerGuid(), castMs);
+        // Before the callback: it finds the spell's kits through
+        // getPredictedCastSpellId, which answers with this until the server's
+        // SPELL_START. Set after, the build-up found no spell, fell back to the
+        // target guess (another unit: the directed pose) and Flash Heal or
+        // Prayer of Healing on a party member threw like a Fireball - and
+        // SPELL_START, seeing the build-up already predicted, never fixed it.
+        predictedPrecastSpellId_ = spellId;
         if (castMs > 0 && owner_.spellCastAnimCallbackRef()) {
             const SpellCastType type = target == 0 ? SpellCastType::AREA
                 : (target == owner_.getPlayerGuid() ? SpellCastType::OMNI : SpellCastType::DIRECTED);

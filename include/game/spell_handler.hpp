@@ -161,6 +161,8 @@ public:
     [[nodiscard]] uint32_t getCurrentCastSpellId() const {
         return casting_ ? currentCastSpellId_ : restorationSpellId_;
     }
+    /// The cast sent and not yet answered by SMSG_SPELL_START (0 otherwise).
+    [[nodiscard]] uint32_t getPredictedCastSpellId() const { return predictedPrecastSpellId_; }
     [[nodiscard]] float getCastProgress() const {
         const float total = casting_ ? castTimeTotal_ : restorationTimeTotal_;
         const float remaining = casting_ ? castTimeRemaining_ : restorationTimeRemaining_;
