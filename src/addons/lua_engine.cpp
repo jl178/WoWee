@@ -1,5 +1,6 @@
 #include "addons/lua_engine.hpp"
 #include "addons/damage_meter_lua.hpp"
+#include "addons/raid_frames_lua.hpp"
 #include "game/spell_handler.hpp"
 #include "game/stock_trade_skill.hpp"
 #include "ui/link_hit.hpp"
@@ -7857,6 +7858,8 @@ void LuaEngine::registerCoreAPI() {
     // The damage meter's window, in the manner of Recount; its own chunk,
     // in addon_lua_snippets' way, so a test can parse it.
     bootstrap(kDamageMeterWindow);
+    // Raid-style group frames, off unless the "raidframes" setting is on.
+    bootstrap(kRaidFramesWindow);
 
     // C_Timer implementation via Lua (uses OnUpdate internally)
     bootstrap(

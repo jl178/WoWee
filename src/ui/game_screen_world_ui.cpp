@@ -318,6 +318,10 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
 
     // One pass over the CVars a frame: each read can reach the settings file.
     const bool allowOverlap = addons::storedCVarValue("nameplateAllowOverlap", "1") != "0";
+    // Not stock: hide a plate whose head is behind a wall, as a name is.
+    const bool plateOcclusion = addons::storedCVarValue("woweeNameplateOcclusion", "0") == "1";
+    static SightCache plateSight;
+    auto* plateWmo = plateOcclusion ? appRenderer->getWMORenderer() : nullptr;
     const bool classColours = addons::storedCVarValue("ShowClassColorInNameplate", "0") != "0";
     const bool vKeyCastBar = addons::storedCVarValue("showVKeyCastbar", "1") != "0";
     auto cvarOn = [](const char* name, const char* def) {
@@ -396,6 +400,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         if (clip.w <= 0.01f) continue;
         const glm::vec3 ndc = glm::vec3(clip) / clip.w;
         if (ndc.x < -1.0f || ndc.x > 1.0f || ndc.y < -1.0f || ndc.y > 1.0f) continue;
+        if (plateWmo && plateSight.blocked(plateWmo, guid, camPos, namePos)) continue;
         const float sx = (ndc.x * 0.5f + 0.5f) * screenW;
         const float sy = (ndc.y * 0.5f + 0.5f) * screenH;
 
