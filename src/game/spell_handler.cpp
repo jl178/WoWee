@@ -19,6 +19,7 @@
 #include "rendering/renderer.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/character_renderer.hpp"
+#include "rendering/animation_controller.hpp"
 #include "rendering/spell_visual_system.hpp"
 #include "rendering/animation/weapon_anim_select.hpp"
 #include "audio/audio_coordinator.hpp"
@@ -579,6 +580,9 @@ void SpellHandler::syncAuraStateVisuals(uint64_t guid, const std::vector<AuraSlo
         if (const uint32_t vid = resolveSpellVisualId(a.spellId)) visuals.push_back(vid);
     }
     svs->syncUnitStateVisuals(guid, visuals);
+    if (guid == owner_.getPlayerGuid()) {
+        if (auto* ac = renderer->getAnimationController()) ac->setAuraStateAnim(svs->unitStateAnim(guid));
+    }
 }
 
 void SpellHandler::triggerGroundAreaVisual(const SpellGoData& data, uint32_t visualId) {

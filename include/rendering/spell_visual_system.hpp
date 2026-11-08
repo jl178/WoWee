@@ -188,6 +188,10 @@ public:
     void setChannelTargetResolver(ChannelTargetResolver r) { channelTargetOf_ = std::move(r); }
     [[nodiscard]] bool hasUnitResolvers() const { return static_cast<bool>(unitInstanceOf_); }
     void syncUnitStateVisuals(uint64_t guid, const std::vector<uint32_t>& visualIds);
+    /// The animation the unit's aura state kits ask it to hold (the newest
+    /// one that names one), 0 when none does: Bladestorm's Whirlwind loop.
+    /// Mount auras are left out; the rider pose has its own path.
+    [[nodiscard]] uint32_t unitStateAnim(uint64_t guid) const;
     // Forget every unit's aura states (logout, aura caches dropped).
     void clearAllUnitStateVisuals();
 

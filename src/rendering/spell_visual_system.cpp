@@ -1866,6 +1866,23 @@ void SpellVisualSystem::syncUnitStateVisuals(uint64_t guid, const std::vector<ui
     if (recs.empty()) unitStates_.erase(guid);
 }
 
+uint32_t SpellVisualSystem::unitStateAnim(uint64_t guid) const {
+    auto it = unitStates_.find(guid);
+    if (it == unitStates_.end()) return 0;
+    uint32_t anim = 0;
+    for (const auto& rec : it->second) {
+        auto vIt = visuals_.find(rec.visualId);
+        if (vIt == visuals_.end() || vIt->second.stateKit == 0) continue;
+        auto kIt = kits_.find(vIt->second.stateKit);
+        if (kIt == kits_.end()) continue;
+        const uint32_t a = kIt->second.animId;
+        // -1 in the DBC is "none", as is 0 (Stand is never a state's loop).
+        if (a == 0 || a == 0xFFFFFFFFu) continue;
+        anim = a;
+    }
+    return anim;
+}
+
 void SpellVisualSystem::clearAllUnitStateVisuals() {
     for (auto& sv : activeSpellVisuals_)
         if (sv.stateGuid != 0 && !sv.retiring) retireVisual(sv);

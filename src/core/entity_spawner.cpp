@@ -14,6 +14,7 @@
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
+#include "rendering/spell_visual_system.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/vk_context.hpp"
@@ -942,6 +943,7 @@ uint32_t EntitySpawner::unitIdleAnim(uint64_t guid, uint32_t instanceId) {
     auto entity = gameHandler_->getEntityManager().getEntity(guid);
     if (!entity || !entity->isUnit()) return STAND;
     auto unit = std::static_pointer_cast<game::Unit>(entity);
+    if (const uint32_t state = unitAuraStateAnim(guid, instanceId)) return state;
     // Stealthed (the CREEP visibility flag): the crouched StealthStand, as
     // the local character's animator already picks for itself.
     if (unit->getHealth() != 0 && unit->hasCreepVisibility() &&
@@ -967,8 +969,24 @@ uint32_t EntitySpawner::unitIdleAnim(uint64_t guid, uint32_t instanceId) {
     return id != 0 ? id : STAND;
 }
 
+uint32_t EntitySpawner::unitAuraStateAnim(uint64_t guid, uint32_t instanceId) {
+    // An aura's state kit with an animation holds the unit in it, standing or
+    // moving, for as long as the aura lasts (Bladestorm spins in Whirlwind,
+    // 126). A mounted unit's rider pose comes from its own path.
+    auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    auto* svs = renderer_ ? renderer_->getSpellVisualSystem() : nullptr;
+    if (!cr || !svs || !gameHandler_ || instanceId == 0) return 0;
+    auto entity = gameHandler_->getEntityManager().getEntity(guid);
+    if (!entity || !entity->isUnit()) return 0;
+    auto unit = std::static_pointer_cast<game::Unit>(entity);
+    if (unit->getHealth() == 0 || unit->getMountDisplayId() != 0) return 0;
+    const uint32_t anim = svs->unitStateAnim(guid);
+    return (anim != 0 && cr->hasAnimation(instanceId, anim)) ? anim : 0;
+}
+
 uint32_t EntitySpawner::unitMoveAnim(uint64_t guid, uint32_t instanceId, uint32_t moveAnim) {
     using namespace rendering::anim;
+    if (const uint32_t state = unitAuraStateAnim(guid, instanceId)) return state;
     // Stock 0x717050: a stealthed unit moving forward or sideways plays
     // StealthWalk (119) whatever its pace - Walk, Run or Sprint - and a
     // model without it falls back (AnimationData) to Walk. No StealthRun.

@@ -234,6 +234,8 @@ public:
     /// visibility flag, where its model has one; the sequence itself
     /// otherwise.
     uint32_t unitMoveAnim(uint64_t guid, uint32_t instanceId, uint32_t moveAnim);
+    /// The animation an aura's state kit holds the unit in, 0 for none.
+    uint32_t unitAuraStateAnim(uint64_t guid, uint32_t instanceId);
 
     // Mount
     void setMountDisplayId(uint32_t displayId) { pendingMountDisplayId_ = displayId; }

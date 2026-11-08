@@ -42,6 +42,9 @@ struct UnitLocomotion {
     /// The MoveSpeed of the sequence playing: a moving unit's animation plays
     /// at its speed over it (0x7385C0).
     float rateMoveSpeed = 0.0f;
+    /// The aura state animation last played (unitAuraStateAnim): a change
+    /// replays the FSM's answer so the loop starts and ends with the aura.
+    uint32_t lastAuraStateAnim = 0;
 };
 
 /// What the sync loop knows about a unit this frame.

@@ -844,6 +844,14 @@ void driveUnitLocomotion(rendering::Renderer* renderer, rendering::CharacterRend
     frame.idleFree = (!haveState || isLocomotionIdle(cur)) &&
                      (s.mountModel || spawner.unitCastHold(guid) == 0);
 
+    if (!s.mountModel) {
+        const uint32_t auraAnim = spawner.unitAuraStateAnim(guid, instanceId);
+        if (auraAnim != loco.lastAuraStateAnim) {
+            loco.lastAuraStateAnim = auraAnim;
+            loco.needsReplay = true;
+        }
+    }
+
     rendering::LocomotionFSM::Input in = unitLocomotionInput(loco, frame);
     if (s.speed > game::motion::kSprintSpeed && !s.swimming) in.sprintAura = true;
     in.currentAnimId = cur;
@@ -883,9 +891,17 @@ void driveUnitLocomotion(rendering::Renderer* renderer, rendering::CharacterRend
         // JumpStart flows into the jump loop, not a frame of Stand.
         returnAnim = JUMP;
     }
+    bool loop = out.loop;
+    // An aura's state animation replaces every stance and pace, strafes and
+    // jumps included (Bladestorm spins whichever way the unit moves).
+    if (!s.mountModel && loco.lastAuraStateAnim != 0) {
+        play = loco.lastAuraStateAnim;
+        loop = true;
+        returnAnim = 0;
+    }
     // Already there (the one-shot's return animation): restarting is a hitch.
-    if (out.loop && haveState && cur == play) return;
-    cr->playAnimation(instanceId, play, out.loop, returnAnim);
+    if (loop && haveState && cur == play) return;
+    cr->playAnimation(instanceId, play, loop, returnAnim);
     syncLocomotionRate(cr, loco, instanceId, s);
 }
 

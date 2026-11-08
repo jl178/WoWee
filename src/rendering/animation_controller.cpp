@@ -991,6 +991,11 @@ void AnimationController::updateCharacterAnimation() {
 
     uint32_t animId = output.animId;
     bool loop = output.loop;
+    if (auraStateAnim_ != 0 && animId != anim::DEATH && characterRenderer &&
+        characterRenderer->hasAnimation(characterInstanceId, auraStateAnim_)) {
+        animId = auraStateAnim_;
+        loop = true;
+    }
 
     // Apply animation to the character renderer
     uint32_t currentAnimId = 0;

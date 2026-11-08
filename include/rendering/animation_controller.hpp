@@ -190,6 +190,9 @@ public:
     // ── Stealth ────────────────────────────────────────────────────────────
     /// When true, idle/walk/run use stealth animation variants.
     void setStealthed(bool stealth);
+    /// The animation an aura's state kit holds the character in (Bladestorm's
+    /// Whirlwind), 0 for none. It replaces stance and pace while it lasts.
+    void setAuraStateAnim(uint32_t animId) { auraStateAnim_ = animId; }
 
     // ── Effect triggers ────────────────────────────────────────────────────
     void triggerLevelUpEffect(const glm::vec3& position);
@@ -233,6 +236,7 @@ public:
     [[nodiscard]] bool isTaxiFlight() const { return taxiFlight_; }
 
 private:
+    uint32_t auraStateAnim_ = 0;
     /// The local character's moving animation at speed / MoveSpeed (0x7385C0).
     void syncLocalMoveRate(bool moving, float speed);
     Renderer* renderer_ = nullptr;
