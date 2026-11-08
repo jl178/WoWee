@@ -45,6 +45,14 @@ public:
     [[nodiscard]] uint64_t getAutoAttackTargetGuid() const { return autoAttackTarget_; }
     [[nodiscard]] bool isAggressiveTowardPlayer(uint64_t guid) const { return hostileAttackers_.count(guid) > 0; }
     [[nodiscard]] uint64_t getLastMeleeSwingMs() const { return lastMeleeSwingMs_; }
+    /// The player's last melee swing in each hand (0 main, 1 off) and the
+    /// hand's swing time when it landed: what the swing timer draws (not
+    /// stock; the reference client's Blizzard_SwingTimer and its PLAYER_SWING).
+    struct PlayerSwing {
+        std::chrono::steady_clock::time_point at{};
+        float durationSec = 0.0f;
+    };
+    [[nodiscard]] const PlayerSwing& getPlayerSwing(int hand) const { return playerSwing_[hand == 1 ? 1 : 0]; }
 
     // Floating combat text
     [[nodiscard]] const std::vector<CombatTextEntry>& getCombatText() const { return combatText_; }
@@ -290,6 +298,7 @@ private:
     std::deque<RecentSpellstealLogEntry> recentSpellstealLogs_;
 
     uint64_t lastMeleeSwingMs_ = 0;
+    PlayerSwing playerSwing_[2];
 
     // unitGuid → sorted threat list (descending by threat value)
     std::unordered_map<uint64_t, std::vector<ThreatEntry>> threatLists_;

@@ -252,9 +252,21 @@ public:
     // totem-category cast failures; empty if unknown.
     const std::string& getTotemCategoryName(uint32_t categoryId);
 
-    // Spell queue (400ms window)
-    [[nodiscard]] uint32_t getQueuedSpellId() const { return queuedSpellId_; }
-    void cancelQueuedSpell() { queuedSpellId_ = 0; queuedSpellTarget_ = 0; }
+    // Spell queue. Stock 3.3.5a has none; SpellQueueWindow (a later
+    // client's CVar, ms, default 0 here) or the "Spell queue window"
+    // enhancement (the reference client's 400 ms, docs/re/enhanced-combat.md) brings it.
+    [[nodiscard]] uint32_t getQueuedSpellId() const {
+        return queuedSpellId_ != 0 ? queuedSpellId_ : readyQueuedSpellId_;
+    }
+    void cancelQueuedSpell() {
+        queuedSpellId_ = 0; queuedSpellTarget_ = 0;
+        readyQueuedSpellId_ = 0; readyQueuedTarget_ = 0;
+    }
+    /// The enhancement's window in ms, or a negative value to read the
+    /// SpellQueueWindow CVar (the stock default 0: no queue).
+    void setSpellQueueOverrideMs(int ms) { spellQueueOverrideMs_ = ms; }
+    /// The queue window in effect, ms; 0 is stock (no queue).
+    [[nodiscard]] int spellQueueWindowMs() const;
 
     // Unit cast state (tracked per GUID for target frame + boss frames)
     [[nodiscard]] const UnitCastState* getUnitCastState(uint64_t guid) const {
@@ -803,6 +815,15 @@ private:
     std::chrono::steady_clock::time_point autoAttackToggledAt_{};
     uint32_t queuedSpellId_ = 0;
     uint64_t queuedSpellTarget_ = 0;
+    /// A press refused only by the global cooldown or the spell's own
+    /// cooldown, within the queue window of its end: sent by updateTimers the
+    /// moment the spell is ready (Enhanced's SpellQueueWindow).
+    uint32_t readyQueuedSpellId_ = 0;
+    uint64_t readyQueuedTarget_ = 0;
+    std::chrono::steady_clock::time_point readyQueuedAt_{};
+    int spellQueueOverrideMs_ = -1;
+    /// Seconds until `spellId` is no longer held by its cooldown or the GCD.
+    [[nodiscard]] float notReadyWaitSec(uint32_t spellId) const;
 
     // Per-unit cast state
     std::unordered_map<uint64_t, UnitCastState> unitCastStates_;

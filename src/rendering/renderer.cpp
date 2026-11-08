@@ -3275,6 +3275,7 @@ void Renderer::update(float deltaTime) {
                 enh_.secondaryMotion, enh_.secondaryMotionStrength, wind, enh_.remoteSmoothing, characterInstanceId,
                 nativeCharacterInstanceId_,
                 animationController_ ? animationController_->getMountInstanceId() : 0u);
+            characterRenderer->setPoseBlend(enh_.poseBlend);
         }
         characterRenderer->update(fxDt, camera->getPosition());
     }

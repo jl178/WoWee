@@ -248,6 +248,23 @@ struct Enhancements {
     /// keep the whole screen. Off is the stock layout across the whole width.
     bool  ultrawideHud = false;
 
+    // ---- Combat feel (the reference client, docs/re/enhanced-combat.md) --------------
+    /// A new animation that starts while a cross-fade is still running fades
+    /// from the pose as drawn (a snapshot) over its blendTime, so a swing cut
+    /// short by a flinch, a run or another swing never pops. Off is the stock
+    /// 0x826C40: the fade keeps its outgoing sequence and swaps the incoming
+    /// one at once, or drops the outgoing one.
+    bool  poseBlend = false;
+    /// The spell queue window in ms (Enhanced's SpellQueueWindow, 400): a press
+    /// that only the GCD, a cooldown or the cast's end holds within that time
+    /// is sent the moment it can be (SpellHandler). 0 is stock 3.3.5a: no
+    /// queue, the press refused (or the CVar's own window).
+    int   spellQueueWindow = 0;
+    /// Enhanced's swing timer (Blizzard_SwingTimer, Camelot only): a bar per
+    /// weapon hand over the action bars, filled from each of the player's
+    /// own swings to the next and dimmed out of melee range. Off: none.
+    bool  swingTimer = false;
+
     bool operator==(const Enhancements&) const = default;
 };
 

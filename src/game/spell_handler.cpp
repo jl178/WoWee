@@ -1018,6 +1018,20 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
     // Before the dismount and the ground cursor below, as stock checks it
     // before either.
     if (spellId != 0 && spellId != SPELL_ID_ATTACK && isSpellNotReady(spellId)) {
+        // With a queue window (not stock: the reference client's SpellQueueWindow,
+        // 400 ms), a press that only the GCD or the spell's own cooldown
+        // holds, and that within the window of its end, is kept and sent the
+        // moment the spell is ready (updateTimers). A newer press replaces
+        // it. Without one, the stock refusal.
+        const int windowMs = spellQueueWindowMs();
+        if (windowMs > 0 && notReadyWaitSec(spellId) * 1000.0f <= static_cast<float>(windowMs)) {
+            readyQueuedSpellId_ = spellId;
+            readyQueuedTarget_ = targetGuid != 0 ? targetGuid : owner_.getTargetGuid();
+            readyQueuedAt_ = std::chrono::steady_clock::now();
+            LOG_DEBUG("Spell queue: spell ", spellId, " waits ", notReadyWaitSec(spellId) * 1000.0f,
+                      " ms for its cooldown");
+            return;
+        }
         refuseCastLocally(spellId, kSpellFailedNotReady);
         return;
     }
@@ -1120,8 +1134,7 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
         // progress" - or, during a channel, starts the new spell and ends the
         // channel. SpellQueueWindow (ms, a later client's CVar) brings the
         // queue back as an option; 0, the default, is the stock behaviour.
-        const int queueWindowMs =
-            std::atoi(addons::storedCVarValue("SpellQueueWindow", "0").c_str());
+        const int queueWindowMs = spellQueueWindowMs();
         if (queueWindowMs > 0 && !castIsChannel_ && castTimeRemaining_ > 0.0f &&
             castTimeRemaining_ * 1000.0f <= static_cast<float>(queueWindowMs)) {
             queuedSpellId_     = spellId;
@@ -1474,6 +1487,23 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
         }
         predictedPrecastSpellId_ = spellId;
     }
+}
+
+int SpellHandler::spellQueueWindowMs() const {
+    if (spellQueueOverrideMs_ >= 0) return spellQueueOverrideMs_;
+    return std::atoi(addons::storedCVarValue("SpellQueueWindow", "0").c_str());
+}
+
+float SpellHandler::notReadyWaitSec(uint32_t spellId) const {
+    float wait = getSpellCooldown(spellId);
+    if (isGCDActive()) {
+        owner_.loadSpellNameCache();
+        const auto it = owner_.spellNameCacheRef().find(spellId);
+        if (it != owner_.spellNameCacheRef().end() && it->second.startRecoveryCategory != 0xFFFFFFFFu &&
+            it->second.startRecoveryCategory != 0 && it->second.startRecoveryCategory == gcdCategory_)
+            wait = std::max(wait, getGCDRemaining());
+    }
+    return wait;
 }
 
 bool SpellHandler::isSpellNotReady(uint32_t spellId) const {
@@ -2973,6 +3003,26 @@ void SpellHandler::updateTimers(float dt) {
     if (casting_ && castTimeRemaining_ > 0.0f) {
         castTimeRemaining_ -= dt;
         if (castTimeRemaining_ < 0.0f) castTimeRemaining_ = 0.0f;
+    }
+    // A press kept by the queue window goes out once its cooldown is over
+    // (not stock; castSpell). During a cast it waits for the cast's end,
+    // where castSpell's own cast queue takes over. Forgotten if the window
+    // is turned off, or a second after it should have gone.
+    if (readyQueuedSpellId_ != 0) {
+        const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - readyQueuedAt_).count();
+        const int windowMs = spellQueueWindowMs();
+        if (windowMs <= 0 || waited > windowMs + 1000 || !owner_.isInWorld()) {
+            readyQueuedSpellId_ = 0;
+            readyQueuedTarget_ = 0;
+        } else if (!casting_ && !isSpellNotReady(readyQueuedSpellId_)) {
+            const uint32_t id = readyQueuedSpellId_;
+            const uint64_t target = readyQueuedTarget_;
+            readyQueuedSpellId_ = 0;
+            readyQueuedTarget_ = 0;
+            LOG_DEBUG("Spell queue: sending queued spell ", id, " after ", waited, " ms");
+            castSpell(id, target);
+        }
     }
     // The eating or drinking sound is the spell's own: Food (433 and kin) has
     // visual 51, whose state kit 409 plays "Food" (iEating1.wav) as the aura
@@ -4869,6 +4919,8 @@ void SpellHandler::stopCasting() {
 }
 
 void SpellHandler::resetCastState() {
+    readyQueuedSpellId_ = 0;
+    readyQueuedTarget_ = 0;
     restorationActive_ = false;
     restorationSpellId_ = 0;
     restorationTimeRemaining_ = 0.0f;

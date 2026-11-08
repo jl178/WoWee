@@ -2455,6 +2455,18 @@ void CharacterRenderer::beginSequenceBlend(CharacterInstance& inst, const pipeli
     // A fade still more than half on the outgoing side keeps its outgoing
     // sequence and its clock; only the incoming one changes (0x826C40).
     if (inst.blendDurationMs > 0.0f && inst.blendElapsedMs < inst.blendDurationMs) {
+        // Not stock ("Smoother animation changes"): fade from the pose as it
+        // was last drawn, both sides of the running fade in it, so neither
+        // the swapped incoming side nor the dropped outgoing one pops. The
+        // modern engine stacks its fades (blend trees, Enhanced's
+        // "Animation Blend Tree"); a snapshot is the one-slot form of that.
+        if (poseBlend_ && blendMs > 0 && inst.localPose.size() == model.bones.size()) {
+            inst.blendFromSeq = -1;
+            inst.blendFromPose = inst.localPose;
+            inst.blendElapsedMs = 0.0f;
+            inst.blendDurationMs = static_cast<float>(blendMs);
+            return;
+        }
         const float incoming = m2_track::sequenceBlendWeight(inst.blendElapsedMs / inst.blendDurationMs);
         if (1.0f - incoming > 0.5f) return;
     }

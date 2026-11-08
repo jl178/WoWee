@@ -228,6 +228,9 @@ public:
     void addMotionCorrection(uint32_t instanceId, const glm::vec3& renderDelta);
     void setMotionEnhancements(int secondaryMotion, float secondaryStrength, const glm::vec3& windWorld,
                                bool remoteSmoothing, uint32_t localA, uint32_t localB, uint32_t localC);
+    /// "Smoother animation changes" (not stock, docs/re/enhanced-combat.md): a
+    /// fade begun while another is running fades from the drawn pose.
+    void setPoseBlend(bool on) { poseBlend_ = on; }
     /// Look twist: yaw on the SpineLow key bone and, on top of it, the Head
     /// key bone (radians, CCW positive). See animation/body_facing.hpp.
     void setInstanceTorsoYaw(uint32_t instanceId, float deltaYawRad, float headYawRad = 0.0f);
@@ -1036,6 +1039,7 @@ private:
     glm::vec3 springWind_{0.0f};
     float springClock_ = 0.0f;
     bool remoteSmoothing_ = false;
+    bool poseBlend_ = false;
     uint32_t localInstances_[3] = {0, 0, 0};
     /// Bumped whenever `instances` gains or loses an entry. An element of an
     /// unordered_map stays where it is until erased, so a list of pointers

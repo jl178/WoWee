@@ -462,6 +462,18 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "feet of units within 30 yd) and the leg solve in "
                  "calculateBoneMatrices; off reads nothing and poses every bone stock",
      .asBool = &Enhancements::footPlacement},
+    {.key = "poseblend", .label = "Smoother animation changes", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = "Combat", .section = "Feel (the reference client)",
+     .tooltip = "When a character changes what it is doing in the middle of a\n"
+                "change - a swing cut short by a flinch, a cast by a run - it\n"
+                "eases from where its body is into the new move, as in WoW\n"
+                "Enhanced. Off is the original, which can jump part of the way.",
+     // docs/re/enhanced-combat.md: a copy of the pose per interrupted fade.
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "pose_blend",
+     .controls = "the snapshot branch of CharacterRenderer::beginSequenceBlend (a fade "
+                 "begun during a fade copies localPose); off keeps 0x826C40's swap",
+     .after = "focuscastkey",
+     .asBool = &Enhancements::poseBlend},
     {.key = "smoothzoom", .label = "Smooth camera zoom", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
      .tooltip = "The mouse wheel's zoom glides to its new distance and settles,\n"
@@ -736,6 +748,29 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "use_original_soundtrack",
      .controls = "the Wowee tracks in ZoneManager's music rotation", .after = "musicvolume",
      .asBool = &Enhancements::woweeMusic},
+    {.key = "spellqueue", .label = "Spell queue window (ms)", .kind = SettingKind::Int,
+     .minValue = 0, .maxValue = 400, .step = 50, .category = "Combat", .section = "",
+     .tooltip = "Press your next spell up to this long before the global\n"
+                "cooldown, its own cooldown or your cast ends, and it goes out\n"
+                "the moment it can, as in the reference client (400). 0 is the original\n"
+                "3.3.5: a press before then is refused.",
+     .choices = "", .stockValue = 0, .recommendedValue = 400, .saveKey = "spell_queue_window",
+     .controls = "SpellHandler's queue: one kept press, sent from updateTimers when its "
+                 "cooldown and the GCD are over, or at the cast's end; 0 reads the "
+                 "SpellQueueWindow CVar (default 0, no queue)",
+     .after = "focuscastkey",
+     .asInt = &Enhancements::spellQueueWindow},
+    {.key = "swingtimer", .label = "Swing timer", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = "Combat", .section = "",
+     .tooltip = "A bar over the action bars that fills from each of your melee\n"
+                "swings to the next, one per weapon hand, dimmed when your\n"
+                "target is out of reach. the reference client's swing timer; the\n"
+                "original game has none.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "swing_timer",
+     .controls = "GameScreen::renderSwingTimer: two ImGui bars in combat, from "
+                 "CombatHandler's swing times and UNIT_FIELD_BASEATTACKTIME",
+     .after = "targetcastbar",
+     .asBool = &Enhancements::swingTimer},
     {.key = "crispinterface", .label = "Sharp interface text", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = "HUD", .section = "Display",
      .tooltip = "Draw the interface's letters at the size they appear on\n"
@@ -758,6 +793,19 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "the centred anchor area in WidgetTree::layout; nothing below 16:9",
      .after = "castabledebuffs",
      .asBool = &Enhancements::ultrawideHud},
+};
+
+/// The combat, targeting and animation rows as the reference client has them
+/// (docs/re/enhanced-combat.md): what a "Enhanced" set gives these keys.
+struct EnhancementPresetValue {
+    const char* key;
+    float value;
+};
+inline constexpr EnhancementPresetValue kEnhancedCombatValues[] = {
+    {"poseblend", 1.0f},
+    {"remotesmoothing", 1.0f},
+    {"spellqueue", 400.0f},
+    {"swingtimer", 1.0f},
 };
 
 inline constexpr std::size_t kEnhancementRowCount =

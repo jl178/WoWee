@@ -60,6 +60,8 @@
 #include "core/logger.hpp"
 #include <imgui.h>
 #include <imgui_internal.h>
+#include <cfloat>
+#include <cstdio>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -182,6 +184,87 @@ namespace wowee { namespace ui {
 
 GameScreen::GameScreen() {
     loadSettings();
+}
+
+// the reference client's swing timer (Blizzard_SwingTimer.lua/.xml, loaded only for
+// the "camelot" game type): one bar per weapon hand, filled from each of the
+// player's swings to the next and cleared at the end; shown in combat; the
+// frame, bar and labels at 0.4 alpha and the labels red while the target is
+// out of reach (OUT_OF_RANGE_ALPHA), but never during a swing. Drawn here
+// rather than by FrameXML: the 3.3.5 interface has no such frame. Colours are
+// sampled from Enhanced's uiswingtimerbar2xc60.blp atlas.
+void GameScreen::renderSwingTimer(game::GameHandler& gameHandler) {
+    auto* combat = gameHandler.getCombatHandler();
+    if (!combat || !gameHandler.isInCombat()) return;
+    float uiScale = 1.0f;
+    if (services_.addonManager) {
+        if (auto* engine = services_.addonManager->getLuaEngine()) uiScale = engine->widgets().uiScale();
+    }
+    if (uiScale <= 0.0f) uiScale = 1.0f;
+
+    // Out of reach of the auto-attack target (Enhanced's range check).
+    bool outOfRange = false;
+    const uint64_t targetGuid = gameHandler.getAutoAttackTargetGuid() != 0
+        ? gameHandler.getAutoAttackTargetGuid() : gameHandler.getTargetGuid();
+    if (auto unit = std::dynamic_pointer_cast<game::Unit>(gameHandler.getEntityManager().getEntity(targetGuid))) {
+        const auto& me = gameHandler.getMovementInfo();
+        const float dx = me.x - unit->getX(), dy = me.y - unit->getY(), dz = me.z - unit->getZ();
+        float myReach = 1.5f;
+        if (auto self = std::dynamic_pointer_cast<game::Unit>(
+                gameHandler.getEntityManager().getEntity(gameHandler.getPlayerGuid()))) {
+            if (self->getCombatReach() > 0.0f) myReach = self->getCombatReach();
+        }
+        const float melee = game::interaction::meleeReach(myReach, unit->getCombatReach());
+        outOfRange = dx * dx + dy * dy + dz * dz > melee * melee;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const float W = ImGui::GetIO().DisplaySize.x;
+    const float H = ImGui::GetIO().DisplaySize.y;
+    // 200 x 13 interface units, the bottom of the main hand's bar 125 units
+    // up, over the 3.3.5 cast bar's place; the off hand's under it.
+    const float bw = 200.0f * uiScale, bh = 13.0f * uiScale;
+    float bottom = H - 125.0f * uiScale;
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    struct Look { ImU32 fillHi, fillLo; const char* label; };
+    const Look looks[2] = {
+        {IM_COL32(186, 175, 156, 255), IM_COL32(112, 100, 97, 255), "Main Hand"},
+        {IM_COL32(105, 113, 118, 255), IM_COL32(63, 65, 73, 255), "Off Hand"},
+    };
+    for (int hand = 0; hand < 2; ++hand) {
+        const auto& sw = combat->getPlayerSwing(hand);
+        if (sw.durationSec <= 0.0f) continue;
+        const float since = std::chrono::duration<float>(now - sw.at).count();
+        // An off hand that has not swung for a while is not being used.
+        if (hand == 1 && since > 10.0f) continue;
+        const bool running = since < sw.durationSec;
+        const float a = (!running && outOfRange) ? 0.4f : 1.0f;
+        auto alpha = [a](int v) { return static_cast<int>(v * a); };
+        const ImVec2 p0(W * 0.5f - bw * 0.5f, bottom - bh);
+        const ImVec2 p1(W * 0.5f + bw * 0.5f, bottom);
+        dl->AddRectFilled(p0, p1, IM_COL32(20, 19, 17, alpha(153)), 2.0f * uiScale);
+        if (running) {
+            const float f = std::clamp(since / sw.durationSec, 0.0f, 1.0f);
+            const ImVec2 f0(p0.x + 2.0f * uiScale, p0.y + 2.0f * uiScale);
+            const ImVec2 f1(f0.x + (bw - 4.0f * uiScale) * f, p1.y - 2.0f * uiScale);
+            dl->AddRectFilledMultiColor(f0, f1, looks[hand].fillHi, looks[hand].fillHi,
+                                        looks[hand].fillLo, looks[hand].fillLo);
+            // The pip at the bar's moving end.
+            dl->AddRectFilled(ImVec2(f1.x - 1.5f * uiScale, p0.y), ImVec2(f1.x + 1.5f * uiScale, p1.y),
+                              IM_COL32(230, 225, 210, 255));
+        }
+        dl->AddRect(p0, p1, IM_COL32(86, 66, 43, alpha(255)), 2.0f * uiScale, 0, 1.5f * uiScale);
+        const ImU32 text = (!running && outOfRange) ? IM_COL32(255, 32, 32, alpha(255))
+                                                    : IM_COL32(255, 255, 255, 255);
+        const float fs = 10.0f * uiScale;
+        char t[16];
+        std::snprintf(t, sizeof t, "%.1f", running ? sw.durationSec - since : 0.0f);
+        const float ty = p0.y + (bh - fs) * 0.5f;
+        dl->AddText(ImGui::GetFont(), fs, ImVec2(p0.x + 6.0f * uiScale, ty), text, looks[hand].label);
+        const float tw = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, t).x;
+        dl->AddText(ImGui::GetFont(), fs, ImVec2(p1.x - 6.0f * uiScale - tw, ty), text, t);
+        bottom -= bh + 4.0f * uiScale;
+    }
 }
 
 void GameScreen::openInspectWindow(game::GameHandler& gameHandler) {
@@ -1048,6 +1131,14 @@ void GameScreen::render(game::GameHandler& gameHandler) {
                                    static_cast<int>(damageFlashAlpha_ * 100.0f), 0.12f);
         }
     }
+
+    // Combat feel (docs/re/enhanced-combat.md). The spell queue window: the
+    // enhancement's window, or the SpellQueueWindow CVar (stock: none).
+    if (auto* sh = gameHandler.getSpellHandler()) {
+        const int q = settingsPanel_.enhancements.spellQueueWindow;
+        sh->setSpellQueueOverrideMs(q > 0 ? q : -1);
+    }
+    if (settingsPanel_.enhancements.swingTimer) renderSwingTimer(gameHandler);
 
     // Persistent low-health vignette - pulsing red edges when HP < 20%
     {

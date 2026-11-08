@@ -880,6 +880,20 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
         } else if (!data.noAnimation()) {
             if (owner_.meleeSwingCallbackRef()) owner_.meleeSwingCallbackRef()(0, data.hitInfo);
         }
+        // The swing timer's clock (Enhanced's PLAYER_SWING): this hand swung
+        // now, and swings again after its current swing time, haste included
+        // (UNIT_FIELD_BASEATTACKTIME main, off).
+        if (!rangedShot) {
+            constexpr uint32_t kHitInfoOffHand = 0x00000004;
+            const int hand = (data.hitInfo & kHitInfoOffHand) ? 1 : 0;
+            float dur = 0.0f;
+            if (auto self = owner_.getEntityManager().getEntity(owner_.getPlayerGuid())) {
+                const uint16_t idx = fieldIndex(UF::UNIT_FIELD_BASEATTACKTIME);
+                if (idx != 0xFFFF) dur = static_cast<float>(self->getField(static_cast<uint16_t>(idx + hand))) / 1000.0f;
+            }
+            playerSwing_[hand].at = std::chrono::steady_clock::now();
+            playerSwing_[hand].durationSec = dur;
+        }
     }
     if (!isPlayerAttacker && !data.noAnimation() && owner_.npcSwingCallbackRef()) {
         owner_.npcSwingCallbackRef()(data.attackerGuid, data.hitInfo, 0);
