@@ -257,6 +257,13 @@ public:
     [[nodiscard]] const std::string& getPendingGuildInviteGuildName() const { return pendingGuildInviteGuildName_; }
     [[nodiscard]] const GuildInfoData& getGuildInfoData() const { return guildInfoData_; }
     [[nodiscard]] const GuildQueryResponseData& getGuildQueryData() const { return guildQueryData_; }
+    /// Any guild's answer to CMSG_GUILD_QUERY, kept for its tabard design.
+    [[nodiscard]] const GuildQueryResponseData* findGuildData(uint32_t guildId) const {
+        auto it = guildData_.find(guildId);
+        return it == guildData_.end() ? nullptr : &it->second;
+    }
+    /// Bumped whenever a guild's answer arrives, so tabards can be redrawn.
+    [[nodiscard]] uint32_t guildDataVersion() const { return guildDataVersion_; }
     [[nodiscard]] bool hasGuildInfoData() const { return guildInfoData_.isValid(); }
 
     // Petition
@@ -700,6 +707,8 @@ private:
     GuildRosterData guildRoster_;
     GuildInfoData guildInfoData_;
     GuildQueryResponseData guildQueryData_;
+    std::unordered_map<uint32_t, GuildQueryResponseData> guildData_;
+    uint32_t guildDataVersion_ = 0;
     bool hasGuildRoster_ = false;
     std::unordered_map<uint32_t, std::string> guildNameCache_;
     std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> pendingGuildNameQueries_;

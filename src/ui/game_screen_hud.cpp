@@ -46,6 +46,7 @@
 #include "pipeline/dbc_layout.hpp"
 #include "core/geoset_rules.hpp"
 #include "pipeline/item_textures.hpp"
+#include "core/guild_tabard.hpp"
 
 #include "game/expansion_profile.hpp"
 #include "game/character.hpp"
@@ -244,6 +245,7 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
     }
     std::vector<std::pair<int, std::string>> regionLayers =
         pipeline::buildItemRegionLayers(*assetManager, *displayInfoDbc, equipped, isFemale);
+    if (auto* gh = app.getGameHandler()) core::applyGuildTabardFor(*gh, gh->getPlayerGuid(), regionLayers);
 
     // Re-composite: base skin + underwear + equipment regions
     // Clear composite cache first to prevent stale textures from being reused

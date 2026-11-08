@@ -4175,6 +4175,13 @@ const GuildInfoData& GameHandler::getGuildInfoData() const {
     return empty;
 }
 
+const GuildQueryResponseData* GameHandler::findGuildData(uint32_t guildId) const {
+    return socialHandler_ ? socialHandler_->findGuildData(guildId) : nullptr;
+}
+uint32_t GameHandler::guildDataVersion() const {
+    return socialHandler_ ? socialHandler_->guildDataVersion() : 0;
+}
+
 const GuildQueryResponseData& GameHandler::getGuildQueryData() const {
     if (socialHandler_) return socialHandler_->getGuildQueryData();
     static const GuildQueryResponseData empty;

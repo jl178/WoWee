@@ -778,6 +778,11 @@ private:
     };
     std::unordered_map<uint64_t, OnlinePlayerAppearanceState> onlinePlayerAppearance_;
     std::unordered_map<uint64_t, std::pair<std::array<uint32_t, 19>, std::array<uint8_t, 19>>> pendingOnlinePlayerEquipment_;
+    // What each spawned player last wore, to draw it again when their guild's
+    // tabard design arrives (core/guild_tabard.hpp), and the guild-data
+    // version that was last acted on.
+    std::unordered_map<uint64_t, std::pair<std::array<uint32_t, 19>, std::array<uint8_t, 19>>> lastOnlinePlayerEquipment_;
+    uint32_t guildDataVersionSeen_ = 0;
     std::deque<std::pair<uint64_t, std::pair<std::array<uint32_t, 19>, std::array<uint8_t, 19>>>> deferredEquipmentQueue_;
     void processDeferredEquipmentQueue();
     struct PreparedEquipmentUpdate {

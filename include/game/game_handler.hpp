@@ -1005,6 +1005,8 @@ public:
     const std::string& lookupGuildName(uint32_t guildId);
     // Returns the guildId for a player entity (from PLAYER_GUILDID update field).
     uint32_t getEntityGuildId(uint64_t guid) const;
+    const GuildQueryResponseData* findGuildData(uint32_t guildId) const;
+    uint32_t guildDataVersion() const;
 
     using ReadyCheckResult = game::ReadyCheckResult;
     void initiateReadyCheck();
@@ -3357,6 +3359,9 @@ public:
     /// when the interface files are absent.
     void addGlobalStringChatLine(const char* key, const std::string& fallback,
                                  const std::vector<std::string>& args = {});
+    /// The same as a chat line of the given type (CHAT_MSG_SKILL for skill-ups).
+    void addGlobalStringChatLineAs(game::ChatType type, const char* key, const std::string& fallback,
+                                   const std::vector<std::string>& args = {});
     /// The arg a message naming a player uses for the name.
     static constexpr const char* kPlayerNameArg = "\x02name";
     /// A message naming a player by guid, said once the name is known: at

@@ -323,6 +323,21 @@ struct EquippedItemDisplay {
 
 /// The whole walk for a set of equipped items: read each display row, order
 /// the layers as the stock client does and resolve the paths.
+/// A guild's tabard design (SMSG_GUILD_QUERY_RESPONSE).
+struct GuildTabardDesign {
+    uint32_t emblemStyle = 0, emblemColor = 0;
+    uint32_t borderStyle = 0, borderColor = 0;
+    uint32_t backgroundColor = 0;
+};
+
+/// The guild tabard's display draws a blank template on the chest
+/// (Tabard_A_05Default_Chest_TU / _TL); the stock client lays the guild's
+/// background, border and emblem (Textures\GuildEmblems) over those two
+/// regions instead. Replaces the template layers in `layers` when present;
+/// returns whether it did.
+bool applyGuildTabard(std::vector<std::pair<int, std::string>>& layers,
+                      const GuildTabardDesign& design);
+
 std::vector<std::pair<int, std::string>> buildItemRegionLayers(
     AssetManager& assets, const DBCFile& itemDisplayInfo,
     const std::vector<EquippedItemDisplay>& items, bool isFemale);

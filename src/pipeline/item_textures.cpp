@@ -1,5 +1,8 @@
 #include "pipeline/item_textures.hpp"
 
+#include <cctype>
+#include <cstdio>
+
 #include <algorithm>
 #include <cctype>
 
@@ -127,6 +130,40 @@ std::vector<std::pair<int, std::string>> buildItemRegionLayers(
     return resolveItemRegionLayers(assets, orderItemRegionLayers(sources), isFemale);
 }
 
+
+bool applyGuildTabard(std::vector<std::pair<int, std::string>>& layers,
+                      const GuildTabardDesign& d) {
+    const auto isTemplate = [](const std::string& path) {
+        std::string lower = path;
+        for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return lower.find("tabard_a_05default_chest") != std::string::npos;
+    };
+    std::vector<int> regions;
+    for (auto it = layers.begin(); it != layers.end();) {
+        if (isTemplate(it->second)) {
+            regions.push_back(it->first);
+            it = layers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (regions.empty()) return false;
+    char buf[96];
+    for (int region : regions) {
+        // TorsoUpper (3) takes the _TU pieces, TorsoLower (4) the _TL ones.
+        const char* part = region == 3 ? "TU" : "TL";
+        std::snprintf(buf, sizeof(buf), "Textures\\GuildEmblems\\Background_%02u_%s_U.blp",
+                      d.backgroundColor, part);
+        layers.emplace_back(region, buf);
+        std::snprintf(buf, sizeof(buf), "Textures\\GuildEmblems\\Border_%02u_%02u_%s_U.blp",
+                      d.borderStyle, d.borderColor, part);
+        layers.emplace_back(region, buf);
+        std::snprintf(buf, sizeof(buf), "Textures\\GuildEmblems\\Emblem_%02u_%02u_%s_U.blp",
+                      d.emblemStyle, d.emblemColor, part);
+        layers.emplace_back(region, buf);
+    }
+    return true;
+}
 
 }  // namespace pipeline
 }  // namespace wowee

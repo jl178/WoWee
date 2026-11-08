@@ -3125,6 +3125,8 @@ void SocialHandler::handleGuildQueryResponse(network::Packet& packet) {
         if (!data.guildName.empty()) {
             rememberGuildName(data.guildId, data.guildName);
         }
+        guildData_[data.guildId] = data;
+        ++guildDataVersion_;
     }
     // Ours when it names the guild this character is actually in - which is
     // the player's own field once they have joined one, not the character

@@ -26,6 +26,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "pipeline/item_textures.hpp"
+#include "core/guild_tabard.hpp"
 #include "pipeline/m2_asset_loader.hpp"
 #include "game/game_handler.hpp"
 #include "game/update_field_table.hpp"
@@ -483,6 +484,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     }
 
     const OnlinePlayerAppearanceState& st = appIt->second;
+    lastOnlinePlayerEquipment_[guid] = {displayInfoIds, inventoryTypes};
 
     auto* charRenderer = renderer_->getCharacterRenderer();
     if (!charRenderer) return;
@@ -614,6 +616,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     }
     std::vector<std::pair<int, std::string>> regionLayers =
         pipeline::buildItemRegionLayers(*assetManager_, *displayInfoDbc, equipped, isFemale);
+    if (gameHandler_) core::applyGuildTabardFor(*gameHandler_, guid, regionLayers);
 
     const auto slotsIt = playerTextureSlotsByModelId_.find(st.modelId);
     if (slotsIt == playerTextureSlotsByModelId_.end()) return;

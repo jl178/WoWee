@@ -812,7 +812,14 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         }
     }
 
-    if (inventoryScreen.consumeEquipmentDirty() || gameHandler.consumeOnlineEquipmentDirty()) {
+    // The player's guild design arriving redraws their tabard
+    // (core/guild_tabard.hpp): once per guild, not on every guild's answer.
+    const uint32_t ownGuildId = gameHandler.getEntityGuildId(gameHandler.getPlayerGuid());
+    const bool guildDesignNew = ownGuildId != 0 && ownGuildId != guildTabardDrawnFor_ &&
+                                gameHandler.findGuildData(ownGuildId) != nullptr;
+    if (inventoryScreen.consumeEquipmentDirty() || gameHandler.consumeOnlineEquipmentDirty() ||
+        guildDesignNew) {
+        if (guildDesignNew) guildTabardDrawnFor_ = ownGuildId;
         updateCharacterGeosets(gameHandler.getInventory());
         updateCharacterTextures(gameHandler.getInventory());
         if (appearanceComposer_) appearanceComposer_->loadEquippedWeapons();

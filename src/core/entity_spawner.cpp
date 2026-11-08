@@ -87,6 +87,19 @@ void EntitySpawner::initialize() {
 }
 
 void EntitySpawner::update() {
+    // A guild's tabard design arrived: draw again the players wearing what
+    // may be its tabard (core/guild_tabard.hpp). Rare - once per guild seen.
+    if (gameHandler_ && gameHandler_->guildDataVersion() != guildDataVersionSeen_) {
+        guildDataVersionSeen_ = gameHandler_->guildDataVersion();
+        for (auto it = lastOnlinePlayerEquipment_.begin(); it != lastOnlinePlayerEquipment_.end();) {
+            if (!playerInstances_.count(it->first)) { it = lastOnlinePlayerEquipment_.erase(it); continue; }
+            const auto equip = it->second;
+            const uint64_t guid = it->first;
+            ++it;
+            if (equip.first[18] != 0 && gameHandler_->getEntityGuildId(guid) != 0)  // 18: tabard
+                setOnlinePlayerEquipment(guid, equip.first, equip.second);
+        }
+    }
     // WOWEE_FRAME_PROFILE: how far behind the spawn queues are, every two
     // seconds, so a world that fills slowly says which queue is holding it.
     static const bool queueProfile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
