@@ -680,9 +680,16 @@ void AnimationController::setMounted(uint32_t mountInstId, uint32_t mountDisplay
 void AnimationController::clearMount() {
     LOG_INFO("Mount cleared: was taxiFlight=", taxiFlight_, " mountInstanceId=", mountInstanceId_);
     if (auto* cr = renderer_->getCharacterRenderer()) {
-        if (uint32_t riderInst = renderer_->getCharacterInstanceId())
+        if (uint32_t riderInst = renderer_->getCharacterInstanceId()) {
             cr->setInstanceMountedOn(riderInst, 0);
+            // On the ground this frame: the rider's Mount (91) sat on the
+            // floor until the next pick (0x73AC30 re-picks at once in stock).
+            cr->playAnimation(riderInst, anim::STAND, true);
+        }
     }
+    // A cast's release kept while mounted (the summon's SpellCastOmni) is not
+    // played on getting down; there is no dismount animation in stock.
+    characterAnimator_.abandonSpell();
     mountInstanceId_ = 0;
     mountDisplayId_ = 0;
     mountHeightOffset_ = 0.0f;

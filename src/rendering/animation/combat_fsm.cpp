@@ -111,6 +111,17 @@ void CombatFSM::cancelSpellCast() {
     state_ = State::INACTIVE;
 }
 
+void CombatFSM::abandonSpell() {
+    // Whatever of a cast is still to play - its build-up, its hold or a
+    // release waiting to be seen - is dropped (a dismount: the summon's
+    // release, kept while the rider sat, played the moment they stood).
+    if (state_ == State::HIT_REACTION) resumeSpellAfterHit_ = false;
+    clearSpellState();
+    if (state_ == State::SPELL_PRECAST || state_ == State::SPELL_CASTING ||
+        state_ == State::SPELL_FINALIZE)
+        state_ = State::INACTIVE;
+}
+
 void CombatFSM::clearSpellState() {
     spellPrecastAnimId_ = 0;
     spellCastAnimId_ = 0;

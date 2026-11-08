@@ -91,6 +91,8 @@ public:
     /// release (0x7FEC00 -> 0x72E430). A release already playing for a cast
     /// that did go off is left to finish.
     void cancelSpellCast();
+    /// Drop every part of a cast still to play, the release included.
+    void abandonSpell();
     void clearSpellState();
 
     // ── Hit/stun management ─────────────────────────────────────────────
