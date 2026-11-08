@@ -3426,7 +3426,10 @@ static int lua_GetLootSlotInfo(lua_State* L) {
                                                            : "Interface\\Icons\\INV_Misc_Coin_05";
         lua_pushstring(L, coin);
         lua_pushstring(L, lootCoinText(loot.gold).c_str());
-        lua_pushnumber(L, loot.gold);
+        // Quantity 0: LootFrame prints a quantity over the icon when it is
+        // above 1, and the copper total drawn there read as "636" for six
+        // silver thirty-six.
+        lua_pushnumber(L, 0);
         lua_pushnumber(L, 1);
         lua_pushboolean(L, 0);
         return 5;
