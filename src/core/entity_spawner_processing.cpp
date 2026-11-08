@@ -1985,6 +1985,31 @@ void EntitySpawner::processPendingMount() {
 
     if (auto* ac = renderer_->getAnimationController()) ac->setMounted(instanceId, mountDisplayId, heightOffset, m2Path);
 
+    // The camera rides higher by the seat as the stock client measures it
+    // (0x604E00): attachment 0 at the mount's drawn scale, less what the
+    // rider's bounding box loses from Stand (0) to the Mount pose (91), at the
+    // rider's scale. Without the scale a mount larger than its model's unit
+    // size put the camera below the rider's head.
+    if (auto* cc = renderer_->getCameraController()) {
+        const float mountScale = riderScale * creatureDisplayScale(mountDisplayId);
+        float cameraOffset = heightOffset * mountScale;
+        if (const uint32_t riderInst = renderer_->getCharacterInstanceId()) {
+            if (const auto* rider = charRenderer->getModelData(charRenderer->getInstanceModelId(riderInst))) {
+                auto topOf = [&](uint32_t animId, float& top) {
+                    for (const auto& seq : rider->sequences) {
+                        if (seq.id == animId) { top = seq.boundMax.z; return true; }
+                    }
+                    return false;
+                };
+                float standTop = 0.0f, mountTop = 0.0f;
+                if (topOf(0, standTop) && topOf(91, mountTop) && standTop > mountTop)
+                    cameraOffset -= (standTop - mountTop) * riderScale;
+            }
+        }
+        LOG_INFO("Mount camera offset: ", cameraOffset, " (seat ", heightOffset, " x ", mountScale, ")");
+        cc->setMountHeightOffset(cameraOffset);
+    }
+
     // Stand until the mount machine picks the unit's movement next frame
     // (Fly on a taxi's spline, the swim set in the air, the pace on the ground).
     const uint32_t startAnim = rendering::anim::STAND;
