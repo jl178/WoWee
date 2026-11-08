@@ -284,6 +284,7 @@ glm::vec3 stockUnitColor(game::GameHandler& gameHandler, const game::Unit& unit,
 // ---------------------------------------------------------------------------
 
 void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
+    plateUnderCursor_ = 0;  // set again below if a plate is under the cursor
     if (gameHandler.getState() != game::WorldState::IN_WORLD) return;
 
     // Reset mouseover each frame; we'll set it below when the cursor is over a nameplate
@@ -631,6 +632,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
     }
 
     // Click to target, right-click for the unit menu; hover is mouseover.
+    plateUnderCursor_ = hoveredPlate ? hoveredPlate->guid : 0;
     if (hoveredPlate) {
         gameHandler.setMouseoverGuid(hoveredPlate->guid);
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {

@@ -175,6 +175,8 @@ private:
     // UI state
     bool showMinimap_ = true;  // M key toggles minimap
     uint64_t nameplateCtxGuid_ = 0; // GUID of nameplate right-clicked (0 = none)
+    uint64_t plateUnderCursor_ = 0; // nameplate the cursor is on this frame (renderNameplates)
+    uint64_t plateUnderPress_ = 0;  // ... when the left button went down: that click is the plate's
     ImVec2 nameplateCtxPos_{};      // Screen position of nameplate right-click
     uint32_t lastPlayerHp_ = 0;   // Previous frame HP for damage flash detection
     float damageFlashAlpha_ = 0.0f; // Screen edge flash intensity (fades to 0)

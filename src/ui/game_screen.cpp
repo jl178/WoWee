@@ -1777,6 +1777,7 @@ void GameScreen::processWorldClicks(game::GameHandler& gameHandler) {
         leftClickPressPos_ = input.getMousePosition();
         leftClickPressAt_ = std::chrono::steady_clock::now();
         leftClickWasPress_ = true;
+        plateUnderPress_ = plateUnderCursor_;
 
         // Light the object being pressed on.
         //
@@ -1824,7 +1825,15 @@ void GameScreen::processWorldClicks(game::GameHandler& gameHandler) {
         const double heldMs = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - leftClickPressAt_).count();
 
-        if (game::stock_cast::isWorldClick(heldMs, dragDistSq >= CLICK_THRESHOLD * CLICK_THRESHOLD)) {
+        // A nameplate under the cursor when the button went down took this
+        // click (renderNameplates targets on the press). Nameplates are frames
+        // over the world in stock, so the click never reaches it; picking here
+        // too gave one click two targets - the unit under the plate on release,
+        // after the plate's on press - which read as "click an ally, and the
+        // target jumps to the enemy whose plate was over them".
+        const bool plateTookClick = plateUnderPress_ != 0;
+        if (!plateTookClick &&
+            game::stock_cast::isWorldClick(heldMs, dragDistSq >= CLICK_THRESHOLD * CLICK_THRESHOLD)) {
             auto* renderer = services_.renderer;
             auto* camera = renderer ? renderer->getCamera() : nullptr;
             auto* window = services_.window;
