@@ -5199,6 +5199,27 @@ static int lua_WoweeSetSetting(lua_State* L) {
     if (auto* svc = getLuaServices(L); svc && svc->setClientSetting) {
         svc->setClientSetting(key, value);
     }
+    // The extra bar toggles are also FrameXML's SHOW_MULTI_ACTIONBAR_* globals,
+    // and the bars only move when MultiActionBar_Update reads them. Setting the
+    // client value alone left the bars as they were until a /reload rebuilt
+    // the globals from GetActionBarToggles.
+    static constexpr std::pair<std::string_view, const char*> kBarGlobals[] = {
+        {"showbar2", "SHOW_MULTI_ACTIONBAR_1"},
+        {"showrightbar", "SHOW_MULTI_ACTIONBAR_3"},
+        {"showleftbar", "SHOW_MULTI_ACTIONBAR_4"},
+    };
+    for (const auto& [settingKey, global] : kBarGlobals) {
+        if (settingKey != key) continue;
+        if (value != "0") lua_pushstring(L, "1"); else lua_pushnil(L);
+        lua_setglobal(L, global);
+        lua_getglobal(L, "InterfaceOptions_UpdateMultiActionBars");
+        if (lua_isfunction(L, -1)) {
+            if (lua_pcall(L, 0, 0, 0) != 0) lua_pop(L, 1);
+        } else {
+            lua_pop(L, 1);
+        }
+        break;
+    }
     return 0;
 }
 
