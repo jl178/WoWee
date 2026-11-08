@@ -83,8 +83,8 @@ bool replaceFile(const std::filesystem::path& temp, const std::filesystem::path&
 struct ActionBinding { const char* command; const char* legacy; const char* label; const char* key; const char* secondKey = ""; };
 constexpr ActionBinding actions[] = {
     {"TOGGLECHARACTER0", "toggle_character_screen", "Character Screen", "C"},
-    {"OPENALLBAGS", "toggle_inventory", "Inventory", "I"},
-    {"TOGGLEBACKPACK", "toggle_bags", "Bags", "B"},
+    {"OPENALLBAGS", "toggle_inventory", "Inventory", "SHIFT-B"},
+    {"TOGGLEBACKPACK", "toggle_bags", "Bags", "B", "F12"},
     {"TOGGLESPELLBOOK", "toggle_spellbook", "Spellbook", "P"},
     {"TOGGLETALENTS", "toggle_talents", "Talents", "N"},
     {"TOGGLEQUESTLOG", "toggle_quests", "Quests", "L"},
@@ -92,7 +92,7 @@ constexpr ActionBinding actions[] = {
     {"TOGGLEGAMEMENU", "toggle_settings", "Settings", "ESCAPE"},
     {"OPENCHAT", "toggle_chat", "Chat", "ENTER", "NUMPADENTER"},
     {"TOGGLESOCIAL", "toggle_guild_roster", "Social", "O"},
-    {"TOGGLELFGPARENT", "toggle_dungeon_finder", "Dungeon Finder", "J"},
+    {"TOGGLELFGPARENT", "toggle_dungeon_finder", "Dungeon Finder", "I"},
     {"TOGGLEWORLDMAP", "toggle_world_map", "World Map", "M"},
     {"NAMEPLATES", "toggle_nameplates", "Nameplates", "V"},
     {"TOGGLEACHIEVEMENT", "toggle_achievements", "Achievements", "Y"},
@@ -291,8 +291,23 @@ bool KeybindingManager::setBinding(const std::string& requestedKey, const std::s
 bool KeybindingManager::loadBindings(const std::string& path) {
     std::ifstream in(path);
     if (!in) { LOG_WARNING("Could not read bindings from ", path); return false; }
-    const auto saved = wowee::addons::parseBindingFile(in);
+    auto saved = wowee::addons::parseBindingFile(in);
     if (!saved.valid) { LOG_WARNING("Could not convert bindings from ", path); return false; }
+    // Defaults this client used to write that stock (Data/wtf/
+    // defaultbindings.wtf) does not have: Open All Bags on I instead of
+    // SHIFT-B, the Dungeon Finder on J instead of I, no F12 for the backpack.
+    // Every row was saved, so a file still holding one of them was never
+    // changed by the player; it takes stock's.
+    struct OldDefault { const char* command; std::array<std::string, 2> was, stock; };
+    static const OldDefault kOldDefaults[] = {
+        {"OPENALLBAGS", {"I", ""}, {"SHIFT-B", ""}},
+        {"TOGGLELFGPARENT", {"J", ""}, {"I", ""}},
+        {"TOGGLEBACKPACK", {"B", ""}, {"B", "F12"}},
+    };
+    for (const auto& d : kOldDefaults) {
+        auto it = saved.keyboardMouse.find(d.command);
+        if (it != saved.keyboardMouse.end() && it->second == d.was) it->second = d.stock;
+    }
 
     // Validate everything before publishing anything, including explicit empties.
     auto candidate = *this;
