@@ -420,24 +420,6 @@ inline void computeBoneMatrices(const M2ModelGPU& model, M2Instance& instance,
             } else {
                 local *= glm::toMat4(rot);
             }
-        } else if (cameraPosWorld && (bone.flags & kM2BoneCylindricalBillboardZ) != 0) {
-            // Z-locked cylindrical billboard (0x40): turned about the model's
-            // up axis so +X faces the viewer's ground position, the authored
-            // rotation kept under it. Power Word: Shield's rings (bone flags
-            // 0x240) were drawn as authored, edge-on or back-culled from
-            // behind and the sides.
-            const glm::vec3 camModel =
-                glm::vec3(instance.invModelMatrix * glm::vec4(*cameraPosWorld, 1.0f));
-            glm::vec2 toCam(camModel.x - bone.pivot.x, camModel.y - bone.pivot.y);
-            const float len2 = glm::dot(toCam, toCam);
-            if (len2 > 1e-8f) {
-                toCam *= glm::inversesqrt(len2);
-                glm::mat4 face(1.0f);
-                face[0] = glm::vec4(toCam.x, toCam.y, 0.0f, 0.0f);
-                face[1] = glm::vec4(-toCam.y, toCam.x, 0.0f, 0.0f);
-                local *= face;
-            }
-            local *= glm::toMat4(rot);
         } else {
             local *= glm::toMat4(rot);
         }
@@ -448,6 +430,37 @@ inline void computeBoneMatrices(const M2ModelGPU& model, M2Instance& instance,
             instance.boneMatrices[i] = instance.boneMatrices[bone.parentBone] * local;
         } else {
             instance.boneMatrices[i] = local;
+        }
+        if (cameraPosWorld && (bone.flags & 0x78u) == kM2BoneCylindricalBillboardZ) {
+            // Cylindrical billboard (0x40), as stock case 3 of 0x82FF3A's
+            // switch (0x83018D) does it: the bone's own Z axis - authored and
+            // animated, parents included - is kept, and the bone is turned
+            // about it so its +X faces the viewer. The picture cards on
+            // Stormwind's shop signs turn toward the camera on their chains;
+            // Power Word: Shield's rings face it from every side.
+            glm::mat4& m = instance.boneMatrices[i];
+            const glm::vec3 zCol(m[2]);
+            const float zLen = glm::length(zCol);
+            const float xLen = glm::length(glm::vec3(m[0]));
+            const float yLen = glm::length(glm::vec3(m[1]));
+            const glm::vec3 pivotNow = glm::vec3(m * glm::vec4(bone.pivot, 1.0f));
+            const glm::vec3 camModel =
+                glm::vec3(instance.invModelMatrix * glm::vec4(*cameraPosWorld, 1.0f));
+            if (zLen > 1e-6f) {
+                const glm::vec3 z = zCol / zLen;
+                glm::vec3 toCam = camModel - pivotNow;
+                toCam -= z * glm::dot(toCam, z);
+                const float len2 = glm::dot(toCam, toCam);
+                if (len2 > 1e-10f) {
+                    const glm::vec3 x = toCam * glm::inversesqrt(len2);
+                    const glm::vec3 y = glm::cross(z, x);
+                    m[0] = glm::vec4(x * xLen, 0.0f);
+                    m[1] = glm::vec4(y * yLen, 0.0f);
+                    const glm::vec3 t = pivotNow - glm::vec3(m[0]) * bone.pivot.x -
+                                        glm::vec3(m[1]) * bone.pivot.y - zCol * bone.pivot.z;
+                    m[3] = glm::vec4(t, 1.0f);
+                }
+            }
         }
     }
     instance.bonesDirty[0] = instance.bonesDirty[1] = true;
