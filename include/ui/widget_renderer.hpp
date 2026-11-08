@@ -246,6 +246,11 @@ private:
     /// Image dimensions by path, including the ones that could not be read -
     /// stored as zero so a missing file is looked for once and not once a frame.
     std::unordered_map<std::string, std::pair<float, float>> textureSizes_;
+    /// The texture each widget last drew, by widget id. A widget whose new
+    /// texture is still waiting for its upload draws this one meanwhile, as
+    /// the stock client (which loads synchronously) never shows a gap: the
+    /// LFD role icons blinked out on every click.
+    std::unordered_map<uint32_t, std::pair<std::string, bool>> lastDrawnTexture_;
     /// Which incarnation of ImGui's backend the cache above belongs to.
     uint32_t uiTextureGenerationSeen_ = 0;
 };

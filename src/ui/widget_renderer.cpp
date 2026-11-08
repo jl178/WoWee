@@ -2743,7 +2743,11 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
     // during a load. Spreading the same work over more frames costs a texture
     // appearing a frame or two later, which is invisible, and shortens each
     // stall to something that cannot sit across a driver's patience.
-    constexpr int kUploadsPerFrame = 3;
+    // Sixteen, not three: the batch is one submit and one wait whatever it
+    // holds, and the time bound below still caps a frame of large decodes. At
+    // three, the twelve tiles of a world map zone filled in over four frames
+    // one by one, where the stock client shows the new map whole.
+    constexpr int kUploadsPerFrame = 16;
     std::vector<std::pair<const std::string*, bool>> wanted;
     wanted.reserve(kUploadsPerFrame);
     auto want = [&](const std::string& path, bool add = false) {
@@ -2819,7 +2823,7 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
     // always taken so the queue moves; whatever is left is picked up again
     // next frame, since it is still not in the cache.
     if (!wanted.empty() && vkCtx_) {
-        constexpr double kUploadBudgetMs = 3.0;
+        constexpr double kUploadBudgetMs = 6.0;
         const auto uploadStart = std::chrono::steady_clock::now();
         vkCtx_->beginUploadBatch();
         for (const auto& p : wanted) {
@@ -3398,7 +3402,19 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
                 // a later frame rather than forcing an upload here.
                 const VkDescriptorSet* set =
                     cachedTexture(w->texturePath, w->blendAdd);
-                if (!set || *set == kMissing) continue;
+                if (set && *set != kMissing) {
+                    auto& last = lastDrawnTexture_[w->id];
+                    if (last.first != w->texturePath || last.second != w->blendAdd)
+                        last = {w->texturePath, w->blendAdd};
+                } else if (!set) {
+                    // Still queued: the previous texture until this one lands.
+                    auto it = lastDrawnTexture_.find(w->id);
+                    if (it == lastDrawnTexture_.end()) continue;
+                    set = cachedTexture(it->second.first, it->second.second);
+                    if (!set || *set == kMissing) continue;
+                } else {
+                    continue;  // missing for good
+                }
                 tex = *set;
             }
             if (tex == VK_NULL_HANDLE) continue;
