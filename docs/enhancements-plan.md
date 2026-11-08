@@ -2791,6 +2791,44 @@ Done (2026-11-07): the row `hdwater`, "HD water" (the Sky page, after
 - **Cost.** About 0.9 ms of GPU in a 30-unit crowd, 0.15 ms main thread;
   see 3.20.
 
+### E36. Smoother animation changes (Enhanced)
+
+- **Stock.** A new sequence started while a cross-fade runs either keeps
+  the fade's outgoing sequence and swaps the incoming one at once, or drops
+  the outgoing one (0x826C40, `docs/re/animation.md`): a pop of up to half
+  the pose, most often in a fight (a swing cut by a flinch, a parry, a cast
+  or a run inside 150 ms).
+- **What.** Row `poseblend` (Combat page; the Motion page is full), Enhanced on, recommended on:
+  `CharacterRenderer::beginSequenceBlend` fades from the pose as last drawn
+  (`localPose`) when a fade is running. the reference client's engine stacks its
+  fades in a blend tree (`docs/re/enhanced-combat.md` section 1); a
+  snapshot is the one-slot form of it. BlendTime 0 still cuts.
+- **Off is stock.** The branch is skipped; 0x826C40's rule as before.
+- **Cost.** A copy of the bone poses per interrupted fade.
+
+### E37. Spell queue window (Enhanced)
+
+- **Stock.** No queue: a press during the GCD is refused with "Spell is not
+  ready yet" and nothing is sent (`docs/re/input-timing.md`).
+- **What.** Row `spellqueue` (Combat page, 0-400 ms), Enhanced 400,
+  recommended 400: a press held only by the GCD or the spell's cooldown, or
+  by a cast, with at most the window left, is kept and sent the moment it
+  can be (`SpellHandler::castSpell`, `updateTimers`). Enhanced's
+  `SpellQueueWindow` (`docs/re/enhanced-combat.md` section 3).
+- **Off is stock.** 0 reads the `SpellQueueWindow` CVar, default 0: refused.
+- **Cost.** None to measure.
+
+### E38. Swing timer (Enhanced)
+
+- **Stock.** None. Enhanced has `Blizzard_SwingTimer` (Camelot only).
+- **What.** Row `swingtimer` (Combat page), Enhanced on, recommended on: a
+  bar per weapon hand over the action bars in combat, filled from each of
+  the player's swings to the next, dimmed and red-labelled out of reach
+  between swings (`GameScreen::renderSwingTimer`, `CombatHandler::
+  getPlayerSwing`). Colours from Enhanced's atlas.
+- **Off is stock.** Nothing drawn; the swing times are kept either way.
+- **Cost.** Two ImGui rectangles and two labels in combat.
+
 ### Further weather ideas (not done)
 
 - **The stock mist and sand on the stock path** (E26, E28): trace the mist
