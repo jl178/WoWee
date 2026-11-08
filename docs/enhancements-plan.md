@@ -2137,6 +2137,12 @@ stock, the budget, and how to verify.
 
 ### E13. Ambient occlusion, ambient term only
 
+*Built (Nov 2026) in the reference client's form rather than as planned below:* the
+"Ambient occlusion" row, one full-screen pass with Enhanced's ASSAO settings
+(SSAOSettings 116: radius 1 yd, multiplier 3, power 3), taking only the
+ambient share of each pixel's light. Off by default and in every ladder
+preset; on in the Enhanced preset. See docs/re/enhanced-lighting.md section 4.
+
 - **Looks like.** Faint darkening where walls meet floors, under doodads,
   inside crevices. Applied only to the ambient part of the light, never to
   the sun, never to the stock baked colours, capped at about 25%.
@@ -2863,7 +2869,9 @@ Done (2026-11-07): the row `hdwater`, "HD water" (the Sky page, after
 - **Look-at heads**: stock has none (`animation.md` §5); turning heads
   toward the player changes how NPCs behave. Not proposed.
 - **Per-zone colour grading**: Light.dbc is the zone's grade. Any LUT is a
-  second grade on top. Not proposed.
+  second grade on top. Not proposed as a Wowee invention; the reference client's own
+  noon grade is now the "Colour grade (the reference client)" row, off by default and
+  on in the Enhanced preset (docs/re/enhanced-lighting.md section 3).
 - **Bloom beyond ffxGlow**: the stock glow chain is already done and
   data-driven per LightParams. Not proposed.
 

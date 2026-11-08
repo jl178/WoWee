@@ -1,0 +1,324 @@
+# the reference client's lighting and atmosphere
+
+What the official "the reference client" client (product `wowf`, build 1.60.1.70862,
+launched Nov 4 2026) does to make 1.12's world look the way it does, read from
+its binary, its shaders and its data rather than from screenshots, and what
+Wowee took from it.
+
+Sources, all from Jered's install (`_enhanced_/`, the shared CASC store) and
+the same build's files on wago.tools (same build config
+`5ada954223f7c409ea172361f5c9e565`):
+
+- `_enhanced_/Wow.exe` (77 MB, x64, D3D12) - strings, CVar registrations.
+- `_enhanced_/WTF/Config.wtf` - the settings Jered runs (graphicsQuality 6).
+- `_enhanced_/Logs/gx.log` - the device and what it enabled.
+- Shaders: `shaders/{compute,pixel,vertex}/dx_6_0/*.bls`. A `.bls` is a
+  `GXSH` container of zlib streams holding DXIL; inflated and disassembled
+  with `dxc -dumpbin` (DirectXShaderCompiler 1.10). cbuffer *struct* names
+  survive in the DXIL type table (`SceneData`, `PSFog`, `GlobalFogParams`,
+  `ProbeMetaData`, `CompactBVHNode`, `GIRayRecord`...); member names do not.
+- DB2 tables (`Light`, `LightData`, `LightParams`, `SSAOSettings`,
+  `GroundEffectTexture`, `GroundEffectDoodad`) of 1.60.1.70862, compared
+  with Classic Era 1.15.9.70576, the 1.12 data on the same engine.
+- Colour grading LUTs, FileDataIDs 8286666, 8286665, 8286667, 8248426 and
+  the neutral 1140733.
+
+The scripts that did this are in the session scratchpad
+(`scripts/bls_extract.py`, `dis_all.py`, `lut.py`, `lut2.py`, `cmp.py`,
+`palette.py`, `ground*.py`); nothing from the client was executed.
+
+## 1. What Enhanced is
+
+Enhanced is not a new renderer bolted onto 1.12. `gx.log` names it "World of
+Warcraft Retail x86_64 1.60.1.70862", it uses the retail shader family
+(`SM6`), and its exe carries the whole retail settings set. It is the modern
+(12.x, Midnight-era) engine running 1.12's world with re-authored data. Its
+look comes from three things:
+
+1. Retail's modern lighting pipeline, all of it on: cascaded sun shadows with
+   soft filtering, ASSAO, clustered local lights, froxel volumetric fog with
+   layered global fog and sun shafts, a probe-based GI ("Secondary Lighting",
+   `giQuality`), PBR water, and colour grading.
+2. Re-authored light data: every outdoor `Light` on the two continents has
+   new `LightParams` and twelve keyframes a day instead of seven, with new
+   columns only Enhanced has.
+3. Distance: `farclip 7000`, `horizonStart 1900`, `horizonClip 7000`, and
+   fog that ends far past what is drawn.
+
+Jered's `Config.wtf` (graphicsQuality 6): `giQuality 3`, `graphicsLightMode
+2`, `SSAO 3`, `sunShafts 2`, `graphicsComputeEffects 3` (volumetric fog
+level), `shadowMode 3`, `shadowSoft 1`, `shadowTextureSize 2048`,
+`shadowNumCascades 3`, `shadowBlendCascades 1`, `groundEffectDensity 48`,
+`groundEffectDist 200`, `reflectionMode 2` (SSR), `pbrLiquidDetail 1`,
+`waterDetail 2`, `refraction 2`, `farclip 7000`, `horizonStart 1900`.
+`gx.log`: `rt:None` - the GPU's ray tracing is not used (it is a VM), so
+nothing below needs hardware ray tracing.
+
+## 2. Light data: re-authored, more keyframes, new intensities
+
+`Light` row 1 (the map default of Eastern Kingdoms, used across Northshire
+and most of Elwynn) points at `LightParams` 12 in Classic Era and 7748 in
+Enhanced. Era has keys at 0, 3, 6, 12, 18, 21, 22 h; Enhanced at 0, 4.5, 5.5,
+7, 8, 12, 15, 17, 18, 19.5, 20.67, 21.5 h - a slow dawn and a long golden
+evening. At noon:
+
+| | Era (1.12) | Enhanced |
+|---|---|---|
+| DirectColor | `#ff8800` | `#eabd8a` |
+| AmbientColor | `#68829a` | `#68829a` |
+| SkyFogColor | `#4d788f` | `#659ebb` |
+| SkyMiddleColor | `#3aa2cf` | `#45c4ff` |
+| FogEnd / FogScaler | 18000 / 0.25 | 18000 / 0.25 |
+| ColorGradingFileDataID | 0 | 8286666 |
+| new F052 | - | 1.35 (night 1.0, dawn/dusk 1.5) |
+
+Over every light matched by ID and position on maps 0 and 1, sampled 8-17 h
+(`palette.py`): Enhanced's direct light keeps its brightness but loses ~19% of
+its saturation (chroma ratio 0.81: a whiter sun), ambient is ~15% brighter,
+the sky's fog colour ~30% brighter and more saturated, the sky's middle band
+~19% brighter. The lights were re-authored one by one - a single matrix does
+not fit them (error 0.1 per channel) - so these are trends, not a formula.
+
+**Ported** as the "Daylight (the reference client)" row (`enhancedDaylight`,
+`include/rendering/enhanced_palette.hpp`, applied in `LightingManager::update`
+after the band blend): each colour's luminance and chroma scaled by the
+measured trend (direct x1.03 / x0.81, ambient x1.15 / x1.08, sky top x1.09 /
+x1.12, sky middle x1.19 / x1.28, fog and sky fog x1.30 / x1.35, sun sprite
+x1.11 / x0.72), weighted by dnc.db's day intensity, on maps 0 and 1, not
+under water. 3.3.5's old-world lights are 1.12's, so the trend applies to
+what Wowee reads.
+
+Enhanced-only columns (names unknown; no public definitions exist):
+
+- LightData `Field_1_60_1_69876_045..059`. 048 (1 or 1.5), 049 (0.3-4, mostly
+  1 or 1.5), 051 (0.1-8; Light 1: 1 by day, 2 at dawn, 3 at night), 052 (0.1-5;
+  Light 1: 1 at night, 1.35-1.5 by day), 058 (0.1-5), 059 (0.2-3, mostly
+  0.45). 052's shape is that of a sun intensity in a linear-light pipeline
+  (the exe's `linear` CVar: "0 - disabled (live), 1 - linear", and
+  "BGRA8Unorm is not supported with linear lighting enabled. Using RGBA16F").
+  055 is a colour (`#1b2745` at midnight, `#e8f4f7` at noon) on 527 rows,
+  probably a sky-light or GI colour. 045-047 are colours on 428 rows. Their
+  meaning is not established; nothing here depends on it.
+- LightParams `Field_1_60_1_69876_032..038` and retail 12.0's `_016..031`.
+  `_031` is 0.001 on 370 rows; `_037` 0.7/0.8; `_036` 1/8/16/32.
+  `SsaoSettingsID` is 116 on 260 of 882 rows (section 4).
+
+## 3. Colour grading
+
+`ffxcolorgrading.bls` (FDID 2990792) samples the finished picture, clamps it
+to 0..1, and reads a 32x32x32 LUT laid out as a 1024x32 strip: blue picks the
+slice (`b*31`, two slices lerped by `frac`), red and green the texel
+(`r*0.0302734 + 0.000488 + slice/32`, `g*0.96875 + 0.015625`). So the grade
+is on the display-encoded LDR image, after the glow and tone curve.
+
+Which LUT is used is LightData's `ColorGradingFileDataID` per keyframe. On
+the two continents 181 of Enhanced's 870 LightParams set it, all on the 12:00
+key only; the 8:00 and 15:00 keys either side carry 0. Eastern Kingdoms'
+outdoor lights use 8286666 (70 of 83 lights), Kalimdor's 8286665 (103 of
+132); 8286667 and 8248426 appear in a few instances. 1140733 is the identity
+LUT (mean error 0.002).
+
+Every Enhanced LUT is *separable*: `lut(r,g,b) = (c(r), c(g), c(b))` with zero
+error, so each is one 32-point curve. 8286666:
+
+```
+0.000 0.031 0.063 0.094 0.129 0.165 0.200 0.235 0.267 0.306 0.341 0.376
+0.412 0.451 0.490 0.529 0.565 0.604 0.647 0.686 0.725 0.765 0.804 0.851
+0.890 0.929 0.957 0.980 0.988 0.996 0.996 1.000
+```
+
+Shadows untouched, mid-tones x1.10 (0.52 -> 0.56, 0.65 -> 0.73, 0.77 ->
+0.89), the top fifth on a shoulder. Applied per channel it also raises
+saturation (median chroma x1.13) with no hue shift. This is a large part of
+the "polished" daytime look: brighter, punchier mid-tones without a tint.
+
+**Ported** as the "Colour grade (the reference client)" row (`colorGrade`,
+`include/rendering/enhanced_grade.hpp`, the end of `fxaa.frag`): both curves
+exactly, map 0 -> 8286666, map 1 -> 8286665, other maps none; weight by the
+hour as the keyframes interpolate (0 at 8:00, 1 at 12:00, 0 at 15:00), times
+(1 - indoor factor), off under water. Two push constants in a pass that
+already runs; cost below the profiler's noise.
+
+## 4. Ambient occlusion: ASSAO, tuned hard
+
+The exe registers Intel's ASSAO (`Engine/Source/ShaderEffect/ASSAO.cpp`,
+`assao*` CVars with Intel's own descriptions) and ships its shaders
+(`assao_generateq0..q3`, `assao_smartblur`, `assao_apply`). Enhanced's
+`LightParams.SsaoSettingsID` is 116 on 260 rows, including Light 1 of both
+continents. `SSAOSettings` 116:
+
+| Column | Value | ASSAO meaning (Intel defaults) |
+|---|---|---|
+| Field_8_2_0_30080_001 | 0.1 | HorizonAngleThreshold (0.06) |
+| Field_..._002 | 1 | - |
+| Field_..._003 | 2 | blur passes (2) |
+| Radius | 1 | 1 yard (1.2) |
+| ShadowMult | 3 | strength x4.3 (1) |
+| ShadowPower | 3 | (1.5) |
+| ShadowClamp | 1 | (0.98) |
+
+Row 106 (5 rows) is Radius 4, Mult 1.15, Power 1.6. So Enhanced's AO is
+tight (a yard) and very contrasty: three times ASSAO's default strength and
+twice its power. It is what seats grass, roots, crates and walls into the
+ground.
+
+**Ported** as the "Ambient occlusion" row (`ambientOcclusion`,
+`assets/shaders/ambient_occlusion.frag.glsl`, run by `ContactShadowPass`
+with its own shader): ASSAO's obscurance term `max(0, N.D - 0.1) *
+max(0, 1 - |D|^2/r^2)`, r = 1 yd, clamp 1, power 3, on a fixed 24-point
+spiral shared by each 2x2 quad (6 depth taps a pixel), positions rebuilt in
+view space, faded out 60-120 yd. It takes only the ambient share of each
+pixel's light (the sun's share times N.L times the shadow map keeps its
+value), blended dst * src, before the contact shadows. Needs a one-sample
+depth (no MSAA, as the contact shadows).
+
+Two departures, both from side-by-side shots in Goldshire: the multiplier
+is ASSAO's default 1 (x4.3) instead of Enhanced's 3, and the ambient keeps at
+least 0.6 of itself. At Enhanced's 3 the road, every shaded bush and the
+characters' legs went near black: Enhanced adds its probe GI (section 6) over
+the occluded ambient and Wowee has nothing to add back. Three lessons from
+getting it to work, kept in the shader: the projection's [1][1] is negative
+(Vulkan's flip), so the disk radius needs its absolute value; world
+positions near 10^4 yd lose the precision the facing needs, so it works in
+view space; and a per-pixel noise rotation with no blur pass after it (ASSAO
+runs two) shows as diagonal bands.
+
+## 5. Volumetric fog and the two fog layers
+
+Two systems:
+
+1. **Classic distance fog**, now retail's `PSFog` (14 float4 per fog, 12 of
+   them in `SceneData`) with main fog + height fog. Enhanced's outdoor data
+   uses almost none of the extras: `FogDensity` set on 218 of 6008 keys,
+   `FogHeight` on 84, `MainFogStartDist` never. Its outdoor fog ends at
+   `FogEnd` 18000 with `FogScaler` 0.25 by day: past the 7000-yard far clip.
+   So within what is drawn, the distance fog is a thin haze, and the far
+   terrain (horizon to 7000 yd) is never swallowed by a fog wall.
+2. **Froxel volumetric fog** (`volumefog*.bls`, `gxMTVolFog`, "Compute
+   Effects"). `volumefogglobalfog.bls` (FDID 6674334) injects a list of
+   *global fog layers* (`GlobalFogParams[36]`, count in the cbuffer) into the
+   froxel volume. Read from its DXIL:
+   - Slices are cubic in depth: `z = far * ((slice + 0.5 + jitter) / N)^3`
+     (`log2 * 3`, `exp2`), jittered per frame by a blue-noise texture plus
+     the golden ratio 0.618034.
+   - Per layer and froxel: coverage `saturate((z - start) / thickness)`;
+     optical depth `coverage * thickness * density * (1 + k1 * t^k0)` with
+     `t = saturate((z - start) / far)` (a distance curve); optional upper
+     and lower height fades `saturate(exp(+-k * (worldZ - h)))` (flags 64
+     and 128; the editor calls them Upper/Lower Height and Height Density).
+   - In-scattering `(emissive + scatterColour * phase(cos) * intensity) *
+     opticalDepth`, where `phase` is a 2D LUT indexed by
+     `1 - (0.5 - 0.5 cos)^(1/3)` and a per-layer row (the anisotropy).
+   The WMO editor strings (`WWFFogVolumeLayerData`) name the same fields for
+   local fog volumes: Start Distance, Emissive Color, Thickness, Upper/Lower
+   Height and Height Density, Camera Relative, two scrolling 3D noise layers
+   ("Use Noise", "Noise Scale 01/02", "Noise Direction 01/02").
+
+   The "two stacked layers" of the public talk are most likely this layer
+   list; how many layers the outdoor zones use, and their values, come from
+   data this work did not decode.
+
+Wowee already has a froxel volumetric fog (`lightShafts`, `mistDensity`,
+`volumetric_fog_inject.comp`) with shadowed in-scattering, a height falloff
+and HG phase; the Enhanced preset doubles its mist (section 8). Wowee's base
+extinction works out at 0.0013/yd in Elwynn by day, the same order as the
+0.001 that 370 of Enhanced's LightParams carry in `Field_12_0_1_65617_031`
+(a likely volumetric density; unconfirmed). Not ported:
+the cubic slice spacing and the layer list, because the per-layer constants
+are in data not decoded here.
+
+## 6. Global illumination ("Secondary Lighting")
+
+Enhanced-era shaders with no names in the community listfile
+(`unknown_8xxxxxx_generatemip-guide`, `unknown_8316767/8316772_gen-gla`, i.e.
+names sorting between "generatemips" and "guidedfilter" - `gi...`) carry the
+types `ProbeMetaData { float4; int; float; float; int }`, `GIRayRecord
+{ float3; float; float3; float }`, `CompactBVHNode { int[8] }`, `BLASData`
+and `GILightProbeDebug`, and the exe has
+`WorldClient2/WorldGlobalIllumination.cpp` and a "Show GI" debug toggle.
+From their dispatch shapes:
+
+- 8390637, 8300023 (16x1x1): rays traced in compute against a software BVH
+  (`StructuredBuffer<CompactBVHNode>` + `BLASData`), writing hit records -
+  no hardware ray tracing (`gx.log` says `rt:None`).
+- 8283581, 7970368 (5x5x1): per-probe accumulation of `GIRayRecord`s into a
+  probe atlas (5x5 texels per probe) and probe metadata updates.
+- 8159093 (4x4x4, 12809 lines): resamples the probes into a camera-aligned
+  `RWTexture3D`.
+- The material shaders (`material3_mesh_ps`, `material3_wmo_ps`) sample a 3D
+  texture with *logarithmic* depth slices
+  (`ln(max(z, near)/near) / ln(far/near)`) at the pixel's screen position,
+  adjust its saturation by a constant, and **add** it to the lit result.
+
+So "Secondary Lighting" is world-space irradiance probes, updated by
+software ray tracing, resampled into a froxel volume each frame and added
+as indirect diffuse. Wowee's "Ray traced lighting" row (bounce mode) is the
+nearest thing it has; it is too expensive for Jered's laptop and is not in
+the Enhanced preset. Not ported.
+
+## 7. Ground clutter
+
+`GroundEffectTexture` is the 1.12 table: 1060 of the 1065 changed rows went
+from density 0 to 8 with no doodads (a default, no effect). Doodads gained
+`Size_variation 0.67..1.33` and `Rotation_variation 0..360` on every row
+(Wowee scatters at 0.80..1.15 and a random yaw) and a `TerrainColorGradingRampID`
+that is 0 everywhere. So Enhanced's denser look is its settings
+(`groundEffectDensity 48` on retail's scale, `groundEffectDist 200`) and its
+models, not new placement data. The Enhanced preset uses the clutter maximum.
+
+## 8. What the Enhanced preset sets
+
+The "Enhanced" quality preset (`kGraphicsPresets[kEnhancedPresetIndex]`,
+`enhancedEnhancements()`): Ultra's rows plus ambient occlusion, the colour
+grade, Enhanced's daylight, the Medium light volume at twice the mist
+(High's volume cost 2.5 ms more GPU at 1280x540 for little visible
+difference side by side), soft particles (Enhanced's "Depth Based
+Opacity"), HD water and sky reflections (its PBR water and SSR); 2400-yard
+view distance, 500-yard shadows, ground clutter 150%, and FXAA instead of
+MSAA (Enhanced's anti-aliasing is CMAA2, a post filter, and the occlusion
+pass needs a one-sample depth).
+
+## 9. Measured cost and the remaining gap
+
+Lab server, Goldshire at 13:00-15:30, 1280x540 window on Jered's laptop,
+`WOWEE_FRAME_PROFILE=1` windows of 8-20 s (`PROFILE_AB` lines):
+
+| | GPU ms/frame | notes |
+|---|---|---|
+| Ultra (MSAA, its highest step) | 13.5-15.8 | scene pass 11.9-14.8 |
+| Enhanced preset | 10.0 | scene pass 7.3 (no MSAA) |
+| ambient occlusion pass | 0.17-0.43 | scales with pixels: ~0.7-1.7 at 2560x1080 |
+| FXAA + glow + grade pass | 0.81 (Ultra 0.55, no FXAA) | the grade itself is below noise |
+| volumetric fog inject, Medium | 0.3-0.5 | High was 3.0 (why the preset stays at Medium) |
+| HD water + reflections | 1.6 + 0.3 | where water is on screen |
+
+Screenshots (session scratchpad, `enhanced/lab/shots/`): `attr_1ultra.png`,
+`attr_2enhanced.png`, `attr_3noao.png`, `attr_5nograde.png` (one view, a piece
+off at a time), `aodbg_v2.png` (the occlusion alone), `final_sheet.png`;
+Enhanced itself: `enhanced/shots/enhanced_01.png` (Northshire 14:15),
+`enhanced_02.png` (Goldshire 15:23).
+
+What still separates the two pictures, largest first:
+
+1. Indirect light. Enhanced's probe GI fills shade with bounced green and
+   gold; Wowee's shade is Light.dbc's flat ambient. This is most of why
+   Enhanced reads "lit" and Wowee "painted".
+2. Light toward the sun. Enhanced's layered froxel fog with a phase LUT and
+   linear HDR sun (F052 up to 1.5) gives a strong golden glow and god rays
+   looking west in the afternoon; Wowee's mist at twice the density is
+   thinner and is clamped to LDR.
+3. Ground cover. Enhanced's clutter (same placement data, its own models,
+   groundEffectDist 200) is denser and taller than Wowee's at 150%.
+4. Per-zone light keyframes: only the average trend is ported.
+5. Draw distance: Enhanced draws terrain to 7000 yd with fog ending at 18000;
+   Wowee stops at 2400 and its fog ends at the far clip.
+
+## 10. Not done, and why
+
+- Enhanced's per-zone light keyframes (section 2): hand-authored, so only
+  their average trend is ported; shipping Enhanced's tables would be
+  shipping its data.
+- Linear lighting with HDR intensities (F052) and a tone curve: Wowee's
+  scene target is 8-bit UNORM and its lit shaders clamp ambient + diffuse at
+  1 as stock does; going linear is a pipeline change, not a toggle.
+- Probe GI (section 6), the layered global fog constants (section 5).
