@@ -515,14 +515,12 @@ static int lua_UnitThreatSituation(lua_State* L) {
         lua_pushnumber(L, standing.status);
         return 1;
     }
-    // Approximate threat: check if the mob is targeting this unit
-    auto mobEntity = gh->getEntityManager().getEntity(mobGuid);
-    if (mobEntity && game::unitTargetGuid(*mobEntity) == playerUnitGuid) {
-        lua_pushnumber(L, 3); // securely tanking
-        return 1;
-    }
-    lua_pushnumber(L, 0);
-    return 1;
+    // Not on that unit's threat list: nil, as the stock function answers
+    // (0x613a60). This used to guess 3, "securely tanking", whenever the unit
+    // merely targeted this one - so targeting yourself, or a party member or
+    // bot looking at you, lit TargetFrameFlash and the party frames' flash
+    // red in a city with no fight anywhere.
+    return 0;   // nil
 }
 
 // UnitDetailedThreatSituation(unit, mobUnit) → isTanking, status, threatPct, rawThreatPct, threatValue
