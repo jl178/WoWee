@@ -2,6 +2,7 @@
 #include "rendering/sun_direction.hpp"
 #include "rendering/enhanced_grade.hpp"
 #include "rendering/enhanced_tonemap.hpp"
+#include "rendering/leaf_light.hpp"
 
 #include <cstddef>
 #include <cstring>
@@ -771,6 +772,11 @@ void Renderer::updatePerFrameUBO() {
     currentFrameData.localLightMeta = glm::ivec4(static_cast<int32_t>(localLightCount),
                                                  std::bit_cast<int32_t>(fogExponent),
                                                  static_cast<int32_t>(shaderBits(enh_) | hdrLightBit), 0);
+    // w: the sun sprite's direction and the day weight, for the light through
+    // leaves and grass (leaf_light.hpp); the light direction is not the sun.
+    if (lightingManager)
+        currentFrameData.localLightMeta.w = std::bit_cast<int32_t>(
+            leaf_light::packSun(lightingManager->getLightingParams().sunDir));
     buildLocalLightTiles(localLightCount);
 
     if (rtLighting_) {

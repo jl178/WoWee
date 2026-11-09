@@ -397,8 +397,14 @@ void main() {
             spec = pow(max(dot(norm, halfDir), 0.0), 32.0) * specularIntensity;
         }
 
+        // Sunlight through the leaf (enh_bits::kLeafLight, 64). A card
+        // turned away from the light is read from the side the light comes
+        // from: offset along its own normal the sample sits behind the leaf,
+        // in the leaf's own shadow. Its diffuse is zero there, so only the
+        // light through it sees the difference.
+        bool leafLight = isFoliage && !wmoInterior && (localLightMeta.z & 64) != 0;
         if (shadowParams.x > 0.5 && !wmoInterior) {
-            shadow = sunShadow(FragPos, norm, ldir);
+            shadow = sunShadow(FragPos, (leafLight && nDotL < 0.0) ? -norm : norm, ldir);
             shadow = mix(1.0, shadow, shadowParams.y);
         }
 
@@ -432,6 +438,36 @@ void main() {
         if ((localLightMeta.z & 32) == 0) light = min(light, vec3(1.0));
         result = light * albedo + shadow * spec * sunColor;
         // No leaf glow (sss unused): stock foliage is lit like any other M2.
+
+        // Sun through the leaves (the leafLight row; not stock). WoW
+        // Enhanced's mesh shader (material3_mesh_ps) has a light from behind:
+        // albedo * colour * sat(-N.L) * (1 - alpha^2), added to the lit
+        // colour (docs/re/enhanced-lighting.md 9c). Here it is the sun's,
+        // through the face turned to the eye; a thin leaf passes some light
+        // whichever way its card's normal was authored, so a quarter of it
+        // whatever the angle. Weighted by a forward lobe toward the sun
+        // sprite (the light direction is not the sun, leaf_light.hpp), so
+        // it shows looking into the sun and is gone a right angle off it; by
+        // the shadow already read from the sun's side, so a leaf in another's
+        // shade stays dark; and by the day weight, so nothing at night.
+        // Tinted by the leaf's own colour twice over - light that has crossed
+        // a leaf is the colour of the leaf, more saturated than its face.
+        if (leafLight) {
+            vec4 sun = unpackSnorm4x8(uint(localLightMeta.w));
+            float toward = max(dot(-viewDir, sun.xyz), 0.0);
+            float lobe = toward * toward;
+            lobe *= lobe;                       // ^4: half at 33 degrees
+            lobe = 0.35 * lobe + 0.65 * lobe * lobe;  // half at 26 degrees, a hot core
+            vec3 nEye = dot(norm, viewDir) < 0.0 ? -norm : norm;
+            float back = 0.25 + 0.75 * clamp(-dot(nEye, ldir), 0.0, 1.0);
+            float through = lobe * back * shadow * max(sun.w, 0.0) * texColor.a;
+            vec3 leafTint = albedo * (0.4 + 0.6 * albedo);
+            vec3 transmit = leafTint * sunColor * (1.3 * through);
+            // Never past a bright leaf: the tone map's knee is 0.8 and the
+            // bloom takes what is over it, so the sum stops at 1.0 a channel
+            // (or where the leaf already was, if brighter).
+            result = min(result + transmit, max(result, vec3(1.0)));
+        }
 
         if (interiorDarken > 0.0) {
             result *= mix(1.0, 0.5, interiorDarken);

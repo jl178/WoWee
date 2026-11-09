@@ -765,6 +765,16 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "pipeline remade in RGBA16F (the anti-aliasing rebuild); ~2x the scene "
                  "colour memory and bandwidth",
      .asBool = &Enhancements::hdrScene},
+    {.key = "leaflight", .label = "Sun through leaves (the reference client)", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
+     .tooltip = "Looking toward the sun, the leaves of trees and bushes in front\n"
+                "of it glow warm in their own colour with the light coming\n"
+                "through them, as in the reference client. Leaves in another's shade stay\n"
+                "dark. Only by day.",
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "leaf_light",
+     .controls = "a branch in m2.frag for the foliage cutout batches (enh_bits::kLeafLight); "
+                 "no extra texture or shadow reads",
+     .asBool = &Enhancements::leafLight},
     {.key = "enhancedwater", .label = "Water (the reference client)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "Lakes, rivers, the sea and the canals as the reference client draws\n"

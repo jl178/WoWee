@@ -7,6 +7,7 @@
 #include "rendering/enhanced_lights.hpp"
 #include "rendering/enhanced_palette.hpp"
 #include "rendering/enhanced_tonemap.hpp"
+#include "rendering/leaf_light.hpp"
 #include "ui/graphics_presets.hpp"
 
 #include <cstring>
@@ -276,4 +277,44 @@ TEST_CASE("Enhanced water: water_hd.frag carries LiquidType 1.60.1's columns", "
     CHECK(src.find("vec3(0x1b, 0xb2, 0xe6)") != std::string::npos);
     // Enhanced's mode is hdParams.x 2; HD water alone stays 1.
     CHECK(src.find("bool fw = hdParams.x > 1.5;") != std::string::npos);
+}
+
+TEST_CASE("Sun through leaves: its row, the Enhanced preset, the shader bit", "[enhanced]") {
+    using namespace wowee::ui;
+    const EnhancementRow* row = findEnhancementRow("leaflight");
+    REQUIRE(row != nullptr);
+    CHECK(std::string(row->category) == kEnhPageEnhanced);
+    CHECK(row->stockValue == 0.0f);
+    CHECK(Enhancements{}.leafLight == false);
+    CHECK(kGraphicsPresets[kEnhancedPresetIndex].enh.leafLight);
+    for (int i = 0; i < kClassicPresetIndex; ++i) CHECK_FALSE(kGraphicsPresets[i].enh.leafLight);
+    // Off adds no bit, so m2.frag draws foliage exactly as before.
+    CHECK((shaderBits(Enhancements{}) & enh_bits::kLeafLight) == 0u);
+    Enhancements e;
+    e.leafLight = true;
+    CHECK((shaderBits(e) & enh_bits::kLeafLight) == 64u);
+
+    std::ifstream f(std::string(WOWEE_SOURCE_DIR) + "/assets/shaders/m2.frag.glsl");
+    REQUIRE(f.good());
+    std::stringstream ss;
+    ss << f.rdbuf();
+    CHECK(ss.str().find("(localLightMeta.z & 64) != 0") != std::string::npos);
+}
+
+TEST_CASE("Sun through leaves: the sun's direction and the day weight", "[enhanced]") {
+    namespace ll = leaf_light;
+    CHECK(ll::dayWeight(-0.3f) == 0.0f);
+    CHECK(ll::dayWeight(0.0f) == 0.0f);
+    CHECK(ll::dayWeight(0.15f) == 1.0f);
+    CHECK(ll::dayWeight(0.9f) == 1.0f);
+    CHECK(ll::dayWeight(0.075f) == Catch::Approx(0.5f));
+    // Packed as the shaders' unpackSnorm4x8 reads it: xyz toward the sun, w
+    // the day weight; a low morning sun 6 degrees up in the east.
+    const glm::vec4 back = glm::unpackSnorm4x8(ll::packSun(glm::vec3(0.0f, 9.5f, 1.0f)));
+    const glm::vec3 d = glm::normalize(glm::vec3(0.0f, 9.5f, 1.0f));
+    CHECK(back.y == Catch::Approx(d.y).margin(0.01f));
+    CHECK(back.z == Catch::Approx(d.z).margin(0.01f));
+    CHECK(back.w == Catch::Approx(ll::dayWeight(d.z)).margin(0.01f));
+    // The sun down: no weight, whatever the light direction says.
+    CHECK(glm::unpackSnorm4x8(ll::packSun(glm::vec3(0.2f, 0.1f, -0.5f))).w == 0.0f);
 }

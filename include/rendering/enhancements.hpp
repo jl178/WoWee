@@ -139,6 +139,13 @@ struct Enhancements {
     /// Needs the post-process pass and no upscaler. Off is the stock 8-bit
     /// scene.
     bool  hdrScene = false;
+    /// Sunlight through the leaves: a tree's leaf cards glow in their own
+    /// colour where the sun stands behind them, strongest looking into it,
+    /// where the sun's shadow map says light reaches the leaf, and only by
+    /// day (m2.frag; the reference client's material3_mesh_ps back light,
+    /// docs/re/enhanced-lighting.md section 9c). Off is stock: a leaf's back
+    /// is lit by the ambient alone.
+    bool  leafLight = false;
 
     // ---- Water and weather -------------------------------------------------
     bool  shorelineFoam = false;
@@ -331,6 +338,7 @@ inline constexpr uint32_t kLocalLights    = 1u << 2;  ///< point lights on terra
 inline constexpr uint32_t kSoftShadows    = 1u << 3;  ///< 9-tap disk instead of the stock 5-tap PCF
 inline constexpr uint32_t kSmoothLeaves   = 1u << 4;  ///< alpha-to-coverage ramp instead of the 224/255 key
 inline constexpr uint32_t kHdrLight      = 1u << 5;  ///< HDR scene: lit shaders' clamp at 1 lifted (set by the renderer)
+inline constexpr uint32_t kLeafLight     = 1u << 6;  ///< m2.frag sunlight through foliage cards
 }  // namespace enh_bits
 
 inline uint32_t shaderBits(const Enhancements& e) {
@@ -340,6 +348,7 @@ inline uint32_t shaderBits(const Enhancements& e) {
     if (e.localLights) b |= enh_bits::kLocalLights;
     if (e.shadowFilter != 0) b |= enh_bits::kSoftShadows;
     if (e.smoothLeaves) b |= enh_bits::kSmoothLeaves;
+    if (e.leafLight) b |= enh_bits::kLeafLight;
     return b;
 }
 
