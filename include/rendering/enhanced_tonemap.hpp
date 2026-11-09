@@ -58,10 +58,11 @@ inline constexpr float kSunLight = 1.25f;
 /// The share of the light above 1 the bloom adds back (times the Bloom row).
 inline constexpr float kHdrBloom = 0.75f;
 
-/// The Enhanced haze's light is capped at 1.3 in the 8-bit scene, where more
-/// only blew the sky out; under the tone curve it may reach this
-/// (enhanced_haze.frag, flag 8).
-inline constexpr float kHazeCap = 3.0f;
+/// The Enhanced haze's light is held, by its brightest channel so it keeps
+/// its gold, at 0.88 in the 8-bit scene, where more only blew the sky out;
+/// under the tone curve it may reach this (enhanced_haze.frag kMaxLightHdr,
+/// flag 8). 3 per channel took the sky round a high sun to white.
+inline constexpr float kHazeCap = 1.5f;
 
 /// The values in use: the constants above, or for tuning side by side
 /// WOWEE_HDR_TUNE="knee,bloom,sunGain,sunLight" (read once; any left

@@ -60,13 +60,52 @@ TEST_CASE("Enhanced daylight: the measured trend, and nothing at weight 0", "[en
     const glm::vec3 white = fp::apply(sun, fp::kDirect, 1.0f);
     CHECK(glm::dot(white, lum) == Catch::Approx(glm::dot(sun, lum) * 1.03f).margin(1e-3));
     CHECK(white.x - white.z < sun.x - sun.z);
-    // A grey only changes brightness.
+    // A grey only changes brightness - and for the sky's fog band, whose
+    // x1.30 is Enhanced's sky exposure (kSkyExposure), not even that.
     const glm::vec3 g = fp::apply(glm::vec3(0.4f), fp::kSkyFog, 1.0f);
-    CHECK(g.x == Catch::Approx(0.52f));
-    CHECK(g.z == Catch::Approx(0.52f));
+    CHECK(g.x == Catch::Approx(0.4f));
+    CHECK(g.z == Catch::Approx(0.4f));
+    const glm::vec3 m = fp::apply(glm::vec3(0.4f), fp::kSkyMiddle, 1.0f);
+    CHECK(m.x == Catch::Approx(0.4f * 1.19f / 1.3f));
     CHECK(fp::appliesToMap(0));
     CHECK(fp::appliesToMap(1));
     CHECK_FALSE(fp::appliesToMap(530));
+}
+
+TEST_CASE("Enhanced daylight: the sun and sky added as light, never past white", "[enhanced]") {
+    namespace fp = enhanced_palette;
+    // Elwynn's noon (Light 1): Enhanced's sun #eabd8a over the ambient #68829a.
+    const glm::vec3 amb(0x68 / 255.0f, 0x82 / 255.0f, 0x9a / 255.0f);
+    const glm::vec3 sun(0xea / 255.0f, 0xbd / 255.0f, 0x8a / 255.0f);
+    const glm::vec3 d = fp::linearLightDirect(amb, sun, 1.0f);
+    const glm::vec3 lit = amb + d;
+    // Summed raw the lit face clips to white in every channel...
+    CHECK(glm::all(glm::greaterThan(amb + sun, glm::vec3(1.0f))));
+    // ...added as light it stays under it, warm (red over green over blue).
+    CHECK(lit.x == Catch::Approx(0.98f).margin(0.01f));
+    CHECK(lit.y == Catch::Approx(0.87f).margin(0.01f));
+    CHECK(lit.z == Catch::Approx(0.79f).margin(0.01f));
+    CHECK(lit.x > lit.y);
+    CHECK(lit.y > lit.z);
+    // No sun, no light added; weight 0 leaves the colour alone.
+    CHECK(glm::length(fp::linearLightDirect(amb, glm::vec3(0.0f), 1.0f)) == Catch::Approx(0.0f).margin(1e-5));
+    const glm::vec3 same = fp::linearLightDirect(amb, sun, 0.0f);
+    CHECK(same.x == Catch::Approx(sun.x));
+    CHECK(same.z == Catch::Approx(sun.z));
+    // Never negative, never past one in sum.
+    const glm::vec3 big = fp::linearLightDirect(glm::vec3(0.9f), glm::vec3(1.0f), 1.0f);
+    CHECK(glm::all(glm::lessThanEqual(glm::vec3(0.9f) + big, glm::vec3(1.0f + 1e-5f))));
+    CHECK(glm::all(glm::greaterThanEqual(big, glm::vec3(0.0f))));
+}
+
+TEST_CASE("Enhanced lights: the sky's exposure is taken out, the sun's light is not", "[enhanced]") {
+    namespace fl = enhanced_lights;
+    // Westfall's noon SkyMiddle: 3.3.5's #3c919e is Enhanced's #4ebdcd / 1.3.
+    CHECK(fl::withoutSkyExposure(0x4ebdcdu) == 0x3c919eu);
+    CHECK(fl::withoutSkyExposure(0xffffffu) == 0xc4c4c4u);
+    CHECK(fl::withoutSkyExposure(0u) == 0u);
+    for (uint32_t c : {2u, 3u, 4u, 5u, 6u, 7u, 10u, 11u}) CHECK(fl::isSkyChannel(c));
+    for (uint32_t c : {0u, 1u, 8u, 9u, 12u, 13u, 14u, 17u}) CHECK_FALSE(fl::isSkyChannel(c));
 }
 
 #ifdef WOWEE_SOURCE_DIR

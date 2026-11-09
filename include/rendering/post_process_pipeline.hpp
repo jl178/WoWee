@@ -198,6 +198,13 @@ public:
     /// Bloom over the highlights (the Enhanced preset's), 0 off. Rides on the
     /// glow's quarter-size scene, so it shows only where the glow can run.
     void setBloom(float amount) { bloom_ = glm::clamp(amount, 0.0f, 2.0f); }
+    /// The Enhanced daylight's exposure and highlight desaturation in the HDR
+    /// scene's tone map (enhanced_palette::kHdrExposure, kHdrSaturation);
+    /// 0, 0 is off (and they do nothing without the HDR scene).
+    void setEnhancedTone(float exposure, float saturation) {
+        enhancedExposure_ = glm::max(exposure, 0.0f);
+        enhancedSat_ = glm::clamp(saturation, 0.0f, 2.0f);
+    }
     [[nodiscard]] bool isGlowEnabled() const { return glowEnabled_; }
 
 private:
@@ -225,6 +232,8 @@ private:
     float gradeWeight_ = 0.0f;
     bool gradeKalimdor_ = false;
     float bloom_ = 0.0f;
+    float enhancedExposure_ = 0.0f;
+    float enhancedSat_ = 0.0f;
     float glowAmount_ = 0.0f;
     float glowBlend_ = 0.0f;
     float nether_ = 0.0f;

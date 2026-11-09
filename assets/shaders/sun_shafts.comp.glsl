@@ -17,7 +17,7 @@ layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D uRays;
 
 layout(push_constant) uniform Push {
     vec4 sun;   // xy = the sun's place on screen, z = width / height, w = strength
-    vec4 tint;  // rgb = the sun's colour
+    vec4 tint;  // rgb = the sun's colour, w = the most the rays add (0 = no limit)
 } push;
 
 const int kSamples = 48;
@@ -68,5 +68,9 @@ void main() {
     // As a share of a walk that was bright all the way: 1 is the sky's own
     // colour, before the strength scales it.
     vec3 rays = gathered * (push.sun.w / total) * push.tint.rgb;
+    // The Enhanced haze's limit (SunShafts::FrameInputs::cap): eased onto it
+    // rather than cut, so a streak keeps its shape and only its peak by the
+    // sun - over sky the haze has already lit - is held down.
+    if (push.tint.w > 0.0) rays = push.tint.w * (1.0 - exp(-rays / push.tint.w));
     imageStore(uRays, pixel, vec4(rays, 1.0));
 }

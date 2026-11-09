@@ -255,14 +255,17 @@ void LightingManager::loadEnhancedProfiles(pipeline::AssetManager* assetManager)
     for (const fl::Link& link : table.links) {
         auto vit = lightsById_.find(link.lightId);
         if (vit == lightsById_.end() || link.slot >= LightVolume::SLOT_COUNT) continue;
-        // Over the slot's own profile: its skybox, glow, water alphas and
-        // every band Enhanced does not author stay 3.3.5's.
+        // Over the slot's own profile: its skybox, water alphas and every
+        // band Enhanced does not author stay 3.3.5's.
         LightParamsProfile profile;
         const uint32_t stockId =
             paramsIdForSlot(vit->second, static_cast<LightVolume::ParamsSlot>(link.slot));
         if (auto pit = lightParamsProfiles_.find(stockId); pit != lightParamsProfiles_.end()) {
             profile = pit->second;
         }
+        // Less of the stock full-screen glow: Enhanced's own is 0 on almost
+        // every profile (enhanced_palette::kGlowScale).
+        profile.glow *= enhanced_palette::glowScale();
         const fl::Profile& src = table.profiles[link.profile];
         const fl::Key* keys = &table.keys[src.firstKey];
         const uint8_t n = static_cast<uint8_t>(std::min(src.keyCount, fl::kMaxKeys));
@@ -271,9 +274,14 @@ void LightingManager::loadEnhancedProfiles(pipeline::AssetManager* assetManager)
             ColorBand& band = profile.colorBands[c];
             band.numKeyframes = n;
             for (uint8_t k = 0; k < n; ++k) {
+                // The sky's colours without Enhanced's exposure
+                // (fl::kSkyExposure): 3.3.5's 8-bit sky has no tone map to
+                // take it back.
+                const uint32_t col = fl::isSkyChannel(c) ? fl::withoutSkyExposure(keys[k].color[c])
+                                                         : keys[k].color[c];
                 band.times[k] = static_cast<uint16_t>(keys[k].time);
-                band.packed[k] = keys[k].color[c];
-                band.colors[k] = dbcColorToVec3(keys[k].color[c]);
+                band.packed[k] = col;
+                band.colors[k] = dbcColorToVec3(col);
             }
         }
         for (uint32_t f = 0; f < fl::kFloatChannels; ++f) {
@@ -664,6 +672,19 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         newParams.fogExponent = 1.0f;
         newParams.skyFogColor = newParams.fogColor;
         enhancedTrend(newParams);
+    }
+
+    // Enhanced's colours are authored for a linear pipeline: the sun is the
+    // one that, added to the ambient as light, gives what Enhanced's lit face
+    // shows, instead of clipping to white on the 8-bit sum
+    // (enhanced_palette::linearLightDirect, docs/re/enhanced-lighting.md 2c).
+    if (enhancedActive_) {
+        newParams.diffuseColor =
+            enhanced_palette::linearLightDirect(newParams.ambientColor, newParams.diffuseColor, 1.0f,
+                                               hdrScene_ ? glm::mix(1.0f, enhanced_palette::hdrSunIntensity(),
+                                                                    glm::clamp(dayIntensity, 0.0f, 1.0f))
+                                                         : 1.0f,
+                                               hdrScene_);
     }
 
     // Light.dbc carries no direction: DayNight sets it from the hour alone,

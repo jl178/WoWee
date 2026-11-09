@@ -61,6 +61,8 @@ const float kSkyDistance = 5000.0;   // how far a sky pixel's ray runs
 const float kSkyScatter = 0.35;      // of the fog colour, light from the sky
 const float kSunScatter = 0.8;       // of the sun colour, at even scattering
 const float kG = 0.7;
+const float kMaxLight = 0.88;        // the 8-bit scene's brightest haze channel
+const float kMaxLightHdr = 1.5;      // and the HDR scene's (enhanced_tonemap::kHazeCap)
 
 float phaseHG(float cosTheta, float g) {
     float g2 = g * g;
@@ -100,7 +102,23 @@ void main() {
     // land under it out (the Barrens toward an evening sun, round 4).
     // With the HDR scene the tone map rolls it off instead, and the glow
     // toward a low sun can be brighter than white (enhanced_tonemap::kHazeCap).
-    light = min(light, vec3((int(pc.target.w + 0.5) & 8) != 0 ? 3.0 : 1.3));
+    // In the 8-bit scene it is held under white instead, keeping its hue:
+    // the haze lays light over the scene by 1 - T (an over blend), so with
+    // its own light under kMaxLight it can tint a bright sky gold but never
+    // take it, or the land under it, to white. 1.3 per channel turned the
+    // sky round a high sun into a white sheet (Jered's Goldshire road).
+    // Under the HDR scene's tone map it may pass white, but it is held by
+    // its brightest channel too: clipped per channel at 3 it went white
+    // toward a high sun (Westfall at noon) where it should stay gold.
+    // A soft knee, not a hard limit: past 70% of the cap the brightest
+    // channel eases onto it (Reinhard), so a gradient round the sun has no
+    // edge where the limit starts (a hard min printed a ring there).
+    float maxLight = (int(pc.target.w + 0.5) & 8) != 0 ? kMaxLightHdr : kMaxLight;
+    float top = max(max(light.r, light.g), max(light.b, 1e-4));
+    float knee = 0.7 * maxLight;
+    float over = max(top - knee, 0.0);
+    float eased = min(top, knee) + over * (maxLight - knee) / (maxLight - knee + over);
+    light *= eased / top;
     // Indoors the outdoor air stays outside.
     float outdoors = 1.0 - clamp(shadowParams.w, 0.0, 1.0);
     float a = mix(1.0, T, outdoors);

@@ -40,6 +40,32 @@ inline constexpr uint32_t kFloatChannels = 4;  ///< fog end, fog scaler, glow th
 inline constexpr uint32_t kMaxKeys = 16;       ///< a ColorBand's capacity
 inline constexpr const char* kFileName = "wowee\\enhanced_lights.bin";
 
+/// Enhanced's sky colours carry an exposure its linear pipeline takes back.
+/// Over every linked light, 8:00 to 17:00, the sky bands' luminance against
+/// 3.3.5's for the same light is x1.26-1.30 (SkyMiddle 1.26, Band1 1.30,
+/// Band2 1.29, Smog 1.29, Fog 1.29, CloudSun 1.27, cloud layer 1.29; median
+/// over 3762 samples each), its 75th percentile 1.30-1.31 and no higher: most
+/// keys are 1.12's colour times 1.3 per channel, clipped at 255 (Westfall's
+/// noon SkyMiddle `#3c919e` -> `#4ebdcd`). The sun, ambient, sun sprite and
+/// shadow are not scaled (1.00-1.05). On 3.3.5's 8-bit path that 1.3 made the
+/// sky round a high sun white; the sky channels are divided by it as they
+/// are read (docs/re/enhanced-lighting.md section 2c).
+inline constexpr float kSkyExposure = 1.3f;
+
+/// The colour channels kSkyExposure applies to: SkyTop through SkyFog (2-7),
+/// CloudSun (10) and the first cloud layer (11).
+inline constexpr bool isSkyChannel(uint32_t c) { return (c >= 2 && c <= 7) || c == 10 || c == 11; }
+
+/// A 0x00RRGGBB colour with Enhanced's sky exposure taken out.
+inline constexpr uint32_t withoutSkyExposure(uint32_t rgb) {
+    uint32_t out = 0;
+    for (uint32_t shift = 0; shift <= 16; shift += 8) {
+        const float v = static_cast<float>((rgb >> shift) & 0xFFu) / kSkyExposure;
+        out |= (static_cast<uint32_t>(v + 0.5f) & 0xFFu) << shift;
+    }
+    return out;
+}
+
 struct Key {
     uint32_t time = 0;                    ///< half-minutes since midnight
     uint32_t color[kColorChannels] = {};  ///< 0x00RRGGBB

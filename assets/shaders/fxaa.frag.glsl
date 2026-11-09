@@ -45,8 +45,9 @@ layout(push_constant) uniform PC {
     float hdr;          // 1 when uScene is the RGBA16F HDR scene (hdrScene row)
     float toneKnee;     // HDR: where the tone curve leaves the identity
     float hdrBloom;     // HDR: how much light above 1 the bloom spreads
-    float pad6;
-    float pad7;
+    float enhancedExposure;  // HDR + Enhanced daylight: the scene's light x this before
+                            // the tone curve (enhanced_palette::kHdrExposure); 0 = off
+    float enhancedSat;       // and the chroma scale below the shoulder (0 = off)
 } pc;
 
 // The scene boxed down to a quarter (mip 1 of a half-size image), the stock
@@ -270,7 +271,13 @@ float gradeChannel(float x, bool kalimdor) {
 vec3 enhancedGrade(vec3 c) {
     bool kal = pc.gradeCurve > 0.5;
     vec3 g = vec3(gradeChannel(c.r, kal), gradeChannel(c.g, kal), gradeChannel(c.b, kal));
-    return mix(c, g, pc.gradeWeight);
+    // Mid-tones only. Enhanced's curve lifts the upper mid-tones most (0.77 ->
+    // 0.89) of a tone-mapped picture whose highlights are already rolled
+    // off; here the sunlit ground and leaves sit at 0.7-0.9 and the lift
+    // drove them to white. Fades out from 0.6 to 0.9 of the brightest
+    // channel, so a highlight keeps the value it has.
+    float top = max(c.r, max(c.g, c.b));
+    return mix(c, g, pc.gradeWeight * (1.0 - smoothstep(0.6, 0.9, top)));
 }
 
 // Bloom (not stock; the Enhanced preset's "Bloom Intensity", which Enhanced
@@ -281,8 +288,6 @@ vec3 enhancedGrade(vec3 c) {
 // lifts only the highlights - sunlit leaves, the sky round the sun, the
 // shafts - into a soft halo.
 const float kBloomKnee = 0.8;
-// The HDR scene's bloom: only light above kHdrBloomFloor, and no more than
-// kHdrBloomMax a channel of it (fxaa.frag stockScreenEffect).
 const float kHdrBloomFloor = 1.6;
 const float kHdrBloomMax = 0.3;
 // The two at once, from one set of taps: x the 8-bit bloom over the
@@ -299,15 +304,15 @@ void bloomAt(vec2 uv, out vec3 ldr, out vec3 hdr) {
         for (int x = -1; x <= 1; ++x) {
             float w = (2.0 - abs(float(x))) * (2.0 - abs(float(y)));
             // With the HDR scene the bloom is only the light above the floor
-            // (a lamp, a candle, a spell, the sun): spread tight, a texel and
-            // a half of the quarter-size scene apart, so a torch keeps a small
-            // local glow rather than a wide halo (Jered's Goldshire candles).
+            // (a lamp, a candle, the sun): spread tight, a texel and a half
+            // of the quarter-size scene apart, so a torch keeps a small local
+            // glow rather than a wide halo (Jered's Goldshire candles).
             vec3 s = glowLinearAt(uv + vec2(x, y) * (pc.hdr > 0.5 ? 1.5 : 4.0) * texel);
             vec3 d = pc.hdr > 0.5 ? hdrToDisplay(s) : s;
             ldr += max(d - kBloomKnee, 0.0) * w;
             // Light above kHdrBloomFloor: the sun's disc and glare (2.5x),
-            // lamps, fire and spell effects. At 1 the sunlit Barrens ground
-            // under an HDR sun bloomed into a glowing orange-white sheet.
+            // lamps and fire. At 1 the sunlit Barrens ground under an HDR
+            // sun bloomed into a glowing orange-white sheet.
             hdr += max(s - kHdrBloomFloor, 0.0) * w;
             wsum += w;
         }
@@ -322,11 +327,16 @@ vec3 stockScreenEffect(vec3 c, vec2 uv) {
     if (pc.bloom > 0.0) {
         bloomAt(uv, ldr, hdr);
         // Capped: a backlit, haze-lit face beside the sun already sits near
-        // white, and the halo on top of it was what blew it out.
+        // white, and the halo on top of it was what blew it out. And
+        // screened rather than added: what is already near white takes
+        // almost none of the halo, so it glows into the darker picture round
+        // it instead of piling onto the sky and the leaves by the sun until
+        // the top of the screen was one white-yellow sheet (Jered's
+        // Goldshire road).
         // With the HDR scene the light above its floor is the bloom; the
-        // 8-bit halo over the displayed picture's top fifth bloomed every
+        // 8-bit halo over the displayed picture's top fifth would bloom every
         // sunlit wall and road, so it is left to the 8-bit scene.
-        if (pc.hdr < 0.5) r += min(ldr * pc.bloom, vec3(0.25));
+        if (pc.hdr < 0.5) r += min(ldr * pc.bloom, vec3(0.25)) * clamp(1.0 - r, 0.0, 1.0);
     }
     if (pc.hdr > 0.5) {
         // The HDR scene: what the glow and the bloom added on the displayed
@@ -340,13 +350,54 @@ vec3 stockScreenEffect(vec3 c, vec2 uv) {
         // each at 1, and their bloom grew into a large halo round the player.
         // Held, a bright effect keeps a small, tight glow at most.
         vec3 lin = displayToHdr(c) + (r - c) + min(hdr * (pc.bloom * pc.hdrBloom), vec3(kHdrBloomMax));
+        // Enhanced's lift of the lit mid-tones: its sunlit ground reads
+        // brighter against the same shade (lit/shade 2.1-2.3 at Goldshire
+        // 9:22). A band from 0.2 to 0.8 of the light's luminance - the shade
+        // keeps its depth and the top its value, so a sunlit Barrens road
+        // stays textured (a straight exposure took it to a glowing orange; a
+        // lift of the low end greyed the shade).
+        if (pc.enhancedExposure > 0.0) {
+            float y = dot(lin, vec3(0.2126, 0.7152, 0.0722));
+            // ...and by the brightest channel too: the Barrens' red dirt has
+            // a modest luminance but its red near the top.
+            float hiCh = max(lin.r, max(lin.g, lin.b));
+            float band = smoothstep(0.2, 0.35, y) * (1.0 - smoothstep(0.55, 0.8, y)) *
+                         (1.0 - smoothstep(0.7, 0.9, hiCh));
+            lin *= 1.0 + (pc.enhancedExposure - 1.0) * band;
+        }
         r = hdrToDisplay(lin);
+        // On the shoulder each channel eases toward 1 on its own, so a
+        // saturated sky keeps its full chroma up to the top (Duskwood's
+        // noon cyan). A highlight's colour eases toward its grey instead,
+        // as a film shoulder does, by how far into the shoulder it is.
+        // And Enhanced's palette: its sunlit ground and fences warm and
+        // saturated (Goldshire 9:22), its shade a deeper, near-neutral green -
+        // more chroma on lit surfaces, easing to less at the very top.
+        if (pc.enhancedSat > 0.0) {
+            float top = max(r.r, max(r.g, r.b));
+            float y = dot(r, vec3(0.2126, 0.7152, 0.0722));
+            // Lit surfaces only: Enhanced's shade is a near-neutral green
+            // (chroma 0.46-0.57) under its saturated sunlit ground (0.62-0.65).
+            float k = mix(1.0, pc.enhancedSat, smoothstep(0.25, 0.45, y));
+            k = mix(k, 0.8, smoothstep(0.75, 0.95, top));
+            r = max(vec3(y) + (r - vec3(y)) * k, vec3(0.0));
+        }
     } else if (pc.rollWhite > 0.0) {
         // Soft highlights belong to the 8-bit scene; the tone curve does it
         // for the HDR one.
         r = highlightRollOff(r);
     }
     if (pc.gradeWeight > 0.0) r = enhancedGrade(r);
+    // Dithered before the 8-bit write (the Enhanced rows only): the tone
+    // curve's shoulder and the grade spread a sky's smooth gradient over a
+    // few levels, which showed as rings round the sun. A triangular dither
+    // of one level, from interleaved gradient noise, breaks the steps up.
+    if (pc.hdr > 0.5 || pc.bloom > 0.0 || pc.gradeWeight > 0.0) {
+        vec2 f = gl_FragCoord.xy;
+        float n1 = fract(52.9829189 * fract(dot(f, vec2(0.06711056, 0.00583715))));
+        float n2 = fract(52.9829189 * fract(dot(f + vec2(17.0, 59.0), vec2(0.06711056, 0.00583715))));
+        r += (n1 + n2 - 1.0) / 255.0;
+    }
     return r;
 }
 

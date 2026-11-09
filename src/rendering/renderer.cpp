@@ -1,6 +1,7 @@
 #include "rendering/renderer.hpp"
 #include "rendering/sun_direction.hpp"
 #include "rendering/enhanced_grade.hpp"
+#include "rendering/enhanced_palette.hpp"
 #include "rendering/enhanced_tonemap.hpp"
 #include "rendering/leaf_light.hpp"
 
@@ -3062,6 +3063,7 @@ void Renderer::update(float deltaTime) {
             (fixedHour > 0 && fixedHour < static_cast<int>(std::size(kFixedTimeOfDayHours)))
                 ? kFixedTimeOfDayHours[fixedHour]
                 : gameTime;
+        lightingManager->setHdrScene(vkCtx && vkCtx->isHdrScene());
         lightingManager->update(characterPosition, mapId, resolvedZoneId,
                                 lightTime, stormIntensity, isUnderwater);
         lightMapId_ = mapId;
@@ -4128,6 +4130,14 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                   (1.0f - glm::clamp(indoorFactor_, 0.0f, 1.0f))
             : 0.0f;
         postProcessPipeline_->setColorGrade(enh_.colorGrade, gradeWeight, curve == enhanced_grade::kKalimdor);
+        // Enhanced's exposure in the HDR scene's tone map, where its daylight
+        // is (enhanced_palette::kHdrExposure); outdoors and above water only.
+        const bool enhancedTone = enh_.enhancedDaylight && !cameraUnderwater_ &&
+                                 enhanced_palette::appliesToMap(lightMapId_);
+        const float outdoor = 1.0f - glm::clamp(indoorFactor_, 0.0f, 1.0f);
+        postProcessPipeline_->setEnhancedTone(
+            enhancedTone ? glm::mix(1.0f, enhanced_palette::hdrExposure(), outdoor) : 0.0f,
+            enhancedTone ? glm::mix(1.0f, enhanced_palette::hdrSaturation(), outdoor) : 0.0f);
     }
 
     uint32_t frameIdx = vkCtx->getCurrentFrame();
@@ -6677,6 +6687,12 @@ void Renderer::renderVolumetricFog() {
     }
 }
 
+namespace {
+// The most the sun shafts add per channel under the Enhanced haze
+// (SunShafts::FrameInputs::cap).
+constexpr float kEnhancedShaftCap = 0.3f;
+}  // namespace
+
 void Renderer::recordSunShafts() {
     if (!sunShafts_ || currentCmd == VK_NULL_HANDLE) return;
     SunShafts::FrameInputs in;
@@ -6729,6 +6745,12 @@ void Renderer::recordSunShafts() {
                 // on top of it. The haze's longer shadowed mist (800 yd)
                 // carries the extra light instead.
                 in.tint = glm::mix(glm::vec3(1.0f), c / peak, 0.75f);
+                // And held under a ceiling: by the sun the walk runs through
+                // sky the haze has already lit gold, and screened over it at
+                // full strength the rays took a quarter of the screen to
+                // white (Jered's Goldshire road toward a high sun). Streaks
+                // through the canopy are well under it and keep their shape.
+                in.cap = kEnhancedShaftCap;
             }
             in.sunUV = sun.uv;
             in.strength = strength;

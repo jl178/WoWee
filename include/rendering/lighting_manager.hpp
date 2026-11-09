@@ -330,6 +330,10 @@ public:
     /// light enhanced_lights.hpp matches, the averaged trend
     /// (enhanced_palette.hpp) for the rest.
     void setEnhancedDaylight(bool on) { enhancedDaylight_ = on; }
+    /// Whether the scene is HDR (RGBA16F, tone mapped): the Enhanced sun is
+    /// then added to the ambient as light without holding the sum at one
+    /// (enhanced_palette::linearLightDirect).
+    void setHdrScene(bool on) { hdrScene_ = on; }
     /// How many of 3.3.5's lights have Enhanced keyframes (0 before initialize).
     [[nodiscard]] size_t enhancedLightCount() const { return enhancedProfiles_.size(); }
     /// Long view: the fog may end past the far clip (see update()).
@@ -518,6 +522,7 @@ private:
     bool playerDead_ = false;
     float fogSkyBlend_ = 0.0f;
     bool enhancedDaylight_ = false;
+    bool hdrScene_ = false;
     /// enhancedDaylight_ and the map being drawn is one Enhanced re-authored.
     bool enhancedActive_ = false;
     /// Enhanced's keyframes by 3.3.5 light id * 8 + slot (loadEnhancedProfiles).

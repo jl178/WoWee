@@ -2049,7 +2049,9 @@ void PostProcessPipeline::renderFXAAPass() {
         hdrScene() ? 1.0f : 0.0f,
         // The HDR scene's tone curve and how much light above 1 the bloom
         // spreads (enhanced_tonemap.hpp).
-        enhanced_tonemap::tuning().knee, enhanced_tonemap::tuning().hdrBloom, 0.0f, 0.0f
+        enhanced_tonemap::tuning().knee, enhanced_tonemap::tuning().hdrBloom,
+        // The Enhanced daylight's low-end lift and saturation (0 off).
+        hdrScene() ? enhancedExposure_ : 0.0f, hdrScene() ? enhancedSat_ : 0.0f
     };
     vkCmdPushConstants(currentCmd_, fxaa_.pipelineLayout,
                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), pc);

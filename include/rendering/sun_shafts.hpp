@@ -43,6 +43,11 @@ public:
         glm::vec3 tint{1.0f};
         /// 0 draws nothing this frame.
         float strength = 0.0f;
+        /// The most the rays may add, per channel, where the sky by the sun
+        /// already fills the walk (0, the stock shafts: no limit). The
+        /// Enhanced haze sets it: the shafts screened over a sky the haze
+        /// has already lit turned the sun's quarter of the screen white.
+        float cap = 0.0f;
     };
 
     SunShafts() = default;

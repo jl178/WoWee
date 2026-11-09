@@ -210,6 +210,96 @@ use at that hour. A 75th-percentile bound would have moved 533 of the
 1287 keys, so the bound stays at the 90th. Only two Enhanced captures exist
 (Northshire, Goldshire); none of Mulgore was available to check against.
 
+## 2c. Exposure: Enhanced's colours on 3.3.5's path
+
+Jered's first morning on the keyframes (Goldshire road toward a high sun,
+`jered_now.png`) blew the top third of the screen to white-yellow, washed
+the foliage and took the sunlit cobbles near white. Enhanced's light data is
+authored for its linear, tone-mapped pipeline; read raw it stacks with
+everything after it. Measured against 3.3.5's bands for the same lights
+(every linked light, clear slot, 8:00-17:00):
+
+- **The sun and the ambient** are as bright as 3.3.5's (luminance ratio
+  1.00 median for both), but the sun is whiter (`#eabd8a` against
+  `#ff8800` at Elwynn's noon). The stock shaders add ambient and sun and
+  clamp at 1 per channel, so a fully lit face took (1.33, 1.25, 1.15) ->
+  white where 3.3.5's stays warm (1, 1, 0.6). Now
+  (`enhanced_palette::linearLightDirect`) the sun is the colour that, added
+  to the ambient, gives what adding them as *light* gives - both decoded
+  with the 2.2 power, summed, encoded back: (0.98, 0.87, 0.79) at that noon,
+  warm and under white. With the HDR scene the sum is left unclamped and the
+  sun carries Enhanced's F052 (1.35, eased in by the day intensity) before
+  the renderer's own 1.25 by day and the tone map.
+- **The sky** is not: its bands are x1.26-1.30 3.3.5's (SkyMiddle 1.26,
+  Band1 1.30, Band2 1.29, Smog 1.29, Fog 1.29, CloudSun 1.27, cloud layer
+  1.29; 3762 samples each), their 75th percentile 1.30-1.31 and no higher.
+  Most keys are 1.12's colour times 1.3 per channel, clipped at 255
+  (Westfall's noon SkyMiddle `#3c919e` -> `#4ebdcd`): an exposure Enhanced's
+  pipeline takes back. It is divided out as the table is read
+  (`enhanced_lights::kSkyExposure`, channels 2-7, 10, 11), and out of the
+  trend's sky luminance for the lights without keyframes.
+- **The stock glow.** Enhanced's LightParams Glow is 0 on 106 of the 112
+  linked profiles (its bloom is separate); 3.3.5's same slots carry 0.5-1,
+  and its blur squared over a sky as bright as Enhanced's was most of the
+  white sheet at Westfall's noon. Linked lights keep half of it
+  (`enhanced_palette::kGlowScale`): with none the picture fell to 0.21-0.23
+  mean luminance against Enhanced's captures' 0.32; half gives 0.25-0.26
+  with the sky still under white.
+
+And the passes after it, each only under its Enhanced row:
+
+- The sun haze's light is held by its brightest channel (hue kept) at 0.88
+  in the 8-bit scene and 1.5 under the HDR tone map (it was 1.3 and 3 per
+  channel, which went white toward a high sun) - on a soft knee from 70% of
+  the cap, since a hard limit printed a ring in the gradient round the sun.
+- The screen-space shafts are eased onto a ceiling of 0.3 a channel under
+  the haze (`SunShafts::FrameInputs::cap`); a streak through the canopy is
+  well under it, the sheet by the sun is what it stops.
+- The bloom's 8-bit halo is screened (times 1 - the picture) instead of
+  added, so what is near white takes almost none of it (with the HDR scene
+  it is not drawn at all; section 9b, "Glows held small").
+- With the HDR scene the lit mid-tones are lifted (x1.3 between 0.2 and 0.8
+  luminance, faded out as the brightest channel nears 0.9,
+  `enhanced_palette::kHdrExposure`) and lit surfaces carry more chroma (x1.35
+  from 0.25 luminance up, easing to x0.8 at the top, `kHdrSaturation`).
+  Matched against Jered's live Enhanced captures at Goldshire 9:22, into the
+  sun and away from it (lit and shade are the brightest and darkest thirds
+  of the world view):
+
+  | | Enhanced | old preset | now |
+  |---|---|---|---|
+  | lit luminance | 0.44 / 0.59 | 0.43 / 0.49 | 0.46 / 0.51 |
+  | lit chroma | 0.62 / 0.65 | 0.46 / 0.53 | 0.63 / 0.69 |
+  | shade luminance | 0.22 / 0.26 | 0.21 / 0.25 | 0.20 / 0.24 |
+  | lit / shade | 2.07 / 2.27 | 2.08 / 1.95 | 2.27 / 2.14 |
+
+  and the Barrens' noon road at 0.1% of pixels over 0.92 (old preset
+  11.1%). Tried and left: a straight exposure (1.25-1.4) reached Enhanced's
+  mean but took the Barrens' dirt to a glowing orange; a lift of the low end
+  greyed the shade and flattened the picture; the sun past its F052 (1.7)
+  put 8.5% of the Barrens' road over 0.92. Enhanced's sun also stands
+  elsewhere at 9:22 (east of Goldshire's road; 3.3.5's sun sprite is always
+  north-west), so its sunlit, dappled road cannot be framed identically.
+- The final write is
+  dithered (a triangular dither of one level) under the Enhanced rows: the
+  shoulder and the grade spread a sky's gradient over a few 8-bit levels,
+  which showed as rings round the sun.
+- The colour grade fades out over 0.6-0.9 of a pixel's brightest channel:
+  Enhanced's curve lifts the upper mid-tones of an already tone-mapped
+  picture, and on 3.3.5's 0.7-0.9 sunlit ground it drove them to white.
+
+Checked with the HDR row on (the Enhanced preset as Jered runs it): the
+Goldshire road into and across the sun at 7:00, 9:00, 12:00, 15:00,
+17:30, 19:30 and 22:00, in rain, and Westfall, the Barrens and Duskwood at
+noon and 18:30. Near-white pixels (every channel over 0.96) in the largest
+blob: Goldshire into the sun 0.6% at most (the disc at 9:00 is 0.25%;
+11.3% at noon before), Duskwood noon 1.4% (14.1%), the Barrens 0.2% (39%),
+across the sun and at night none. Westfall at noon looking up at the
+zenith sun keeps 7% (58.5% before): there the stock picture itself clips
+red and green over half the screen (Ultra: 47% of pixels with a channel at
+255), and Enhanced's bluer sky makes that clip white rather than yellow.
+The comparison sheets are in the session scratchpad (`ovx/shots/`).
+
 ## 3. Colour grading
 
 `ffxcolorgrading.bls` (FDID 2990792) samples the finished picture, clamps it
@@ -305,8 +395,8 @@ shrinking with it, so up close it is contact shading. On the close-ups
 (AO on against off) the pixels darkened by over 20% on the character view
 fell from 13.9% to 7.4% of the frame, and the bands along the character's
 side and the house eaves are gone; a real crease (a branch growing out of
-the trunk) keeps its shade. Alpha-tested foliage is not told apart (the pass
-sees only depth); the edge test is what keeps the leaf cards clean.
+the trunk) keeps its shade.
+
 
 ## 5. Volumetric fog and the two fog layers
 
