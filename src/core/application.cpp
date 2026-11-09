@@ -59,6 +59,7 @@
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/minimap.hpp"
+#include "ui/minimap_layer.hpp"
 #include "rendering/world_map.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "core/debug_lua_hook.hpp"
@@ -1545,6 +1546,50 @@ bool Application::initialize() {
         // device to upload it; both exist by now.
         widgetRenderer_.initialize(assetManager.get(),
                                    window ? window->getVkContext() : nullptr);
+        // The minimap's map, drawn in the Minimap frame's place among the
+        // frames: the composite read the way minimap_display.frag reads it,
+        // as a disc or a square with a UV at each vertex (the mapping is
+        // affine, so the corners carry it exactly).
+        widgetRenderer_.setMinimapPainter([this](ImDrawList* dl, float x0, float y0, float x1,
+                                                 float y1, float alpha) {
+            auto* map = renderer ? renderer->getMinimap() : nullptr;
+            rendering::Minimap::UiDisplay d;
+            if (!map || !map->isUiDrawn() || !map->uiDisplay(d) || x1 <= x0 || y1 <= y0) return false;
+            const float cs = std::cos(d.rotation), sn = std::sin(d.rotation);
+            const auto uvAt = [&](float cx, float cy) {   // offset from centre, in rect units
+                return ImVec2(d.playerU + (-cx * sn + cy * cs) * d.zoomRadius * 2.0f,
+                              d.playerV + (cx * cs + cy * sn) * d.zoomRadius * 2.0f);
+            };
+            const ImU32 col = IM_COL32(255, 255, 255,
+                                       static_cast<int>(std::clamp(alpha, 0.0f, 1.0f) * 255.0f));
+            const ImTextureID tex = reinterpret_cast<ImTextureID>(d.texture);
+            if (d.square) {
+                dl->AddImageQuad(tex, ImVec2(x0, y0), ImVec2(x1, y0), ImVec2(x1, y1), ImVec2(x0, y1),
+                                 uvAt(-0.5f, -0.5f), uvAt(0.5f, -0.5f), uvAt(0.5f, 0.5f),
+                                 uvAt(-0.5f, 0.5f), col);
+                return true;
+            }
+            constexpr int kSegments = 64;
+            const ImVec2 centre((x0 + x1) * 0.5f, (y0 + y1) * 0.5f);
+            const float rx = (x1 - x0) * 0.5f, ry = (y1 - y0) * 0.5f;
+            dl->PushTextureID(tex);
+            dl->PrimReserve(kSegments * 3, kSegments + 1);
+            const auto base = static_cast<unsigned int>(dl->_VtxCurrentIdx);
+            dl->PrimWriteVtx(centre, uvAt(0.0f, 0.0f), col);
+            for (int i = 0; i < kSegments; ++i) {
+                const float a = static_cast<float>(i) / kSegments * 6.2831853f;
+                const float ox = 0.5f * std::cos(a), oy = 0.5f * std::sin(a);
+                dl->PrimWriteVtx(ImVec2(centre.x + ox * 2.0f * rx, centre.y + oy * 2.0f * ry),
+                                 uvAt(ox, oy), col);
+            }
+            for (int i = 0; i < kSegments; ++i) {
+                dl->PrimWriteIdx(static_cast<ImDrawIdx>(base));
+                dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 1 + i));
+                dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 1 + ((i + 1) % kSegments)));
+            }
+            dl->PopTextureID();
+            return true;
+        });
         // WorldMapBlobFrame's quest areas: which quests are selected and which
         // objectives are open is the interface's state, so the renderer asks.
         widgetRenderer_.setQuestBlobSource([am = addonManager_.get()]() {
@@ -5715,6 +5760,8 @@ void Application::render() {
                         map->setScreenRect(mm->left * sc,
                                            io.DisplaySize.y - (mm->bottom + mm->rectH) * sc,
                                            mm->rectW * sc, mm->rectH * sc);
+                        // Drawn by the widget renderer, in the frame's place.
+                        map->setUiDrawn(true);
                         // Minimap:SetMaskTexture. The stock mask is the round
                         // Textures\MinimapMask; an addon that hands it a solid
                         // texture (ElvUI's square minimap) gets a square map.
@@ -5784,6 +5831,7 @@ void Application::render() {
                         }
                     } else {
                         map->clearScreenRect();
+                        map->setUiDrawn(false);
                     }
                 }
 
@@ -6620,6 +6668,15 @@ void Application::render() {
             // The stall is real and worth fixing, but it has to be fixed where
             // the uploads are - around each screen's icon loop, inside which
             // nothing draws - not around a stage that draws.
+            //
+            // The background list in channels, so the minimap lands among the
+            // interface's frames where its frame is (minimap_layer.hpp). Only
+            // while the interface draws the map; otherwise everything goes on
+            // in one channel as before.
+            if (drawWidgets && renderer && renderer->getMinimap() &&
+                renderer->getMinimap()->isUiDrawn()) {
+                ui::minimap_layer::beginFrame();
+            }
             uiManager->render(state, authHandler.get(), gameHandler.get());
         });
 
@@ -6639,6 +6696,7 @@ void Application::render() {
             });
         }
 
+        ui::minimap_layer::endFrame();
         // Only now is the draw data closed.
         uiManager->finishImGuiFrame();
 

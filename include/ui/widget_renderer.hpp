@@ -48,6 +48,13 @@ class WidgetRenderer {
 public:
     void initialize(pipeline::AssetManager* assets, rendering::VkContext* vkCtx);
 
+    /// Draws the minimap's map into the Minimap frame's rect (pixels, top-left
+    /// origin), in the frame's place in the draw order; see minimap_layer.hpp.
+    /// False when there is nothing to draw yet.
+    using MinimapPainter = std::function<bool(ImDrawList*, float x0, float y0, float x1,
+                                              float y1, float alpha)>;
+    void setMinimapPainter(MinimapPainter p) { minimapPainter_ = std::move(p); }
+
     /// Lay the tree out for this screen and draw it. Safe to call with no
     /// device or assets - it simply does nothing, which is what the headless
     /// tests want.
@@ -103,6 +110,7 @@ public:
     void setQuestBlobSource(QuestBlobSource source) { questBlobSource_ = std::move(source); }
 
 private:
+    MinimapPainter minimapPainter_;
     QuestBlobSource questBlobSource_;
     /// Draws the source's polygons in the frame's rect with the art and alphas
     /// the frame was given (SetFillTexture, SetBorderTexture, SetFillAlpha,

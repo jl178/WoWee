@@ -2,6 +2,7 @@
 #include "game/game_utils.hpp"
 #include "game/interaction_rules.hpp"
 #include "ui/game_screen.hpp"
+#include "ui/minimap_layer.hpp"
 #include "game/stock_cast_timing.hpp"
 #include "ui/stock_unit_color.hpp"
 #include "ui/gamepad_controls.hpp"
@@ -819,7 +820,10 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // input, and the mail and battlefield indicators. Both gates are inside
     // it now.
     if (showMinimap_) {
+        // In the minimap's own place among the frames; see minimap_layer.hpp.
+        minimap_layer::use(minimap_layer::kBlips);
         renderMinimapMarkers(gameHandler);
+        minimap_layer::use(minimap_layer::kWorld);
     }
     chatPanel_.renderBubbles(gameHandler);
     // Not gated on GameMenu ownership. FrameXML's own options frames are shells

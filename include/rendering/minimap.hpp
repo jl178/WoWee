@@ -157,6 +157,29 @@ public:
         rectX_ = x; rectY_ = y; rectW_ = w; rectH_ = h; haveRect_ = true;
     }
     void clearScreenRect() { haveRect_ = false; }
+
+    /// The map drawn by the interface rather than by a pass of its own.
+    ///
+    /// In the client the minimap is a frame: it draws at its frame's strata
+    /// and level, over its parent's art and under anything above it. A Vulkan
+    /// pass before the interface cannot be that - every frame drawn later
+    /// covers it - and an interface that puts the map inside a frame with a
+    /// backdrop (ElvUI's square minimap holder) hid it entirely. With this on,
+    /// render() works out where the composite is read from and stops there,
+    /// and the widget renderer draws the map in the Minimap frame's place in
+    /// the draw order from uiDisplay().
+    void setUiDrawn(bool on) { uiDrawn_ = on; }
+    [[nodiscard]] bool isUiDrawn() const { return uiDrawn_; }
+    struct UiDisplay {
+        VkDescriptorSet texture = VK_NULL_HANDLE;  ///< the composite, as an ImGui texture
+        float playerU = 0.5f, playerV = 0.5f;      ///< where the player is in it
+        float rotation = 0.0f;                     ///< the facing the map turns by
+        float zoomRadius = 0.1f;                   ///< half the view, in composite UV
+        bool square = false;
+    };
+    /// What the interface needs to draw the map this frame; false before the
+    /// first composite.
+    bool uiDisplay(UiDisplay& out);
     /// Where the map is actually being drawn, when something placed it.
     ///
     /// The marker pass needs this: it used to assume the corner this client
@@ -277,6 +300,10 @@ private:
     float opacity_ = 1.0f;
     bool  haveRect_ = false;
     float rectX_ = 0.0f, rectY_ = 0.0f, rectW_ = 0.0f, rectH_ = 0.0f;
+    bool  uiDrawn_ = false;
+    UiDisplay uiDisplay_;
+    bool  uiDisplayValid_ = false;
+    VkDescriptorSet imguiComposite_ = VK_NULL_HANDLE;
 
     // Throttling
     float updateIntervalSec = 0.25f;

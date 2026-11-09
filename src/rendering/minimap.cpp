@@ -823,11 +823,54 @@ void Minimap::compositeWmoPass(VkCommandBuffer cmd, const glm::vec3& centerWorld
 // Display quad (call INSIDE main render pass)
 // --------------------------------------------------------
 
+bool Minimap::uiDisplay(UiDisplay& out) {
+    if (!uiDisplayValid_ || !compositeTarget || !compositeTarget->isValid() || !vkCtx) return false;
+    // The interface's descriptor sets go when its textures do (an ImGui
+    // backend restart); one made before that names nothing now.
+    static uint32_t madeForGeneration = 0;
+    if (imguiComposite_ != VK_NULL_HANDLE && madeForGeneration != vkCtx->uiTextureGeneration()) {
+        imguiComposite_ = VK_NULL_HANDLE;
+    }
+    if (imguiComposite_ == VK_NULL_HANDLE) {
+        madeForGeneration = vkCtx->uiTextureGeneration();
+        const VkDescriptorImageInfo info = compositeTarget->descriptorInfo();
+        imguiComposite_ = ImGui_ImplVulkan_AddTexture(info.sampler, info.imageView,
+                                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+    out = uiDisplay_;
+    out.texture = imguiComposite_;
+    return out.texture != VK_NULL_HANDLE;
+}
+
 void Minimap::render(VkCommandBuffer cmd, const Camera& playerCamera,
                      const glm::vec3& centerWorldPos,
                      int screenWidth, int screenHeight,
                      float playerOrientation, bool hasPlayerOrientation) {
-    if (!enabled || !hasCachedFrame || !displayPipeline) return;
+    if (!enabled || !hasCachedFrame) return;
+    if (uiDrawn_) {
+        // Where the composite is read from, for the interface to draw it -
+        // the same arithmetic as below, without the pass.
+        constexpr float TILE_SIZE = core::coords::TILE_SIZE;
+        auto [tileX, tileY] = core::coords::worldToTile(centerWorldPos.x, centerWorldPos.y);
+        const float fracNS = 32.0f - static_cast<float>(tileX) - centerWorldPos.y / TILE_SIZE;
+        const float fracEW = 32.0f - static_cast<float>(tileY) - centerWorldPos.x / TILE_SIZE;
+        uiDisplay_.playerU = (1.0f + fracEW) / 3.0f;
+        uiDisplay_.playerV = (1.0f + fracNS) / 3.0f;
+        uiDisplay_.zoomRadius = viewRadius / (TILE_SIZE * 3.0f);
+        if (compositeIsWmo_) {
+            const glm::vec2 uv = wmo_minimap::renderToComposite(
+                glm::vec2(centerWorldPos.x, centerWorldPos.y), wmoCompositeCenter_,
+                wmoCompositeSpanUsed_);
+            uiDisplay_.playerU = uv.x;
+            uiDisplay_.playerV = uv.y;
+            uiDisplay_.zoomRadius = viewRadius / wmoCompositeSpanUsed_;
+        }
+        uiDisplay_.rotation = rotateWithCamera ? bearing_ : 0.0f;
+        uiDisplay_.square = squareShape;
+        uiDisplayValid_ = true;
+        return;
+    }
+    if (!displayPipeline) return;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, displayPipeline);
 

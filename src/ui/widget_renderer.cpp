@@ -9,6 +9,7 @@
 
 #include "ui/widget_tree.hpp"
 #include "ui/framexml_takeover.hpp"
+#include "ui/minimap_layer.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "rendering/vk_context.hpp"
@@ -2947,7 +2948,27 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
                      ImVec2(440.0f, 440.0f));
     }
 
+    // The minimap's place among the frames (minimap_layer.hpp): everything
+    // before the Minimap frame in one channel, the map in its own, the rest
+    // after the blips.
+    const Widget* minimapFrame = nullptr;
+    if (minimapPainter_ && minimap_layer::active()) {
+        for (const Widget* w : order) {
+            if (w->kind == WidgetKind::Frame && w->objectType == "Minimap") { minimapFrame = w; break; }
+        }
+    }
+    minimap_layer::use(minimapFrame ? minimap_layer::kBeforeMinimap : minimap_layer::kAfterMinimap);
+
     for (const Widget* w : order) {
+        if (w == minimapFrame) {
+            minimap_layer::use(minimap_layer::kMap);
+            const float px = tree.uiScale();
+            const float mx0 = w->left * px;
+            const float my0 = screenH - (w->bottom + w->rectH) * px;
+            minimapPainter_(dl, mx0, my0, mx0 + w->rectW * px, my0 + w->rectH * px, w->alpha);
+            minimap_layer::use(minimap_layer::kAfterMinimap);
+            continue;
+        }
         // Drawn by the client itself; see Widget::clientDrawn.
         if (w->clientDrawn) continue;
         // A region in a layer its frame has switched off (DisableDrawLayer).
