@@ -133,23 +133,3 @@ TEST_CASE("geosets in the 3.3.5 tables' shape", "[hd_characters]") {
     CHECK(bald.facial200 == 0);
     CHECK(bald.facial300 == 0);
 }
-
-TEST_CASE("a face's .bone file reads as bone ids and matrices", "[hd_characters]") {
-    // version 1, BIDA with two ids, BOMT with two column-major matrices.
-    std::vector<uint8_t> d = {1, 0, 0, 0, 'B', 'I', 'D', 'A', 4, 0, 0, 0, 52, 0, 60, 0,
-                              'B', 'O', 'M', 'T', 128, 0, 0, 0};
-    auto pushMatrix = [&](float tz) {
-        const float m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, tz, 1};
-        const auto* b = reinterpret_cast<const uint8_t*>(m);
-        d.insert(d.end(), b, b + sizeof(m));
-    };
-    pushMatrix(0.25f);
-    pushMatrix(-0.5f);
-    const auto adj = parseHdBoneFile(d);
-    REQUIRE(adj.size() == 2);
-    CHECK(adj[0].bone == 52);
-    CHECK(adj[1].bone == 60);
-    CHECK(adj[0].matrix[3][2] == 0.25f);
-    CHECK(adj[1].matrix[3][2] == -0.5f);
-    CHECK(parseHdBoneFile({2, 0, 0, 0}).empty());
-}

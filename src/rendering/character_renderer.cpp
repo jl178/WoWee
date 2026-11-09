@@ -3423,7 +3423,6 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
         cursors = instance.keyCursor.data();
     }
 
-    size_t adjustCursor = 0;  // into instance.boneAdjust, sorted by bone
     for (size_t i = 0; i < numBones; i++) {
         const auto& bone = model.bones[i];
 
@@ -3468,12 +3467,6 @@ void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
         }
         instance.localPose[i] = pose;
         glm::mat4 localTransform = composeBoneTransform(bone, pose);
-        // An HD face's shape: the .bone adjustment in the bone's rest frame,
-        // under whatever the animation does with it.
-        if (adjustCursor < instance.boneAdjust.size() && instance.boneAdjust[adjustCursor].first == i) {
-            localTransform = localTransform * instance.boneAdjust[adjustCursor].second;
-            ++adjustCursor;
-        }
 
         // Look twist (stock CGUnit_C 0x0073E1A5/0x0073E237): a yaw about the
         // SpineLow and Head key bones, so the chest and face turn back to the
@@ -6094,25 +6087,6 @@ void CharacterRenderer::setInstanceScale(uint32_t instanceId, float scale) {
     auto it = instances.find(instanceId);
     if (it == instances.end() || !(scale > 0.0f)) return;
     it->second.scale = scale;
-}
-
-void CharacterRenderer::setBoneAdjustments(uint32_t instanceId,
-                                           const std::vector<std::pair<uint16_t, glm::mat4>>& adjustments) {
-    auto it = instances.find(instanceId);
-    if (it == instances.end()) return;
-    auto& inst = it->second;
-    inst.boneAdjust.clear();
-    auto mit = models.find(inst.modelId);
-    if (mit == models.end()) return;
-    const auto& bones = mit->second.data.bones;
-    for (const auto& [bone, m] : adjustments) {
-        if (bone >= bones.size()) continue;
-        const glm::vec3 p = bones[bone].pivot;
-        inst.boneAdjust.emplace_back(bone, glm::translate(glm::mat4(1.0f), p) * m *
-                                           glm::translate(glm::mat4(1.0f), -p));
-    }
-    std::sort(inst.boneAdjust.begin(), inst.boneAdjust.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
 }
 
 void CharacterRenderer::setActiveGeosets(uint32_t instanceId, const std::unordered_set<uint16_t>& geosets) {

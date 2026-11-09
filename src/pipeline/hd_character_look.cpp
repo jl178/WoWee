@@ -3,7 +3,6 @@
 #include "pipeline/hd_characters.hpp"
 
 #include <algorithm>
-#include <cstring>
 #include <array>
 #include <map>
 #include <sstream>
@@ -54,11 +53,6 @@ HdCharacterLook parseHdCharacterLook(const std::string& text) {
             if (!(ls >> t.choice >> t.related >> t.target)) continue;
             std::getline(ls >> std::ws, t.path);
             if (!t.path.empty()) look.textures.push_back(std::move(t));
-        } else if (kind == "bone") {
-            HdCharacterLook::BoneFile b;
-            if (!(ls >> b.choice)) continue;
-            std::getline(ls >> std::ws, b.path);
-            if (!b.path.empty()) look.boneFiles.push_back(std::move(b));
         } else if (kind == "geo") {
             HdCharacterLook::Geoset g;
             int id = -1;
@@ -123,37 +117,6 @@ CharacterSectionTextures resolveHdCharacterTextures(const HdCharacterLook& look,
     if (auto it = byTarget.find(look.hairTarget); it != byTarget.end()) out.hair = it->second;
     out.exactFace = out.haveFace = true;
     out.haveHair = !out.hair.empty();
-    return out;
-}
-
-std::vector<HdBoneAdjustment> parseHdBoneFile(const std::vector<uint8_t>& data) {
-    std::vector<HdBoneAdjustment> out;
-    auto u32 = [&](size_t at) {
-        uint32_t v = 0;
-        std::memcpy(&v, data.data() + at, 4);
-        return v;
-    };
-    if (data.size() < 4 || u32(0) != 1) return out;
-    std::vector<uint16_t> ids;
-    size_t p = 4;
-    while (p + 8 <= data.size()) {
-        const uint32_t size = u32(p + 4);
-        const size_t body = p + 8;
-        if (body + size > data.size()) break;
-        if (std::memcmp(data.data() + p, "BIDA", 4) == 0) {
-            ids.resize(size / 2);
-            std::memcpy(ids.data(), data.data() + body, ids.size() * 2);
-        } else if (std::memcmp(data.data() + p, "BOMT", 4) == 0) {
-            const size_t n = std::min<size_t>(ids.size(), size / 64);
-            for (size_t i = 0; i < n; i++) {
-                HdBoneAdjustment a;
-                a.bone = ids[i];
-                std::memcpy(&a.matrix[0][0], data.data() + body + i * 64, 64);  // column-major
-                out.push_back(a);
-            }
-        }
-        p = body + size;
-    }
     return out;
 }
 
