@@ -329,6 +329,7 @@ inline constexpr uint32_t kBoatBob        = 1u << 1;  ///< m2.vert boat motion
 inline constexpr uint32_t kLocalLights    = 1u << 2;  ///< point lights on terrain/WMO; all lights on units
 inline constexpr uint32_t kSoftShadows    = 1u << 3;  ///< 9-tap disk instead of the stock 5-tap PCF
 inline constexpr uint32_t kSmoothLeaves   = 1u << 4;  ///< alpha-to-coverage ramp instead of the 224/255 key
+inline constexpr uint32_t kHdrLight      = 1u << 5;  ///< HDR scene: lit shaders' clamp at 1 lifted (set by the renderer)
 }  // namespace enh_bits
 
 inline uint32_t shaderBits(const Enhancements& e) {

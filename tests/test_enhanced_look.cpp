@@ -223,11 +223,25 @@ TEST_CASE("HDR tone curve: the 8-bit picture below the knee, no clip above", "[e
     }
 }
 
-TEST_CASE("HDR lighting row: on its page, off in every preset until verified", "[enhanced]") {
+TEST_CASE("HDR lighting row: on its page, in the Enhanced preset only", "[enhanced]") {
     using namespace wowee::ui;
     const EnhancementRow* row = findEnhancementRow("hdrscene");
     REQUIRE(row != nullptr);
     CHECK(std::string(row->category) == kEnhPageEnhanced);
     CHECK(row->stockValue == 0.0f);
+    CHECK(row->recommendedValue == 0.0f);
     CHECK(Enhancements{}.hdrScene == false);
+    CHECK(kGraphicsPresets[kEnhancedPresetIndex].enh.hdrScene);
+    for (int i = 0; i < kClassicPresetIndex; ++i) CHECK_FALSE(kGraphicsPresets[i].enh.hdrScene);
+}
+
+TEST_CASE("HDR sun: brighter by day only", "[enhanced]") {
+    namespace tm = enhanced_tonemap;
+    // Sun below the horizon (its light travels upward): Light.dbc's own.
+    CHECK(tm::sunLightScale(0.3f, tm::kSunLight) == 1.0f);
+    CHECK(tm::sunLightScale(0.0f, tm::kSunLight) == 1.0f);
+    // High sun: the full gain, which stays modest.
+    CHECK(tm::sunLightScale(-0.9f, tm::kSunLight) == Catch::Approx(tm::kSunLight));
+    CHECK(tm::kSunLight >= 1.0f);
+    CHECK(tm::kSunLight <= 1.5f);  // Enhanced's F052 tops out at 1.5
 }

@@ -677,6 +677,17 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.lightDir = glm::vec4(lp.directionalDir, unitIndoorAmbient.r);
         currentFrameData.lightColor = glm::vec4(lp.diffuseColor, unitIndoorAmbient.g);
         currentFrameData.ambientColor = glm::vec4(lp.ambientColor, unitIndoorAmbient.b);
+        // The HDR scene's sun is brighter by day (enhanced_tonemap::kSunLight,
+        // Enhanced's F052), on everything the sun lights; the tone map takes
+        // what passes 1. Nothing at night, nothing without the HDR scene.
+        // The stock light itself stays 20-37 degrees up all night, so the
+        // sun sprite's height (sunDir, toward the sun) says whether it is day.
+        if (vkCtx && vkCtx->isHdrScene()) {
+            const float g = enhanced_tonemap::sunLightScale(-lp.sunDir.z,
+                                                           enhanced_tonemap::tuning().sunLight);
+            currentFrameData.lightColor = glm::vec4(glm::vec3(currentFrameData.lightColor) * g,
+                                                    currentFrameData.lightColor.w);
+        }
         currentFrameData.fogColor = glm::vec4(lp.fogColor, 1.0f);
         currentFrameData.fogParams.x = lp.fogStart;
         currentFrameData.fogParams.y = lp.fogEnd;
@@ -755,9 +766,12 @@ void Renderer::updatePerFrameUBO() {
     const float fogExponent =
         lightingManager ? lightingManager->getLightingParams().fogExponent : 1.0f;
     // z: the enhancement switches the world shaders branch on (enh_bits).
+    // The HDR scene's lifted light clamp goes with the target actually being
+    // in RGBA16F, not with the row alone (it stands down under FSR).
+    const uint32_t hdrLightBit = vkCtx && vkCtx->isHdrScene() ? enh_bits::kHdrLight : 0u;
     currentFrameData.localLightMeta = glm::ivec4(static_cast<int32_t>(localLightCount),
                                                  std::bit_cast<int32_t>(fogExponent),
-                                                 static_cast<int32_t>(shaderBits(enh_)), 0);
+                                                 static_cast<int32_t>(shaderBits(enh_) | hdrLightBit), 0);
     buildLocalLightTiles(localLightCount);
 
     if (rtLighting_) {

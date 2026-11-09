@@ -47,10 +47,16 @@ inline float toScene(float d, float knee = kKnee) {
 /// The sun's disc and glare, drawn additive over the dome, at this many
 /// times their stock colour: in the 8-bit scene they clipped to a flat disc
 /// at about 1, here they carry the brightness the bloom spreads.
-inline constexpr float kSunGain = 2.0f;
+inline constexpr float kSunGain = 2.5f;
+
+/// The sun's light on the world by day, as a multiple of Light.dbc's:
+/// Enhanced's LightData F052 (1.0 at night, 1.35-1.5 by day) has the shape
+/// of a sun intensity in its linear pipeline. Scaled in by the sun's height
+/// so the night keeps Light.dbc's moonlight.
+inline constexpr float kSunLight = 1.25f;
 
 /// The share of the light above 1 the bloom adds back (times the Bloom row).
-inline constexpr float kHdrBloom = 0.5f;
+inline constexpr float kHdrBloom = 0.75f;
 
 /// The Enhanced haze's light is capped at 1.3 in the 8-bit scene, where more
 /// only blew the sky out; under the tone curve it may reach this
@@ -58,26 +64,38 @@ inline constexpr float kHdrBloom = 0.5f;
 inline constexpr float kHazeCap = 3.0f;
 
 /// The values in use: the constants above, or for tuning side by side
-/// WOWEE_HDR_TUNE="knee,bloom,sunGain" (read once; any left out keep
-/// their constant). The haze cap is the shader's own (enhanced_haze.frag).
+/// WOWEE_HDR_TUNE="knee,bloom,sunGain,sunLight" (read once; any left
+/// out keep their constant). The haze cap is the shader's own (enhanced_haze.frag).
 struct Tuning {
     float knee = kKnee;
     float hdrBloom = kHdrBloom;
     float sunGain = kSunGain;
+    float sunLight = kSunLight;
 };
 inline const Tuning& tuning() {
     static const Tuning t = [] {
         Tuning r;
         if (const char* e = std::getenv("WOWEE_HDR_TUNE"); e && *e) {
-            float v[3] = {r.knee, r.hdrBloom, r.sunGain};
-            std::sscanf(e, "%f,%f,%f", &v[0], &v[1], &v[2]);
+            float v[4] = {r.knee, r.hdrBloom, r.sunGain, r.sunLight};
+            std::sscanf(e, "%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3]);
             r.knee = v[0] < 0.0f ? 0.0f : (v[0] > 0.95f ? 0.95f : v[0]);
             r.hdrBloom = v[1];
             r.sunGain = v[2];
+            r.sunLight = v[3];
         }
         return r;
     }();
     return t;
+}
+
+/// kSunLight's multiplier for a sun whose light travels with z `travelZ`
+/// (minus the z of the direction toward the sun sprite; negative by day): 1
+/// with the sun down, the full gain once it is 9 degrees up.
+inline float sunLightScale(float travelZ, float gain) {
+    float t = (-travelZ) / 0.15f;
+    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    t = t * t * (3.0f - 2.0f * t);
+    return 1.0f + (gain - 1.0f) * t;
 }
 
 }  // namespace enhanced_tonemap

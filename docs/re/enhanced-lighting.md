@@ -553,9 +553,8 @@ What still separates the two pictures, largest first:
 2. Light toward the sun. The haze and stronger shafts now give the golden
    glow looking into an afternoon sun, but Enhanced's shafts through the
    canopy are crisper and longer (its fog is shadowed by the cascades
-   across the whole depth, Wowee's only in the first 400 yd), and its
-   linear HDR sun (F052 up to 1.5) lets highlights glow without the
-   orange clipping an 8-bit target gives.
+   across the whole depth, Wowee's only in the first 400 yd). Its linear
+   HDR sun is now approximated by the HDR lighting row (9b).
 3. Ground cover. Enhanced's clutter (same placement data, its own models,
    groundEffectDist 200) is denser and taller than Wowee's at 150%.
 4. Per-zone light keyframes: ported for 198 of 209 lights (section 2b);
@@ -565,40 +564,69 @@ What still separates the two pictures, largest first:
    what is left is the light data's own fog, which in 3.3.5 ends short of
    1900 in most zones (Enhanced's own keyframes, section 2b, are thinner).
 
-## 9b. An HDR/linear path - scoped, not built
+## 9b. The HDR/linear path ("HDR lighting (the reference client)")
 
-What it would take, from reading the pipeline (`post_process_pipeline.cpp`,
-`vk_context.cpp`):
+Built as one row (`hdrScene`, Enhanced page, on in the Enhanced preset only),
+in four steps, each with the row off drawing exactly what it drew before:
 
-1. Scene targets in RGBA16F instead of the swapchain's B8G8R8A8_UNORM
-   (`initFXAAResources`, the FSR targets): about 2x the colour memory, and
-   every pipeline built against those render passes rebuilt. MSAA resolve
-   and the depth copies are unaffected.
-2. A tone-map step at the end of the composite (`fxaa.frag`) - the only
-   place that writes the swapchain - before the grade, which then sees the
-   same 0..1 picture it does now.
-3. Light in linear units in the lit shaders: today terrain, WMO, M2 and
-   character shaders clamp ambient + diffuse at 1 per channel as stock does
-   (`stock_light::terrainLight`), and their colours are display-encoded.
-   With the Enhanced toggles on, the clamp would lift and the sun take
-   Enhanced's F052 intensity (1.35-1.5 by day); with them off the shaders
-   would write exactly what they write now, so stock stays untouched. Each
-   of the four shader families needs that branch, plus the sky, clouds,
-   water and particles to agree on the scale.
-4. Bloom and the haze reading the unclamped values, so a highlight glows by
-   how bright it is rather than by how close to white.
+1. **The scene in RGBA16F** (`VkContext::getSceneColorFormat`). Every pass
+   the scene pipelines draw in is made in the scene's format: the scene pass
+   with and without MSAA, its continuation, the MSAA colour image, the 1x
+   water pass, the water's refraction copy and reflection target, the
+   post-process scene image and the glow's boxed-down copy, and a
+   scene-format overlay pass for the full-screen passes over the finished
+   scene (ambient occlusion, haze, contact shadows, late particles, the late
+   minimap). The switch rides the anti-aliasing rebuild
+   (`Renderer::decideHdrScene` -> `applyMsaaChange`), which already remakes
+   the swapchain, every render pass and every scene pipeline. With it on
+   there are no swapchain scene framebuffers: the scene always goes through
+   the post-process pass. It stands down under FSR 1/2 (their targets stay
+   8-bit) and for the session if RGBA16F cannot be drawn and blitted or the
+   off-screen target cannot be made.
+2. **A tone map in the final composite** (`fxaa.frag`, `enhanced_tonemap.hpp`),
+   ahead of the grade: the identity up to a knee at 0.8 - everything the
+   8-bit scene showed below it is shown as before - and above it Reinhard on
+   the excess, `k + d h / (h + d)` (d = x - k, h = 1 - k), slope 1 at the
+   knee and 1 never reached, per channel, so a hot highlight eases toward
+   white instead of clipping flat. It runs at every tap, so FXAA, the stock
+   glow and the grade work on the displayed picture as before. What the glow
+   and bloom add goes on in the scene's light and the sum is mapped once; the
+   bloom also spreads the light above 1 (x0.75 of the Bloom row). The sun's
+   disc and glare draw at 2.5x and the haze's light may reach 3 (1.3 in the
+   8-bit scene).
+3. **Cost** (Iris Xe, 1280x540, Goldshire 15:24, row off and on in turn,
+   five 10 s windows each): the final composite +0.49 ms (1.93 -> 2.42), the
+   scene pass +0.43 ms (the 16F writes), the frame's GPU time 15.2 -> 16.3
+   ms. The first version of the curve cost the composite 1.45 ms, two thirds
+   of it a select at every tap; written as one division, with FXAA's edge
+   taps mapping the luma alone and the glow blurs mapping their sum once, it
+   is a third of that. At 2560x1080 (4x the pixels) about +2 ms composite and
+   +1.7 ms scene pass. RGBA16F is twice the scene colour memory; R11G11B10
+   would halve the bandwidth but band in the sky (6-bit mantissas).
+4. **Linear light in the lit shaders.** With the HDR scene the renderer sets
+   `enh_bits::kHdrLight` in `localLightMeta.z`, and terrain, WMO (outdoor
+   mode only), M2 and character shaders lift their clamp of ambient +
+   diffuse at 1: where sun and sky together pass 1 in a channel the light no
+   longer stops there, leaning the hue toward the other channels (the
+   yellow-green cast of 3.3.5's noon ground) - it keeps its hue and goes to
+   the tone map. The sun's light is 1.25x Light.dbc's by day
+   (`kSunLight`, Enhanced's F052 is 1.35-1.5), eased in by the sun sprite's
+   height so the night keeps its moonlight.
 
-Roughly: a day for 1-2 and the bloom, several for 3 across every shader
-family, then a tuning pass against Enhanced. The 16F target costs bandwidth
-on the laptop's integrated GPU (an estimated 0.5-1 ms at 2560x1080; not
-measured). It is the change that would close most of gap 2 below.
+Side by side (Goldshire 08:00-22:30, rain, Crystal Lake above and under the
+water, Stormwind harbour, MSAA 4x; `hdr/lab/final_sheet.png` in the session
+scratchpad): by day the picture is 8-10% brighter and warmer, sunlit dirt
+ochre rather than yellow-green, the sky round the sun a gradient instead of
+a clipped white disc, pixels at 250+ down from 0.2-3.6% of the frame to
+0.03-3.2%; night within 2%, rain 6% brighter. `WOWEE_HDR_TUNE="knee,bloom,
+sunGain,sunLight"` overrides the four for tuning.
 
 ## 10. Not done, and why
 
 - Enhanced's ZoneLight polygons (section 2b), and its keyframes for the 11
   3.3.5 lights with no Enhanced match. The keyframe table itself is generated
   locally (section 2b), never committed.
-- Linear lighting with HDR intensities (F052) and a tone curve: Wowee's
-  scene target is 8-bit UNORM and its lit shaders clamp ambient + diffuse at
-  1 as stock does; going linear is a pipeline change, not a toggle.
+- Fully linear colour: the HDR row (9b) keeps 3.3.5's display-encoded
+  textures and Light.dbc colours and lifts only the clamp; textures are not
+  decoded to linear, and the tone curve is the identity below its knee.
 - Probe GI (section 6), the layered global fog constants (section 5).

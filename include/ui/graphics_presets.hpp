@@ -116,6 +116,11 @@ constexpr rendering::Enhancements enhancedEnhancements() {
     // Enhanced's distance: full detail to its 1900-yard horizonStart (the
     // view distance below), the far field to its 7000-yard horizonClip.
     e.farField = true;
+    // Enhanced's linear HDR light (its `linear` CVar, RGBA16F): the scene in
+    // 16-bit float, tone mapped, the sun 1.25x by day and the lit shaders'
+    // clamp at 1 lifted, so sunlit faces keep their hue and highlights glow
+    // instead of clipping (enhanced_tonemap.hpp; ~+1 ms GPU at 1280x540).
+    e.hdrScene = true;
     // Enhanced's ground is covered where 3.3.5's shows bare texture between
     // tufts. Its clutter data is 1.12's; the cover comes from its settings
     // (groundEffectDist 200) and models. Wowee's grass field stands in for

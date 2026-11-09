@@ -375,6 +375,7 @@ void main() {
     vec3 skyAmbient = rtAmbient(rt, ambientColor.rgb);
     vec3 mohdAmbient = vec3(wmoAmbientR, wmoAmbientG, wmoAmbientB);
 
+    bool hdrLight = (localLightMeta.z & 32) != 0;
     vec3 passA, passB = vec3(0.0);
     for (int pass = 0; pass < 2; ++pass) {
         int mode = pass == 0 ? lightModeA : lightModeB;
@@ -385,7 +386,11 @@ void main() {
         } else {
             vec3 L;
             if (mode == 1) {
-                L = clamp(skyAmbient + lightColor.rgb * nDotL, 0.0, 1.0);
+                // Outdoor light, lifted with the HDR scene (bit 32) as the
+                // terrain's; the doubled colour below is then left unclamped
+                // too, for this mode only.
+                L = max(skyAmbient + lightColor.rgb * nDotL, 0.0);
+                if (!hdrLight) L = min(L, vec3(1.0));
             } else if (mode == 2) {
                 vec3 mean = (lightColor.rgb + ambientColor.rgb) * 0.5;
                 L = clamp(min(mean + 16.0 / 255.0, vec3(1.0)) + mean * nDotL, 0.0, 1.0);
@@ -393,7 +398,7 @@ void main() {
                 L = clamp(mohdAmbient, 0.0, 1.0);
             }
             c = unified ? 2.0 * clamp(L * (127.0 / 255.0) + C + e * 0.5, 0.0, 1.0)
-                        : 2.0 * clamp(C * L + e * 0.5, 0.0, 1.0);
+                        : 2.0 * clamp(C * L + e * 0.5, 0.0, (hdrLight && mode == 1) ? 65504.0 : 1.0);
         }
         // The shadow-map programs scale the whole colour, lit or not.
         if (pass == 0) c *= shadow;

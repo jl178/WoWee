@@ -427,7 +427,9 @@ void main() {
         // Clamped at one per channel, as the stock vertex shaders clamp
         // ambient + diffuse * N.L before the texture (shaders/vertex/arbvp1/
         // diffuse_t1.bls: MIN R0, R0, 1).
-        vec3 light = min(ambientTerm + shadow * diff * sunColor, vec3(1.0));
+        // Lifted with the HDR scene (bit 32), as the terrain's.
+        vec3 light = ambientTerm + shadow * diff * sunColor;
+        if ((localLightMeta.z & 32) == 0) light = min(light, vec3(1.0));
         result = light * albedo + shadow * spec * sunColor;
         // No leaf glow (sss unused): stock foliage is lit like any other M2.
 

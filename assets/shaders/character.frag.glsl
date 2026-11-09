@@ -505,9 +505,11 @@ void main() {
         }
         vec3 lit = mix(outLit, inLit, indoor);
         lit += unitPointLights(FragPos, norm);
-        lit = clamp(lit, 0.0, 1.0);
+        // Lifted with the HDR scene (bit 32), as the terrain's.
+        float litMax = (localLightMeta.z & 32) != 0 ? 65504.0 : 1.0;
+        lit = clamp(lit, 0.0, litMax);
         // The highlight is the world unit ambient, added as emissive.
-        lit = clamp(lit + highlight * ambientColor.rgb, 0.0, 1.0);
+        lit = clamp(lit + highlight * ambientColor.rgb, 0.0, litMax);
         result = cmb.mul * lit;
     }
     result += cmb.add;

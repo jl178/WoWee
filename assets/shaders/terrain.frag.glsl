@@ -337,7 +337,11 @@ void main() {
     // shaded twice, and ground beyond its reach keeps the baked shadow.
     shadow = min(shadow, texture(uBakedShadow, LayerUV).r);
 
-    vec3 light = min(rtAmbient(rt, ambientColor.rgb) + diff * lightColor.rgb, vec3(1.0));
+    // With the HDR scene (localLightMeta.z bit 32) the clamp lifts: a face
+    // the sun and the sky together light past one keeps its hue and goes to
+    // the tone map, instead of stopping flat in the brightest channel.
+    vec3 light = rtAmbient(rt, ambientColor.rgb) + diff * lightColor.rgb;
+    if ((localLightMeta.z & 32) == 0) light = min(light, vec3(1.0));
     vec3 lit = light * VertColor;
     vec3 result = lit * finalColor.rgb;
     if (chunkMode.y != 0) {
