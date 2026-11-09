@@ -53,6 +53,10 @@ layout(push_constant) uniform PC {
 // FFXBox4 target the glow and the ghost world blur from.
 layout(set = 0, binding = 1) uniform sampler2D uGlow;
 
+float luma(vec3 c) {
+    return dot(c, vec3(0.299, 0.587, 0.114));
+}
+
 // The scene as the rest of this pass reads it. The 8-bit scene arrives
 // already clamped to 0..1 by its target. The HDR scene (RGBA16F, the "HDR
 // lighting" row) holds whatever the shaders wrote, light above 1 included,
@@ -68,12 +72,24 @@ layout(set = 0, binding = 1) uniform sampler2D uGlow;
 // reached, so a highlight keeps its hue and gradient instead of clipping.
 // Per channel: the brightest channel saturates first and a hot highlight
 // bleaches toward white, as film and Enhanced's sun do.
+//
+// k + (1 - k) u / (1 + u) with u = (x - k) / (1 - k) is k + d h / (h + d),
+// d = x - k and h = 1 - k: written that way it is one division and no
+// select, which matters - this runs at every one of the pass's taps, and
+// the select form cost about a millisecond at 1280x540 on Iris Xe.
 vec3 hdrToDisplay(vec3 c) {
     c = max(c, vec3(0.0));             // also NaN -> 0 (max returns the non-NaN)
     float k = pc.toneKnee;
-    vec3 u = max(c - k, 0.0) / (1.0 - k);
-    vec3 shoulder = k + (1.0 - k) * u / (1.0 + u);
-    return mix(c, shoulder, greaterThan(c, vec3(k)));
+    float h = 1.0 - k;
+    vec3 d = max(c - k, vec3(0.0));
+    return min(c, vec3(k)) + d * h / (h + d);
+}
+float hdrToDisplay(float c) {
+    c = max(c, 0.0);
+    float k = pc.toneKnee;
+    float h = 1.0 - k;
+    float d = max(c - k, 0.0);
+    return min(c, k) + d * h / (h + d);
 }
 // Its inverse on 0..1 (1 itself is out of reach and held just under it).
 vec3 displayToHdr(vec3 d) {
@@ -87,11 +103,21 @@ vec3 sceneAt(vec2 uv) {
     vec3 c = texture(uScene, uv).rgb;
     return pc.hdr > 0.5 ? hdrToDisplay(c) : c;
 }
+// FXAA's edge taps want only the luma: the tone curve on the luma alone,
+// a third of the work, close enough for finding edges.
+float lumaAt(vec2 uv) {
+    float l = luma(texture(uScene, uv).rgb);
+    return pc.hdr > 0.5 ? hdrToDisplay(l) : l;
+}
 // The quarter-size scene, as the glow and the nether blur read it
 // (displayed), and as the bloom reads it (in the scene's own light).
 vec3 glowAt(vec2 uv) {
-    vec3 c = textureLod(uGlow, uv, 1.0).rgb;
-    return pc.hdr > 0.5 ? hdrToDisplay(c) : c;
+    return textureLod(uGlow, uv, 1.0).rgb;
+}
+// A blur of the quarter-size scene, displayed: the HDR one is summed in the
+// scene's light and mapped once, not tap by tap.
+vec3 blurToDisplay(vec3 sum) {
+    return pc.hdr > 0.5 ? hdrToDisplay(sum) : sum;
 }
 vec3 glowLinearAt(vec2 uv) {
     vec3 c = textureLod(uGlow, uv, 1.0).rgb;
@@ -111,9 +137,6 @@ vec3 glowLinearAt(vec2 uv) {
 const float kSearchStep[FXAA_SEARCH_STEPS] =
     float[](1.0, 1.5, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 4.0, 8.0);
 
-float luma(vec3 c) {
-    return dot(c, vec3(0.299, 0.587, 0.114));
-}
 
 // The stock blur (FFXGauss4 across then down, on the quarter-size scene):
 // four bilinear taps a side at -2.5, -0.5, +0.5, +2.5 quarter texels,
@@ -131,7 +154,7 @@ vec3 stockBlur(vec2 uv) {
                    glowAt(uv + vec2(offs[x], offs[y]) * texel);
         }
     }
-    return sum;
+    return blurToDisplay(sum);
 }
 
 // The glow wave's map (PassGlow.cpp 0x8c2920, "PassGlowWave", 128 x 128):
@@ -167,7 +190,7 @@ vec3 netherBlur(vec2 uv) {
         float a = pc.effectTime * (0.7 + 0.3 * float(i)) + 1.5707963 * float(i);
         sum += glowAt(uv + vec2(cos(a), sin(a)) * 1.5 * texel);
     }
-    return sum * 0.25;
+    return blurToDisplay(sum * 0.25);
 }
 
 // ffxnethercombine with c0 = (0.6, 0.6, 0.78, fade) (0xaf4940, 0x7e8c80).
@@ -339,10 +362,10 @@ void main() {
 
     // --- Cardinal neighbours: is there an edge here at all ---
     float lumaM = luma(rgbM);
-    float lumaN = luma(sceneAt(uv + vec2( 0.0, -1.0) * rcp));
-    float lumaS = luma(sceneAt(uv + vec2( 0.0,  1.0) * rcp));
-    float lumaE = luma(sceneAt(uv + vec2( 1.0,  0.0) * rcp));
-    float lumaW = luma(sceneAt(uv + vec2(-1.0,  0.0) * rcp));
+    float lumaN = lumaAt(uv + vec2( 0.0, -1.0) * rcp);
+    float lumaS = lumaAt(uv + vec2( 0.0,  1.0) * rcp);
+    float lumaE = lumaAt(uv + vec2( 1.0,  0.0) * rcp);
+    float lumaW = lumaAt(uv + vec2(-1.0,  0.0) * rcp);
 
     float rangeMax = max(lumaM, max(max(lumaN, lumaS), max(lumaE, lumaW)));
     float rangeMin = min(lumaM, min(min(lumaN, lumaS), min(lumaE, lumaW)));
@@ -353,10 +376,10 @@ void main() {
         return;
     }
 
-    float lumaNW = luma(sceneAt(uv + vec2(-1.0, -1.0) * rcp));
-    float lumaNE = luma(sceneAt(uv + vec2( 1.0, -1.0) * rcp));
-    float lumaSW = luma(sceneAt(uv + vec2(-1.0,  1.0) * rcp));
-    float lumaSE = luma(sceneAt(uv + vec2( 1.0,  1.0) * rcp));
+    float lumaNW = lumaAt(uv + vec2(-1.0, -1.0) * rcp);
+    float lumaNE = lumaAt(uv + vec2( 1.0, -1.0) * rcp);
+    float lumaSW = lumaAt(uv + vec2(-1.0,  1.0) * rcp);
+    float lumaSE = lumaAt(uv + vec2( 1.0,  1.0) * rcp);
 
     float lumaNS   = lumaN + lumaS;
     float lumaWE   = lumaW + lumaE;
@@ -406,15 +429,15 @@ void main() {
 
     vec2  posN = posB - offNP * kSearchStep[0];
     vec2  posP = posB + offNP * kSearchStep[0];
-    float lumaEndN = luma(sceneAt(posN)) - lumaMid;
-    float lumaEndP = luma(sceneAt(posP)) - lumaMid;
+    float lumaEndN = lumaAt(posN) - lumaMid;
+    float lumaEndP = lumaAt(posP) - lumaMid;
     bool  doneN = abs(lumaEndN) >= gradientScaled;
     bool  doneP = abs(lumaEndP) >= gradientScaled;
     if (!doneN) posN -= offNP * kSearchStep[1];
     if (!doneP) posP += offNP * kSearchStep[1];
     for (int i = 2; i < FXAA_SEARCH_STEPS && !(doneN && doneP); ++i) {
-        if (!doneN) lumaEndN = luma(sceneAt(posN)) - lumaMid;
-        if (!doneP) lumaEndP = luma(sceneAt(posP)) - lumaMid;
+        if (!doneN) lumaEndN = lumaAt(posN) - lumaMid;
+        if (!doneP) lumaEndP = lumaAt(posP) - lumaMid;
         doneN = doneN || abs(lumaEndN) >= gradientScaled;
         doneP = doneP || abs(lumaEndP) >= gradientScaled;
         if (!doneN) posN -= offNP * kSearchStep[i];
