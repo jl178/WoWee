@@ -4281,6 +4281,11 @@ int lua_Frame_SetFrameLevel(lua_State* L) {
     if (tree && id) tree->shiftExplicitLevels(id, wanted - w->effLevel);
     w->level = wanted;
     w->levelExplicit = true;
+    // Under the parent only when asked for in so many words; see
+    // Widget::levelBelowParent.
+    const auto* parent = (tree && w->parent) ? tree->get(w->parent) : nullptr;
+    w->levelBelowParent = parent && wanted < parent->effLevel;
+    w->effLevel = wanted;
     return 0;
 }
 int lua_FontString_SetText(lua_State* L) {

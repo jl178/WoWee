@@ -256,6 +256,13 @@ struct Widget {
     bool strataExplicit = false;
     int level = 0;
     bool levelExplicit = false;
+    /// SetFrameLevel asked for a level below the parent's. The client keeps
+    /// that: a frame's level is its own number, not one relative to its
+    /// parent, and a child put under its parent draws under the parent's
+    /// regions. Backdrop frames are made that way (a child at the parent's
+    /// level minus one, holding the border and fill the parent's art sits
+    /// on), so the floor the layout keeps under children does not apply.
+    bool levelBelowParent = false;
     DrawLayer layer = DrawLayer::Artwork;
     int subLevel = 0;
 
@@ -750,6 +757,10 @@ struct Widget {
     /// animation system.
     bool  visibleChain = false;
     bool  visible = false;      ///< visibleChain, and anchored somewhere
+    /// Whether this widget has somewhere to be (WidgetTree::hasPlacement),
+    /// memoised for the layout generation placementPass.
+    bool  placementOk = false;
+    uint64_t placementPass = 0;
     bool  visibilityDirty = false;  ///< on WidgetTree's list for the visibility pass
     /// This widget is off the chain and so is everything under it, because
     /// markSubtreeHidden walked it. Only markSubtreeHidden sets it; going back
@@ -1313,6 +1324,14 @@ private:
     /// The same, without descending into the children. What a single-widget
     /// resolve needs, and the body of the recursive one.
     void layoutWidgetSelf(uint32_t id, float screenW, float screenH);
+    /// Whether a widget has a place on screen: the screen and UIParent do; a
+    /// widget with anchors does when everything it is anchored to does; an
+    /// unanchored region fills its parent, so has one when the parent does;
+    /// an unanchored frame has none. This is what decides whether it can be
+    /// drawn - not whether its parent can. A frame that was never given a
+    /// point (ElvUF_Parent, a container made to hold others) draws nothing
+    /// itself, and its children anchored elsewhere draw as normal.
+    bool hasPlacement(uint32_t id, int depth = 0);
     /// Resolve a widget after whatever its rect is measured from.
     void resolveChain(uint32_t id, float screenW, float screenH, int& depth);
 

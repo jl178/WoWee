@@ -294,6 +294,25 @@ void WidgetTree::setParent(uint32_t id, uint32_t newParent) {
     }
     w->parent = newParent;
     get(newParent)->children.push_back(id);
+    // The client puts a reparented frame in its new parent's strata, one
+    // level above it, and moves everything inside it by the same amount
+    // (CSimpleFrame::SetParent, 0x004911B0: SetFrameStrata(parent's), then
+    // SetFrameLevel(parent's + 1) with its children shifted) - so whatever
+    // the frame holds keeps its place relative to it. A backdrop frame made
+    // one level under a button stays under it when the button moves to a bar
+    // at another level, instead of keeping its old number and coming out on
+    // top of the button's art.
+    {
+        const int newLevel = get(newParent)->effLevel + 1;
+        // Shifted while the frame and its children still agree on a strata.
+        shiftExplicitLevels(id, newLevel - w->effLevel);
+        w->strataExplicit = false;
+        w->effStrata = get(newParent)->effStrata;
+        w->level = newLevel;
+        w->levelExplicit = false;
+        w->levelBelowParent = false;
+        w->effLevel = newLevel;
+    }
     // The new parent's subtree is no longer known to be off: this widget may
     // be on. Cleared up the chain so the full pass descends to it from
     // whichever ancestor it reaches first.
@@ -699,10 +718,14 @@ void WidgetTree::shiftExplicitLevels(uint32_t id, int delta) {
     if (!w) return;
     // A copy, because get() invalidates nothing but the recursion below may.
     const std::vector<uint32_t> kids = w->children;
+    // Only children in the frame's own strata move, and through them their
+    // own children (CSimpleFrame::SetFrameLevel, 0x004910A0, calls itself on
+    // each child whose strata matches); a child put in another strata keeps
+    // its number, as does everything inside it.
     for (uint32_t child : kids) {
-        if (Widget* c = get(child)) {
-            if (c->levelExplicit) c->level += delta;
-        }
+        Widget* c = get(child);
+        if (!c || c->effStrata != w->effStrata) continue;
+        if (c->levelExplicit) c->level += delta;
         shiftExplicitLevels(child, delta);
     }
 }
@@ -1124,6 +1147,43 @@ void WidgetTree::layoutWidget(uint32_t id, float screenW, float screenH) {
     }
 }
 
+bool WidgetTree::hasPlacement(uint32_t id, int depth) {
+    if (id == rootId_ || id == uiParentId_) return true;
+    Widget* w = node(id);
+    if (!w || depth > 48) return false;
+    const uint64_t pass = layoutGeneration_;
+    if (w->placementPass == pass) return w->placementOk;
+    // Claimed first, so a cycle of anchors ends here as "nowhere".
+    w->placementPass = pass;
+    w->placementOk = false;
+    bool ok = false;
+    if (!w->anchors.empty()) {
+        ok = true;
+        const uint32_t parent = w->parent;
+        // Copied: a lookup further down may move the container.
+        std::vector<uint32_t> targets;
+        targets.reserve(w->anchors.size());
+        for (const Anchor& a : w->anchors) targets.push_back(a.relativeTo != 0 ? a.relativeTo : parent);
+        for (const uint32_t t : targets) {
+            if (t == id || !hasPlacement(t, depth + 1)) { ok = false; break; }
+        }
+    } else {
+        // An unanchored region fills its parent; so does a scroll child,
+        // which its scroll frame places; and a status bar's fill and a
+        // slider's grip are placed by their bar. An unanchored frame has no
+        // place of its own.
+        const Widget* parent = node(w->parent);
+        const bool placedByParent =
+            w->kind != WidgetKind::Frame || w->fillOfBar != 0 ||
+            (parent && parent->isScrollFrame && parent->scrollChild == id) ||
+            (parent && parent->isSlider && parent->thumbRegion == id);
+        ok = placedByParent && hasPlacement(w->parent, depth + 1);
+    }
+    w = node(id);
+    if (w) w->placementOk = ok;
+    return ok;
+}
+
 void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     Widget* w = node(id);
     if (!w) return;
@@ -1163,12 +1223,15 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     // is already re-derived on demand by resolveWidget when something asks
     // for it - so if most of these are hidden, not walking them is the fix.
     if (w->visibleChain) ++visibleThisPass_;
-    // Drawing inherits from the parent's *drawing*, not from the chain: an
-    // anchored child of an unanchored frame has nowhere to be either, because
-    // the thing it is anchored to has no position. Deriving this from the
-    // chain instead put those children back on screen.
+    // Drawn when the chain is shown and the widget has somewhere to be. Not
+    // inherited from the parent's drawing: an anchored child of an unanchored
+    // frame has nowhere to be when it is anchored to that frame (its own
+    // placement says so), but one anchored elsewhere does - ElvUI puts all of
+    // its unit frames under a container that is never given a point, and
+    // inheriting the container's "not drawn" hid every one of them.
     {
-        const bool nowVisible = w->shown && (!parent || parent->visible) && !unanchoredFrame;
+        (void)unanchoredFrame;
+        const bool nowVisible = w->visibleChain && hasPlacement(id);
         if (nowVisible != w->visible) noteVisibilityCandidate(id);
         setVisible(*w, nowVisible);
     }
@@ -1209,7 +1272,10 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
     //
     // Ties are settled by creation order, so a backdrop declared before the
     // buttons still sits behind them once all three are on the same level.
-    if (parent && w->effLevel < parent->effLevel) {
+    // A level set below the parent on purpose is the exception: see
+    // Widget::levelBelowParent.
+    if (parent && w->effLevel < parent->effLevel &&
+        !(w->levelExplicit && w->levelBelowParent)) {
         w->effLevel = parent->effLevel + 1;
     }
     // Multiplied down the chain, so scaling a window scales everything in it.
@@ -1627,6 +1693,9 @@ void WidgetTree::collectDrawOrder() {
             // The world map's quest areas, which the frame paints itself
             // (WidgetRenderer::drawQuestBlobs) the way CGQuestPOIFrame does.
             w.name != "WorldMapBlobFrame" &&
+            // The minimap paints its map, in its own place among the frames
+            // (minimap_layer.hpp).
+            w.objectType != "Minimap" &&
             !playsItemPushModel(w)) return;
         // The item animation's model frame has no size of its own - its XML
         // gives one anchor and no <Size> - and the quad is placed from the
