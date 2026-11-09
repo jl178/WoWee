@@ -1,6 +1,6 @@
 #version 450
 
-#define MAX_BONES 256u  // must match CharacterRenderer::MAX_BONES
+#define MAX_BONES 240u  // must match CharacterRenderer::MAX_BONES
 
 // Shares ShadowPush with the other shadow passes: one combined matrix, and a
 // sway slot a character has no use for.

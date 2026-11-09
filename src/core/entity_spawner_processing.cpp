@@ -1,5 +1,4 @@
 #include "core/entity_spawner.hpp"
-#include "pipeline/hd_characters.hpp"
 #include "core/frame_work_budget.hpp"
 #include "core/hitch_legacy.hpp"
 #include "core/helm_visual.hpp"
@@ -808,16 +807,16 @@ void EntitySpawner::processPlayerSpawnQueue() {
 
         // The model, when nobody has it: not uploaded, not kept parsed, and
         // no job already parsing it.
-        const std::string modelPath = playerModelPathFor(s.raceId, s.genderId);
-        const uint32_t key = playerModelKey(s.raceId, s.genderId,
-                                            pipeline::isHdCharacterModelPath(modelPath));
+        const uint32_t key = (static_cast<uint32_t>(s.raceId) << 8) | static_cast<uint32_t>(s.genderId & 0xFF);
         std::string m2Path;
         {
             auto itCache = playerModelCache_.find(key);
             const bool resident = itCache != playerModelCache_.end() && charRenderer &&
                                   charRenderer->getModelData(itCache->second);
             if (!resident && !playerParsedModels_.count(key) && !playerModelLoadsInFlight_.count(key)) {
-                m2Path = modelPath;
+                m2Path = game::getPlayerModelPath(static_cast<game::Race>(s.raceId),
+                                                  s.genderId == 1 ? game::Gender::FEMALE
+                                                                  : game::Gender::MALE);
                 if (!m2Path.empty()) {
                     job.modelKey = key;
                     playerModelLoadsInFlight_.insert(key);

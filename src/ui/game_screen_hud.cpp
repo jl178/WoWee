@@ -182,7 +182,6 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
         else if (g == 2) gq.facial200 = v;
         else if (g == 3) gq.facial300 = v;
         else if (g == 17) gq.facial1700 = v;
-        else if (g > 20) gq.extra.push_back(id);  // an HD model's own groups
     }
     for (int s = 0; s < game::Inventory::NUM_EQUIP_SLOTS; s++) {
         const auto& slot = inventory.getEquipSlot(static_cast<game::EquipSlot>(s));

@@ -61,7 +61,6 @@ bool AssetManager::initialize(const std::string& dataPath_) {
 
     dataPath = dataPath_;
     overridePath_ = dataPath + "/override";
-    setHdCharactersPath();
     LOG_INFO("Initializing asset manager with data path: ", dataPath);
 
     setupFileCacheBudget();
@@ -105,7 +104,6 @@ bool AssetManager::switchDataPath(const std::string& newDataPath) {
     baseFallbackDataPath_.clear();
     dataPath = newDataPath;
     overridePath_ = dataPath + "/override";
-    setHdCharactersPath();
     initialized = true;
     LOG_INFO("Switched asset manager to: ", dataPath, " (",
              manifest_.getEntryCount(), " files indexed)");
@@ -164,29 +162,7 @@ void AssetManager::shutdown() {
     initialized = false;
 }
 
-void AssetManager::setHdCharactersPath() {
-    const char* env = std::getenv("WOWEE_HD_CHARACTERS_DIR");
-    if (env && *env) {
-        hdCharactersPath_ = env;
-    } else {
-        // Beside the expansion folders, so one conversion serves them all.
-        std::filesystem::path p(dataPath);
-        if (p.parent_path().filename() == "expansions") p = p.parent_path().parent_path();
-        hdCharactersPath_ = (p / "hd_characters").string();
-    }
-}
-
 std::string AssetManager::resolveFile(const std::string& normalizedPath) const {
-    // The HD characters folder, and nothing else, answers for "HD\...": the
-    // converted models are opted into by name, so no other read can reach
-    // them (pipeline/hd_characters.hpp).
-    if (normalizedPath.size() > 3 && normalizedPath.compare(0, 3, "hd\\") == 0) {
-        if (hdCharactersPath_.empty()) return {};
-        std::string rel = normalizedPath.substr(3);
-        std::replace(rel.begin(), rel.end(), '\\', '/');
-        std::string fs = hdCharactersPath_ + "/" + rel;
-        return LooseFileReader::fileExists(fs) ? fs : std::string{};
-    }
     // Check override directory first (for HD upgrades, custom textures)
     if (!overridePath_.empty()) {
         const auto* entry = manifest_.lookup(normalizedPath);

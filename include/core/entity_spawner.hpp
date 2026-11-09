@@ -26,7 +26,7 @@ namespace wowee {
 
 // Forward declarations
 namespace rendering { class Renderer; }
-namespace pipeline { class AssetManager; class DBCFile; struct M2Model; struct WMOModel; struct HdCharacterLook; }
+namespace pipeline { class AssetManager; class DBCFile; struct M2Model; struct WMOModel; }
 namespace audio { enum class VoiceType; class GameObjectSounds; }
 namespace game { class GameHandler; class Unit; }
 
@@ -777,8 +777,6 @@ private:
         uint8_t facialFeatures = 0;
         std::string bodySkinPath;
         std::vector<std::string> underwearPaths;
-        // The HD model's appearance table when this player wears one.
-        std::shared_ptr<const pipeline::HdCharacterLook> hdLook;
     };
     std::unordered_map<uint64_t, OnlinePlayerAppearanceState> onlinePlayerAppearance_;
     std::unordered_map<uint64_t, std::pair<std::array<uint32_t, 19>, std::array<uint8_t, 19>>> pendingOnlinePlayerEquipment_;
@@ -845,16 +843,6 @@ private:
     };
     PlayerLook resolvePlayerLook(uint8_t raceId, uint8_t genderId,
                                  uint32_t appearanceBytes, uint8_t facialFeatures);
-    /// The model a player of this race and sex is drawn with: the 3.3.5 one, or
-    /// the reference client's when the "HD characters" setting is on and it was
-    /// converted (pipeline/hd_characters.hpp).
-    std::string playerModelPathFor(uint8_t raceId, uint8_t genderId) const;
-    /// playerModelCache_ / playerParsedModels_ key: the HD and 3.3.5 models of
-    /// a race are different models.
-    static uint32_t playerModelKey(uint8_t raceId, uint8_t genderId, bool hd) {
-        return (hd ? 0x10000u : 0u) | (static_cast<uint32_t>(raceId) << 8) |
-               static_cast<uint32_t>(genderId & 0xFF);
-    }
     /// Read and parse a player race's model with the few external animations
     /// a player in view needs. Thread-safe; null when it cannot be loaded.
     static std::shared_ptr<pipeline::M2Model> parsePlayerModel(pipeline::AssetManager& assets,

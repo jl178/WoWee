@@ -929,8 +929,6 @@ set(WOWEE_SOURCES
     src/pipeline/wowee_chat_links.cpp
     src/pipeline/custom_zone_discovery.cpp
     src/pipeline/char_sections.cpp
-    src/pipeline/hd_characters.cpp
-    src/pipeline/hd_character_look.cpp
     src/ui/settings_schema.cpp
     src/pipeline/item_textures.cpp
     src/pipeline/m2_asset_loader.cpp
@@ -2442,8 +2440,6 @@ add_executable(wowee_editor
     src/pipeline/dds_loader.cpp
     src/pipeline/dbc_loader.cpp
     src/pipeline/char_sections.cpp
-    src/pipeline/hd_characters.cpp
-    src/pipeline/hd_character_look.cpp
     src/ui/settings_schema.cpp
     src/pipeline/item_textures.cpp
     src/pipeline/m2_asset_loader.cpp

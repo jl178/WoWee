@@ -1,7 +1,6 @@
 #include "rendering/renderer.hpp"
 #include "rendering/sun_direction.hpp"
 #include "rendering/enhanced_grade.hpp"
-#include "pipeline/hd_characters.hpp"
 #include "rendering/enhanced_tonemap.hpp"
 
 #include <cstddef>
@@ -1600,9 +1599,6 @@ void Renderer::setDrunkLevel(float level) {
 }
 
 void Renderer::setEnhancements(const Enhancements& e) {
-    // Read where a player model is chosen, which can be before the first
-    // frame hands the set to the subsystems.
-    pipeline::setHdCharactersEnabled(e.hdCharacters);
     if (e == enh_) return;
     enh_ = e;
     enhDirty_ = true;

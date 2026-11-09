@@ -789,19 +789,6 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "the snapshot branch of CharacterRenderer::beginSequenceBlend (a fade "
                  "begun during a fade copies localPose); off keeps 0x826C40's swap",
      .asBool = &Enhancements::poseBlend},
-    {.key = "hdcharacters", .label = "HD characters", .kind = SettingKind::Bool,
-     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
-     .tooltip = "Players are drawn with the reference client's HD models, whose fuller\n"
-                "skeletons and denser keyframes are most of why it moves so\n"
-                "smoothly. Needs the models converted from a Enhanced install\n"
-                "(tools/hd_characters); a race without them stays as it was.\n"
-                "Off is the original models.",
-     // docs/re/enhanced-combat.md section 1; tools/hd_characters/convert.py.
-     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "hd_characters",
-     .controls = "pipeline::hdCharacterModelPath (the HD\\ models from the HD characters "
-                 "folder) for the player, other players and the portrait; off draws the "
-                 "3.3.5 models",
-     .asBool = &Enhancements::hdCharacters},
     {.key = "spellqueue", .label = "Spell queue window (ms)", .kind = SettingKind::Int,
      .minValue = 0, .maxValue = 400, .step = 50, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "Press your next spell up to this long before the global\n"

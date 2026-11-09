@@ -1,5 +1,4 @@
 #include "rendering/character_preview.hpp"
-#include "pipeline/hd_characters.hpp"
 #include "rendering/imgui_texture.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/glue_scene_particles.hpp"
@@ -203,25 +202,9 @@ std::unordered_set<uint16_t> CharacterPreview::buildBaseGeosets() {
     // drifted: it named one of the two feet variants, so an HD model spelling
     // its feet the other way stood in the portrait without them, and it named
     // the no-cloak panel, which the HD models do not carry.
-    uint16_t hairScalp = selectedHairScalp;
-    std::vector<uint16_t> hdExtra;
-    if (hdLook_) {
-        // The HD model's own hair, beards (meshes) and extra groups.
-        pipeline::CharacterAppearance who;
-        who.hairStyleId = static_cast<uint8_t>(hairStyle_);
-        who.facialHairId = static_cast<uint8_t>(facialHair_);
-        const auto hd = pipeline::resolveHdCharacterGeosets(*hdLook_, who);
-        hairScalp = hd.hairScalp > 0 ? hd.hairScalp : 1;
-        facial100 = hd.facial100;
-        facial200 = hd.facial200;
-        facial300 = hd.facial300;
-        facial1700 = 0;
-        hdExtra = hd.extra;
-    }
     std::unordered_set<uint16_t> activeGeosets =
-        core::bareCharacterGeosets(hairScalp, facial100, facial200, facial300, raceId,
+        core::bareCharacterGeosets(selectedHairScalp, facial100, facial200, facial300, raceId,
                                    facial1700);
-    activeGeosets.insert(hdExtra.begin(), hdExtra.end());
 
     return activeGeosets;
 }
@@ -612,11 +595,6 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
     }
 
     std::string m2Path = game::getPlayerModelPath(race, gender, useFemaleModel);
-    // Enhanced's HD model in its place when the setting is on and it was
-    // converted (pipeline/hd_characters.hpp).
-    m2Path = pipeline::hdCharacterModelPath(*assetManager_, m2Path);
-    hdLook_ = pipeline::isHdCharacterModelPath(m2Path)
-        ? pipeline::loadHdCharacterLook(*assetManager_, m2Path) : nullptr;
 
     auto m2Data = assetManager_->readFile(m2Path);
     if (m2Data.empty()) {
@@ -690,22 +668,8 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
     bodySkinPath_.clear();
     baseLayers_.clear();
 
-    auto charSectionsDbc = hdLook_ ? nullptr : assetManager_->loadDBC("CharSections.dbc");
-    if (hdLook_) {
-        pipeline::CharacterAppearance who;
-        who.raceId = targetRaceId;
-        who.sexId = targetSexId;
-        who.skinId = static_cast<uint8_t>(skin);
-        who.faceId = static_cast<uint8_t>(face);
-        who.hairStyleId = static_cast<uint8_t>(hairStyle);
-        who.hairColorId = static_cast<uint8_t>(hairColor);
-        who.facialHairId = facialHair;
-        const auto sections = pipeline::resolveHdCharacterTextures(*hdLook_, who);
-        bodySkinPath_ = sections.bodySkin;
-        skinExtraPath_.clear();
-        hairScalpPath = sections.hair;
-        underwearPaths = sections.underwear;
-    } else if (charSectionsDbc) {
+    auto charSectionsDbc = assetManager_->loadDBC("CharSections.dbc");
+    if (charSectionsDbc) {
         const auto* csL = pipeline::getActiveDBCLayout()
             ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
         const auto csF = pipeline::detectCharSectionsFields(charSectionsDbc.get(), csL);
@@ -968,7 +932,6 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
         else if (g == 2) gq.facial200 = v;
         else if (g == 3) gq.facial300 = v;
         else if (g == 17) gq.facial1700 = v;
-        else if (g > 20) gq.extra.push_back(id);  // an HD model's own groups
     }
     for (const auto& it : equipment) {
         if (it.displayModel == 0) continue;

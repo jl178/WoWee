@@ -1,14 +1,12 @@
 #pragma once
 
 #include "core/geoset_rules.hpp"
-#include "pipeline/hd_characters.hpp"
 #include "game/character.hpp"
 #include "game/inventory.hpp"
 #include "rendering/animation/weapon_type.hpp"
 #include <glm/glm.hpp>
 #include <string>
 #include <vector>
-#include <memory>
 #include <unordered_set>
 #include <cstdint>
 
@@ -87,12 +85,8 @@ public:
     void compositePlayerSkin(uint32_t modelSlotId, const PlayerTextureInfo& texInfo);
 
     // Build default active geosets for player character
-    /// On an HD player model (as last given to resolvePlayerTextures) the
-    /// hair, facial hair and extra groups are the model's own
-    /// (pipeline/hd_characters.hpp).
     std::unordered_set<uint16_t> buildDefaultPlayerGeosets(uint8_t raceId, uint8_t sexId,
                                                            uint8_t hairStyleId, uint8_t facialId);
-
 
     // Equipment weapon loading (reads inventory, attaches weapon M2 models)
     void loadEquippedWeapons();
@@ -162,8 +156,6 @@ private:
     std::string bodySkinPath_;
     std::vector<std::string> underwearPaths_;
     uint32_t skinTextureSlotIndex_ = 0;
-    // The player model's HD appearance table; null for a 3.3.5 model.
-    std::shared_ptr<const pipeline::HdCharacterLook> playerHdLook_;
     uint32_t cloakTextureSlotIndex_ = 0;
 
     bool weaponsSheathed_ = false;

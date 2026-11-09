@@ -340,12 +340,6 @@ target_link_libraries(test_geoset_rules PRIVATE catch2_main)
 add_test(NAME geoset_rules COMMAND test_geoset_rules)
 register_test_target(test_geoset_rules)
 
-# ── test_hd_character_look ──────────────────────────────────
-# The "HD characters" appearance table (.hdlook): parsing it and reading the
-# five 3.3.5 appearance bytes through it.
-wowee_add_test(test_hd_character_look SOURCES test_hd_character_look.cpp
-    ${CMAKE_SOURCE_DIR}/src/pipeline/hd_character_look.cpp)
-
 # ── test_creature_skin_rules ────────────────────────────────
 # What stock binds to a creature display's skin slots. Pure header.
 add_executable(test_creature_skin_rules test_creature_skin_rules.cpp ${TEST_COMMON_SOURCES})

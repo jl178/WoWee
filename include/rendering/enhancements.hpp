@@ -308,11 +308,6 @@ struct Enhancements {
     /// 0x826C40: the fade keeps its outgoing sequence and swaps the incoming
     /// one at once, or drops the outgoing one.
     bool  poseBlend = false;
-    /// Players are drawn with the reference client's HD models (215 bones, denser
-    /// animation), converted by tools/hd_characters/convert.py into the HD
-    /// characters folder; a model not converted stays the original. NPCs keep
-    /// the 3.3.5 models. Off: the original models.
-    bool  hdCharacters = false;
     /// The spell queue window in ms (Enhanced's SpellQueueWindow, 400): a press
     /// that only the GCD, a cooldown or the cast's end holds within that time
     /// is sent the moment it can be (SpellHandler). 0 is stock 3.3.5a: no

@@ -181,11 +181,6 @@ private:
     std::string dataPath;
     std::string expansionDataPath_;  // e.g. "Data/expansions/wotlk"
     std::string overridePath_;       // e.g. "Data/override"
-    // The "HD characters" folder (pipeline/hd_characters.hpp): read only for
-    // paths under the virtual prefix "HD\", and for nothing else. Data/
-    // hd_characters, or WOWEE_HD_CHARACTERS_DIR.
-    std::string hdCharactersPath_;
-    void setHdCharactersPath();
 
     // Base manifest (loaded from dataPath/manifest.json)
     AssetManifest manifest_;
