@@ -92,7 +92,7 @@ const float kGridEdge = 0.1;
 const float kCanopySky = 0.7;
 const float kLeafFill = 0.15;
 const float kCanopyGroundShade = 0.7;
-const float kCanopyAmbient = 0.8;
+const float kCanopyAmbient = 0.9;
 const float kCanopyTint = 1.0;
 // A wall beside the pixel, its face toward the pixel in the sun, sends back
 // that sun in a warm stone-and-timber colour (most of 3.3.5's walls), to a

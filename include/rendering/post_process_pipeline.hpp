@@ -200,10 +200,15 @@ public:
     void setBloom(float amount) { bloom_ = glm::clamp(amount, 0.0f, 2.0f); }
     /// The Enhanced daylight's exposure and highlight desaturation in the HDR
     /// scene's tone map (enhanced_palette::kHdrExposure, kHdrSaturation);
-    /// 0, 0 is off (and they do nothing without the HDR scene).
-    void setEnhancedTone(float exposure, float saturation) {
+    /// 0, 0 is off (and they do nothing without the HDR scene). `shade` is
+    /// the shade's chroma scale under them (kHdrShadeChroma), 1 as it is,
+    /// and `shadeTint` the hue of the grey it keeps (1, 1, 1 none).
+    void setEnhancedTone(float exposure, float saturation, float shade = 1.0f,
+                        const glm::vec3& shadeTint = glm::vec3(1.0f)) {
         enhancedExposure_ = glm::max(exposure, 0.0f);
         enhancedSat_ = glm::clamp(saturation, 0.0f, 2.0f);
+        enhancedShade_ = glm::clamp(shade, 0.0f, 1.0f);
+        enhancedShadeTint_ = glm::clamp(shadeTint, glm::vec3(0.0f), glm::vec3(2.0f));
     }
     [[nodiscard]] bool isGlowEnabled() const { return glowEnabled_; }
 
@@ -234,6 +239,8 @@ private:
     float bloom_ = 0.0f;
     float enhancedExposure_ = 0.0f;
     float enhancedSat_ = 0.0f;
+    float enhancedShade_ = 1.0f;
+    glm::vec3 enhancedShadeTint_{1.0f};
     float glowAmount_ = 0.0f;
     float glowBlend_ = 0.0f;
     float nether_ = 0.0f;

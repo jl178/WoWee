@@ -114,6 +114,59 @@ inline float hdrSaturation() {
     return v;
 }
 
+/// The shade's chroma scale under the same tone (full below 0.18 luminance,
+/// none from 0.38, by day, outdoors, on warm shade only). 3.3.5's leaf, grass and dirt
+/// textures carry almost no blue, so under Enhanced's own sky-blue ambient
+/// (Goldshire 9:22: 0.40, 0.51, 0.60) the shade stays a saturated
+/// yellow-green - blue/luminance 0.41-0.52 against Enhanced's 0.71-0.73,
+/// chroma 0.67-0.72 against 0.46-0.57. Tinting the shade's light toward the
+/// sky's colour did not close it: the sky bands are cyan beside the ambient,
+/// and turned the shade green (red/luminance 1.05 -> 0.78). Enhanced's shade
+/// is this one with a little over half its chroma; docs/re/enhanced-lighting.md
+/// section 6c. WOWEE_ENHANCED_SHADE overrides it.
+inline constexpr float kHdrShadeChroma = 0.6f;
+inline float hdrShadeChroma() {
+    static const float v = [] {
+        const char* e = std::getenv("WOWEE_ENHANCED_SHADE");
+        return (e && *e) ? static_cast<float>(std::atof(e)) : kHdrShadeChroma;
+    }();
+    return v;
+}
+/// How far it is day for the shade's chroma: 0 with the sun's sprite at the
+/// horizon, 1 from 0.15 of the way up (the HDR sun's own easing,
+/// enhanced_tonemap::sunLightScale), so the night keeps its moonlit blue.
+inline float dayShare(float sunDirZ) {
+    float t = sunDirZ / 0.15f;
+    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+/// How far the grey the shade keeps takes the ambient's hue (its luminance
+/// kept): Enhanced's ambient is its sky light, and its shade, against 3.3.5's
+/// orange dirt and yellow leaves, a little bluer and less red.
+/// WOWEE_ENHANCED_SHADE_SKY overrides it.
+inline constexpr float kHdrShadeSky = 0.6f;
+inline float hdrShadeSky() {
+    static const float v = [] {
+        const char* e = std::getenv("WOWEE_ENHANCED_SHADE_SKY");
+        return (e && *e) ? static_cast<float>(std::atof(e)) : kHdrShadeSky;
+    }();
+    return v;
+}
+/// The tint for that grey: the ambient's blue against its red and green
+/// (their mean, so it leans neither red nor green), at unit luminance,
+/// kHdrShadeSky of the way from white, scaled by `weight` (0 = white, none).
+/// The ambient's own hue leans green beside its red (0.40, 0.51, 0.60 at
+/// Goldshire 9:22) and turned the shade a green grey (red/luminance 0.98
+/// against Enhanced's 1.05).
+inline glm::vec3 shadeTint(const glm::vec3& ambient, float weight) {
+    const float warm = 0.5f * (ambient.r + ambient.g);
+    const glm::vec3 cool(warm, warm, ambient.b);
+    const float y = glm::dot(cool, glm::vec3(0.2126f, 0.7152f, 0.0722f));
+    if (y < 1e-3f || weight <= 0.0f) return glm::vec3(1.0f);
+    return glm::mix(glm::vec3(1.0f), cool / y, hdrShadeSky() * weight);
+}
+
 inline bool appliesToMap(unsigned mapId) { return mapId == 0 || mapId == 1; }
 
 /// A colour's luminance scaled by t.luminance and its distance from that grey

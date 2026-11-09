@@ -357,3 +357,41 @@ TEST_CASE("Sun through leaves: the sun's direction and the day weight", "[enhanc
     // The sun down: no weight, whatever the light direction says.
     CHECK(glm::unpackSnorm4x8(ll::packSun(glm::vec3(0.2f, 0.1f, -0.5f))).w == 0.0f);
 }
+
+TEST_CASE("Enhanced shade: less chroma, a cooler grey, by day only", "[enhanced]") {
+    namespace fp = enhanced_palette;
+    CHECK(fp::kHdrShadeChroma > 0.4f);
+    CHECK(fp::kHdrShadeChroma < 0.8f);
+    // Night and the horizon: none; from 0.15 of the way up: all.
+    CHECK(fp::dayShare(-0.2f) == 0.0f);
+    CHECK(fp::dayShare(0.0f) == 0.0f);
+    CHECK(fp::dayShare(0.5f) == 1.0f);
+    // The tint: white at weight 0; otherwise unit luminance, bluer than
+    // white and leaning neither red nor green (Goldshire 9:22's ambient).
+    const glm::vec3 amb(0.40f, 0.51f, 0.60f);
+    CHECK(fp::shadeTint(amb, 0.0f) == glm::vec3(1.0f));
+    const glm::vec3 t = fp::shadeTint(amb, 1.0f);
+    CHECK(glm::dot(t, glm::vec3(0.2126f, 0.7152f, 0.0722f)) == Catch::Approx(1.0f).margin(1e-4f));
+    CHECK(t.r == Catch::Approx(t.g));
+    CHECK(t.b > t.r);
+    CHECK(t.b < 1.5f);
+}
+
+#ifdef WOWEE_SOURCE_DIR
+TEST_CASE("Enhanced shade: fxaa.frag reads its tint and chroma as the push block's last vec4", "[enhanced]") {
+    std::ifstream f(std::string(WOWEE_SOURCE_DIR) + "/assets/shaders/fxaa.frag.glsl");
+    REQUIRE(f.good());
+    std::stringstream ss;
+    ss << f.rdbuf();
+    const std::string src = ss.str();
+    // After enhancedSat (offset 92): a whole vec4 at 96, 112 bytes in all,
+    // as post_process_pipeline.cpp pushes them.
+    const auto sat = src.find("float enhancedSat;");
+    const auto shade = src.find("vec4  enhancedShade;");
+    REQUIRE(sat != std::string::npos);
+    REQUIRE(shade != std::string::npos);
+    CHECK(sat < shade);
+    CHECK(src.find("pc.enhancedShade.a") != std::string::npos);
+    CHECK(src.find("pc.enhancedShade.rgb") != std::string::npos);
+}
+#endif

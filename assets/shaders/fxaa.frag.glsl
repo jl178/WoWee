@@ -48,6 +48,8 @@ layout(push_constant) uniform PC {
     float enhancedExposure;  // HDR + Enhanced daylight: the scene's light x this before
                             // the tone curve (enhanced_palette::kHdrExposure); 0 = off
     float enhancedSat;       // and the chroma scale below the shoulder (0 = off)
+    vec4  enhancedShade;     // and the shade's: rgb the hue of the grey it keeps (the
+                            // sky-lit ambient's, 1 = none), a its chroma scale (1 = as it is)
 } pc;
 
 // The scene boxed down to a quarter (mip 1 of a half-size image), the stock
@@ -379,8 +381,22 @@ vec3 stockScreenEffect(vec3 c, vec2 uv) {
             // Lit surfaces only: Enhanced's shade is a near-neutral green
             // (chroma 0.46-0.57) under its saturated sunlit ground (0.62-0.65).
             float k = mix(1.0, pc.enhancedSat, smoothstep(0.25, 0.45, y));
+            // And the shade less (enhanced_palette::kHdrShadeChroma): 3.3.5's
+            // leaf, grass and dirt textures carry almost no blue, so under a
+            // sky-blue ambient the shade stays a saturated yellow-green
+            // (shade b/luminance 0.41-0.52) where Enhanced's, under the same
+            // light data, is a near-neutral warm grey (0.71-0.73). By day,
+            // outdoors; full below 0.18 luminance, none from 0.38, and only
+            // where the shade is warm (blue short of red and green): a shade
+            // that already has its blue - Duskwood's teal - keeps its colour.
+            // The grey it keeps is cooler: the ambient's blue against its red
+            // and green (enhanced_palette::shadeTint) - Enhanced's sky light.
+            float shadeW = (1.0 - smoothstep(0.18, 0.38, y)) *
+                           smoothstep(0.0, 0.1, 0.5 * (r.r + r.g) - r.b);
+            k *= mix(1.0, pc.enhancedShade.a, shadeW);
             k = mix(k, 0.8, smoothstep(0.75, 0.95, top));
-            r = max(vec3(y) + (r - vec3(y)) * k, vec3(0.0));
+            vec3 grey = vec3(y) * mix(vec3(1.0), pc.enhancedShade.rgb, shadeW);
+            r = max(grey + (r - vec3(y)) * k, vec3(0.0));
         }
     } else if (pc.rollWhite > 0.0) {
         // Soft highlights belong to the 8-bit scene; the tone curve does it

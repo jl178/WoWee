@@ -4140,9 +4140,14 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
         const bool enhancedTone = enh_.enhancedDaylight && !cameraUnderwater_ &&
                                  enhanced_palette::appliesToMap(lightMapId_);
         const float outdoor = 1.0f - glm::clamp(indoorFactor_, 0.0f, 1.0f);
+        // And the shade's chroma and the grey it keeps, by day.
+        const auto& tonelp = lightingManager->getLightingParams();
+        const float shadeOn = enhancedTone ? outdoor * enhanced_palette::dayShare(tonelp.sunDir.z) : 0.0f;
         postProcessPipeline_->setEnhancedTone(
             enhancedTone ? glm::mix(1.0f, enhanced_palette::hdrExposure(), outdoor) : 0.0f,
-            enhancedTone ? glm::mix(1.0f, enhanced_palette::hdrSaturation(), outdoor) : 0.0f);
+            enhancedTone ? glm::mix(1.0f, enhanced_palette::hdrSaturation(), outdoor) : 0.0f,
+            glm::mix(1.0f, enhanced_palette::hdrShadeChroma(), shadeOn),
+            enhanced_palette::shadeTint(tonelp.ambientColor, shadeOn));
     }
 
     uint32_t frameIdx = vkCtx->getCurrentFrame();

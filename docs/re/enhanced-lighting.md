@@ -554,7 +554,7 @@ pixel's world position the fill's terms take the grid's values -
 - the canopy over the point counts fully below the crowns' foot and not at
   their top; under it the sky's fill falls by 0.7 of the cover, the ground's
   bounce by 0.7 (the ground below is in the leaves' shade), and the ambient
-  itself is 0.8 as bright and tinted by the light under the leaves: the
+  itself is 0.9 as bright (0.8 at first; section 6c) and tinted by the light under the leaves: the
   sky's hue and the leaves' (35%) at unit brightness, so that green comes
   from the sky's light through the leaves rather than from their yellow
   texture;
@@ -597,7 +597,7 @@ The shade under the trees moves toward Enhanced's: darker and less golden
 shade (its shade is 0.71-0.73 blue to luminance, Wowee's 0.42-0.47 with or
 without the row): 3.3.5's leaf and grass textures have almost no blue for
 any light to bring out, and Wowee's later passes (the HDR saturation, the
-grade) add chroma; that is a grading question, not a light one.
+grade) add chroma; that is a grading question, not a light one (section 6c).
 
 Motion (Goldshire 10:00, ten frames 0.25 s apart, the row off then on):
 walking under the oaks and a still camera on trees in the wind with the
@@ -614,6 +614,69 @@ sunlit pixels no longer read it and the wall looks run only where a wall's
 carried heights say one stands near. The sheets are in the session
 scratchpad (`gi/sheet_c1.png`, `gi/sheet_c2.png`, `gi/seq_walk.png`,
 `gi/seq_wind.png`).
+
+## 6c. The shade's hue
+
+Enhanced's shade in Jered's live Goldshire 9:22 captures is a near-neutral
+warm grey: the darkest third of the world view 1.05 : 1.03 : 0.72 red :
+green : blue to luminance, chroma (max - min) / max 0.46-0.57. Wowee's
+under the Enhanced preset was a saturated yellow-green, 1.05 : 1.09 : 0.41
+and chroma 0.67-0.72, with the sunlit third matching (chroma 0.64-0.70
+against 0.62-0.65).
+
+What it is not. Enhanced's light data at that hour already gives an ambient
+the colour of a blue sky (0.40, 0.51, 0.60; the sun 0.73, 0.40, 0.13), and
+Wowee shades with it: the yellow is 3.3.5's leaf, grass and dirt textures,
+which carry almost no blue for any light to bring out. Tinting the shade's
+light toward the sky's own bands did not close it - tried in the bounce pass,
+the shade's light moved toward SkyMiddle's hue with its luminance kept: the
+bands are cyan beside the ambient (0.21, 0.59, 0.75), and the shade went
+green (red/luminance 1.05 -> 0.78, blue only 0.45 -> 0.50). The grade's
+curve is per channel and near the identity below 0.3 (section 3), and the
+HDR chroma boost already starts at 0.25 luminance, so neither was what
+warmed it.
+
+What it is: Enhanced's shade is Wowee's with a little over half its chroma,
+round a slightly cooler grey. So, in the final composite under the HDR
+scene and the Enhanced daylight (`fxaa.frag`, beside the lit chroma boost),
+by day (`enhanced_palette::dayShare`, the sun's sprite 0-0.15 up) and
+outdoors:
+
+- pixels below 0.18 luminance keep `kHdrShadeChroma` = 0.6 of their chroma,
+  easing to all of it at 0.38 - below where the lit boost reaches full;
+- round a grey that leans to the ambient's blue against the mean of its red
+  and green (`shadeTint`, `kHdrShadeSky` = 0.6 of the way from white): the
+  ambient's own hue leans green and turned the shade a green grey (red 0.98
+  to luminance);
+- only where the pixel is warm (blue short of red and green by up to 0.1):
+  Duskwood's teal shade keeps its colour (unchanged, 0.32 : 1.26 : 1.46).
+
+And the canopy's ambient is 0.9 as bright under the crowns (it was 0.8):
+with the sun behind, the shade had gone darker than Enhanced's (0.214 against
+0.243).
+
+| view (darkest third) | | Enhanced | before | now |
+|---|---|---|---|---|
+| Goldshire 9:22, the inn (Enhanced's 09:22 framing) | luminance | 0.216 | 0.192 | 0.205 |
+| | r : g : b / luminance | 1.06 1.02 0.73 | 1.06 1.06 0.52 | 1.04 1.02 0.79 |
+| | chroma | 0.46 | 0.68 | 0.38 |
+| Goldshire 9:22, the crossroads (09:23:15 framing) | luminance | 0.243 | 0.235 | 0.253 |
+| | r : g : b / luminance | 1.05 1.03 0.71 | 1.16 1.04 0.40 | 1.12 1.01 0.62 |
+| | chroma | 0.57 | 0.72 | 0.46 |
+| Goldshire 9:22, into the sun | luminance | 0.216 | 0.211 | 0.222 |
+| | r : g : b / luminance | 1.06 1.02 0.73 | 1.04 1.09 0.45 | 1.01 1.05 0.72 |
+| Goldshire 9:22, sun behind | luminance | 0.243 | 0.213 | 0.230 |
+| | r : g : b / luminance | 1.05 1.03 0.71 | 1.05 1.09 0.41 | 1.03 1.05 0.68 |
+
+The sunlit third is where it was: chroma 0.64-0.69 (0.64-0.68 before),
+luminance 0.45-0.55 (the same within 0.01); lit/shade 2.10-2.27 on the two
+matched views (2.24-2.38; Enhanced 2.07-2.27). Elwynn's forest floor goes
+from 0.25 to 0.49 blue (forest_a) and 0.50 to 0.75 (forest_b); the Barrens'
+noon shade, mostly above the band, 0.58 -> 0.62; Duskwood, the Lion's Pride
+inside and Goldshire at 22:30 unchanged within a shot's noise. Cost below
+the profiler's noise (the composite 1.95-2.36 ms windows either way, Iris
+Xe 1280x540). Sheets in the session scratchpad: `shade/sheet_goldshire.png`
+(Enhanced | before | now), `shade/sheet_regress.png`.
 
 ## 7. Ground clutter
 
@@ -782,8 +845,9 @@ What still separates the two pictures, largest first:
 
 1. Indirect light. The bounce light (section 6b) now darkens and cools
    the shade under canopies and warms it by sunlit ground and walls, from a
-   grid baked round the camera; the blue that Enhanced's shade keeps, and its
-   crisper dappling through the canopy (its sun shadows), are not matched.
+   grid baked round the camera, and the shade's hue is Enhanced's (section
+   6c); its crisper dappling through the canopy (its sun shadows) is not
+   matched.
 2. Light toward the sun. The haze and stronger shafts now give the golden
    glow looking into an afternoon sun, but Enhanced's shafts through the
    canopy are crisper and longer (its fog is shadowed by the cascades
