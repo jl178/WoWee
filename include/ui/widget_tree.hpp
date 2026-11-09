@@ -277,6 +277,36 @@ struct Widget {
     float texCoordQuad[8] = {0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f};
     float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     bool solidColor = false;    ///< SetTexture(r,g,b[,a]) rather than a file.
+    /// Texture:SetDesaturated - drawn in grey (the art's luminance), as the
+    /// client draws an unusable item or an unlearned ability.
+    bool desaturated = false;
+    /// Texture:SetRotation - radians anticlockwise about the texture's centre,
+    /// applied to its coordinates as in the client.
+    float rotation = 0.0f;
+    /// Texture:SetGradient / SetGradientAlpha - a colour per edge, blended
+    /// across the texture in place of its single vertex colour. min is the
+    /// left (HORIZONTAL) or bottom (VERTICAL) edge.
+    bool  hasGradient = false;
+    bool  gradientVertical = false;
+    float gradientMin[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float gradientMax[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    /// The font settings this font string set for itself (SetFont,
+    /// SetTextColor, SetShadow*, SetJustify*) and so no longer takes from the
+    /// font object it inherits when that object changes. Bits: FontOwn*.
+    uint8_t fontOwned = 0;
+    static constexpr uint8_t kFontOwnFace = 1, kFontOwnColor = 2, kFontOwnShadow = 4,
+                             kFontOwnJustifyH = 8, kFontOwnJustifyV = 16;
+    /// Minimap:SetMaskTexture - the shape the map is cut to. Empty and unset
+    /// until the interface names one.
+    std::string minimapMask;
+    bool minimapMaskSet = false;
+    /// Texture:SetHorizTile / SetVertTile - repeat the art across the region
+    /// at its own size rather than stretching it.
+    bool  horizTile = false;
+    bool  vertTile = false;
+    /// Frame:DisableDrawLayer - a bit per DrawLayer whose regions this frame
+    /// does not draw. Skins strip a Blizzard frame's art with it.
+    uint8_t disabledLayers = 0;
     /// A unit's face, claimed by SetPortraitTexture.
     ///
     /// The interface's own portraits are circular images with transparent
@@ -433,6 +463,15 @@ struct Widget {
     uint32_t thumbRegion = 0;
     float barMin = 0.0f, barMax = 1.0f, barValue = 0.0f;
     std::string barTexture;
+    /// The bar's fill as a region (GetStatusBarTexture), and on that region,
+    /// the bar it fills. The bar still draws the fill; the region carries its
+    /// rect - laid out over the filled part - and forwards its texture, colour
+    /// and layer to the bar, so the two are one thing as in the client.
+    uint32_t barFillRegion = 0;
+    uint32_t fillOfBar = 0;
+    /// StatusBar:SetRotatesTexture - a vertical bar turns its art a quarter
+    /// so a texture drawn for a horizontal bar runs along it.
+    bool barRotatesTexture = false;
     float barColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     /// Which layer the bar's fill draws in. In the real client the fill is a
     /// region like any other and <StatusBar drawLayer="..."> is its layer;
@@ -511,6 +550,11 @@ struct Widget {
     /// sizes itself to fit them - which is the part a chat frame does not do,
     /// because a tooltip has no size of its own until it has something to say.
     bool  isTooltip = false;
+    /// The client draws this widget's picture itself (a nameplate's stock
+    /// regions, which GameScreen draws over each unit). The widget renderer
+    /// lays it out and leaves its pixels alone; the client reads its state -
+    /// shown, texture, text - to decide what to draw.
+    bool  clientDrawn = false;
     /// The frame this tooltip was last given by SetOwner. A tooltip is hidden
     /// when its owner stops being visible - see hideOrphanedTooltips.
     uint32_t tooltipOwnerId = 0;
@@ -546,6 +590,18 @@ struct Widget {
     /// i holds the region standing in for line i + 1; the sizing pass gives
     /// each one the box its line occupies.
     std::vector<uint32_t> tooltipLineAnchors;
+    /// Font strings handed over by AddFontStrings(left, right), each pair
+    /// standing for the next line after the ones the tooltip's template named.
+    /// A scanning tooltip made with no template - CreateFrame("GameTooltip")
+    /// and two CreateFontString()s, which is how LibHealComm and many others
+    /// read item and spell text - has only these, and reads line 1 back
+    /// through them.
+    std::vector<std::pair<uint32_t, uint32_t>> tooltipAddedLines;
+    /// On a font string given to a tooltip that way: the tooltip, the line
+    /// (1-based) and which side it is.
+    uint32_t tooltipLineOwner = 0;
+    int      tooltipLineIndex = 0;
+    bool     tooltipLineRight = false;
     /// A floor on the width the sizing pass may settle on, from
     /// SetMinimumWidth. FrameXML uses it to keep a money frame from being
     /// clipped by a tooltip narrower than the coins it is about to draw:

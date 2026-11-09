@@ -90,6 +90,48 @@ std::vector<std::string> TocFile::getSavedVariablesPerCharacter() const {
     return (it != directives.end()) ? parseVarList(it->second) : std::vector<std::string>{};
 }
 
+namespace {
+std::string foldCase(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+}  // namespace
+
+// Directive names are matched without regard to case, as the client does:
+// "## Dependencies", "## RequiredDeps" and "## Dep" all appear in the wild,
+// and so does "## OptionalDeps" spelled "## Optionaldeps".
+std::vector<std::string> TocFile::getRequiredDeps() const {
+    std::vector<std::string> out;
+    for (const auto& [key, val] : directives) {
+        const std::string k = foldCase(key);
+        if (k == "requireddeps" || k == "dependencies" || k.rfind("dep", 0) == 0) {
+            for (auto& n : parseVarList(val)) out.push_back(std::move(n));
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> TocFile::getOptionalDeps() const {
+    std::vector<std::string> out;
+    for (const auto& [key, val] : directives) {
+        if (foldCase(key) == "optionaldeps") {
+            for (auto& n : parseVarList(val)) out.push_back(std::move(n));
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> TocFile::getLoadWith() const {
+    std::vector<std::string> out;
+    for (const auto& [key, val] : directives) {
+        if (foldCase(key) == "loadwith") {
+            for (auto& n : parseVarList(val)) out.push_back(std::move(n));
+        }
+    }
+    return out;
+}
+
 std::optional<TocFile> parseTocFile(const std::string& tocPath) {
     std::ifstream f(tocPath);
     if (!f.is_open()) return std::nullopt;

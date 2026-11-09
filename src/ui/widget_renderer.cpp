@@ -17,6 +17,7 @@
 #include "ui/interface_fonts.hpp"
 #include "core/logger.hpp"
 #include "rendering/polygon_triangulate.hpp"
+#include "stb_image.h"
 
 #include "imgui.h"
 
@@ -68,6 +69,25 @@ void WidgetRenderer::initialize(pipeline::AssetManager* assets,
     vkCtx_ = vkCtx;
 }
 
+/// A texture file as RGBA8: BLP through the BLP loader, anything else - the
+/// .tga an addon ships - through stb_image.
+static pipeline::BLPImage decodeTextureImage(const std::vector<uint8_t>& data) {
+    const bool blp = data.size() >= 4 && (std::memcmp(data.data(), "BLP1", 4) == 0 ||
+                                          std::memcmp(data.data(), "BLP2", 4) == 0);
+    if (blp) return pipeline::BLPLoader::load(data);
+    pipeline::BLPImage image;
+    int w = 0, h = 0, n = 0;
+    unsigned char* px = stbi_load_from_memory(data.data(), static_cast<int>(data.size()),
+                                              &w, &h, &n, 4);
+    if (!px) return image;
+    image.width = w;
+    image.height = h;
+    image.channels = 4;
+    image.data.assign(px, px + static_cast<size_t>(w) * h * 4);
+    stbi_image_free(px);
+    return image;
+}
+
 // Additive art is uploaded as its own image, because the same file can be
 // asked for both ways and the two differ in their alpha channel.
 static std::string cacheKey(const std::string& path, bool add) {
@@ -113,6 +133,28 @@ std::vector<uint8_t> WidgetRenderer::readTextureFile(const std::string& path,
     // 3.3.5. The real client accepts the name and loads the BLP beside it;
     // taking the extension at its word left every one of those blank, which
     // looks exactly like art nobody meant to draw.
+    //
+    // An addon's own art is the exception, because it is a file on disk rather
+    // than something extracted from the archives, and the client reads it as
+    // it is: ElvUI ships 160 .tga textures, and names most of them with no
+    // extension at all - which the client tries as .blp and then as .tga.
+    {
+        std::string lower = resolved;
+        for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        std::replace(lower.begin(), lower.end(), '/', '\\');
+        if (lower.compare(0, 17, "interface\\addons\\") == 0) {
+            const bool hasExt = endsWith(".tga") || endsWith(".blp");
+            for (const std::string& candidate :
+                 hasExt ? std::vector<std::string>{resolved}
+                        : std::vector<std::string>{resolved + ".blp", resolved + ".tga"}) {
+                auto own = assets_->readFileOptional(candidate);
+                if (!own.empty()) {
+                    resolvedOut = candidate;
+                    return own;
+                }
+            }
+        }
+    }
     if (endsWith(".tga")) resolved.replace(resolved.size() - 4, 4, ".blp");
     else if (!endsWith(".blp")) resolved += ".blp";
 
@@ -157,7 +199,7 @@ VkDescriptorSet WidgetRenderer::texture(const std::string& path, bool add) {
         cache[key] = kMissing;
         return kMissing;
     }
-    auto image = pipeline::BLPLoader::load(data);
+    auto image = decodeTextureImage(data);
     if (!image.isValid()) {
         LOG_WARNING("Widget texture unreadable: ", resolved);
         cache[key] = kMissing;
@@ -182,6 +224,35 @@ VkDescriptorSet WidgetRenderer::texture(const std::string& path, bool add) {
     return set;
 }
 
+
+VkDescriptorSet WidgetRenderer::greyTexture(const std::string& path, bool add,
+                                            VkDescriptorSet colour) {
+    const std::string key = cacheKey(path, add) + "|grey";
+    auto& cache = textureCache();
+    if (auto it = cache.find(key); it != cache.end()) {
+        return it->second == kMissing ? colour : it->second;
+    }
+    if (!assets_ || !vkCtx_) return colour;
+    std::string resolved;
+    auto data = readTextureFile(path, resolved);
+    auto image = data.empty() ? pipeline::BLPImage{} : decodeTextureImage(data);
+    if (!image.isValid() || image.data.empty()) {
+        cache[key] = kMissing;
+        return colour;
+    }
+    // The client's desaturation: each pixel to its luminance, alpha kept.
+    for (size_t i = 0; i + 3 < image.data.size(); i += 4) {
+        const auto lum = static_cast<uint8_t>(
+            std::min(255.0f, 0.299f * image.data[i] + 0.587f * image.data[i + 1] +
+                                 0.114f * image.data[i + 2]));
+        image.data[i] = image.data[i + 1] = image.data[i + 2] = lum;
+        if (add) image.data[i + 3] = static_cast<uint8_t>((image.data[i + 3] * lum) / 255);
+    }
+    const VkDescriptorSet set = vkCtx_->uploadImGuiTexture(image.data.data(), image.width,
+                                                           image.height, crisp_);
+    cache[key] = set;
+    return set;
+}
 
 bool WidgetRenderer::textureSize(const std::string& path, float& w, float& h) {
     if (path.empty()) return false;
@@ -213,8 +284,15 @@ bool WidgetRenderer::textureSize(const std::string& path, float& w, float& h) {
              (static_cast<uint32_t>(data[14]) << 16) | (static_cast<uint32_t>(data[15]) << 24);
         ih = static_cast<uint32_t>(data[16]) | (static_cast<uint32_t>(data[17]) << 8) |
              (static_cast<uint32_t>(data[18]) << 16) | (static_cast<uint32_t>(data[19]) << 24);
+    } else {
+        // An addon's .tga: the header, through stb, without decoding.
+        int sw = 0, sh = 0, sn = 0;
+        if (stbi_info_from_memory(data.data(), static_cast<int>(data.size()), &sw, &sh, &sn)) {
+            iw = static_cast<uint32_t>(sw);
+            ih = static_cast<uint32_t>(sh);
+        }
     }
-    if (!blp || iw == 0 || ih == 0 || iw > 8192 || ih > 8192) {
+    if (iw == 0 || ih == 0 || iw > 8192 || ih > 8192) {
         textureSizes_[path] = {0.0f, 0.0f};
         return false;
     }
@@ -1126,6 +1204,15 @@ void WidgetRenderer::drawStatusBar(ImDrawList* dl, const Widget& w,
     if (tex != kMissing) {
         // The texture is cropped to the filled part rather than squashed into
         // it, so a bar at half value shows half its art at its own scale.
+        if (w.barVertical && w.barRotatesTexture) {
+            // The art turned a quarter: its length runs up the bar, cropped
+            // to the filled part the same way.
+            dl->AddImageQuad(reinterpret_cast<ImTextureID>(tex),
+                             ImVec2(x0, fy0), ImVec2(x1, fy0), ImVec2(x1, y1), ImVec2(x0, y1),
+                             ImVec2(f, 0.0f), ImVec2(f, 1.0f), ImVec2(0.0f, 1.0f), ImVec2(0.0f, 0.0f),
+                             col);
+            return;
+        }
         const float u1 = w.barVertical ? 1.0f : f;
         const float v0 = w.barVertical ? (1.0f - f) : 0.0f;
         dl->AddImage(reinterpret_cast<ImTextureID>(tex), ImVec2(x0, fy0), ImVec2(fx1, y1),
@@ -1497,7 +1584,7 @@ const WidgetRenderer::BlobArt& WidgetRenderer::blobArt(const std::string& path, 
 
     std::string resolved;
     const auto data = assets_ ? readTextureFile(path, resolved) : std::vector<uint8_t>{};
-    const auto image = data.empty() ? pipeline::BLPImage{} : pipeline::BLPLoader::load(data);
+    const auto image = data.empty() ? pipeline::BLPImage{} : decodeTextureImage(data);
     if (image.isValid() && image.width > 0 && image.height > 0 &&
         image.data.size() >= static_cast<size_t>(image.width) * image.height * 4) {
         const int w = image.width;
@@ -2861,6 +2948,16 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
     }
 
     for (const Widget* w : order) {
+        // Drawn by the client itself; see Widget::clientDrawn.
+        if (w->clientDrawn) continue;
+        // A region in a layer its frame has switched off (DisableDrawLayer).
+        if (w->kind == WidgetKind::Texture || w->kind == WidgetKind::FontString) {
+            if (const Widget* owner = tree.get(w->parent);
+                owner && owner->disabledLayers != 0 &&
+                (owner->disabledLayers & (1u << static_cast<unsigned>(w->layer))) != 0) {
+                continue;
+            }
+        }
         // Anything inside a scroll frame is bounded by it. Without this a
         // scroll child taller than its window draws over everything above and
         // below, which is not a window onto it at all.
@@ -3416,6 +3513,7 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
                     continue;  // missing for good
                 }
                 tex = *set;
+                if (w->desaturated) tex = greyTexture(w->texturePath, w->blendAdd, tex);
             }
             if (tex == VK_NULL_HANDLE) continue;
             // SetTexCoord is left/right/top/bottom in WoW's own order, and its
@@ -3450,6 +3548,17 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
                     const float halfV = aspect > 1.0f ? 0.5f / aspect : 0.5f;
                     uv0 = ImVec2(0.5f - halfU, 0.5f - halfV);
                     uv1 = ImVec2(0.5f + halfU, 0.5f + halfV);
+                }
+            }
+            // Tiled: the art repeats at its own size along that axis, so the
+            // coordinates run past 1 by as many repeats as fit (the sampler
+            // wraps). ElvUI tiles its status bar textures and borders.
+            if (!live && !w->texCoordRotated && (w->horizTile || w->vertTile)) {
+                float tw = 0.0f, th = 0.0f;
+                const float px = tree.uiScale() * (w->effScale > 0.0f ? w->effScale : 1.0f);
+                if (px > 0.0f && textureSize(w->texturePath, tw, th) && tw > 0.0f && th > 0.0f) {
+                    if (w->horizTile) uv1.x = uv0.x + (x1 - x0) / (tw * px);
+                    if (w->vertTile)  uv1.y = uv0.y + (y1 - y0) / (th * px);
                 }
             }
             if (!live && w->texCoordRotated) {
@@ -3516,6 +3625,48 @@ void WidgetRenderer::draw(WidgetTree& tree, float screenW, float screenH) {
                     dl->PrimWriteIdx(
                         static_cast<ImDrawIdx>(base + 1 + ((i + 1) % kSegments)));
                 }
+                dl->PopTextureID();
+            } else if (!live && (w->rotation != 0.0f || w->hasGradient)) {
+                // SetRotation turns the art about the texture's centre;
+                // SetGradient colours it edge to edge. Both want a quad with
+                // a UV and a colour of its own at each corner.
+                const float cu = (uv0.x + uv1.x) * 0.5f, cv = (uv0.y + uv1.y) * 0.5f;
+                const float hu = (uv1.x - uv0.x) * 0.5f, hv = (uv1.y - uv0.y) * 0.5f;
+                const float cs = std::cos(w->rotation), sn = std::sin(w->rotation);
+                // Corners in screen order (TL, TR, BR, BL) as offsets from the
+                // centre with y up; the art turns anticlockwise, so each corner
+                // samples the point turned the other way.
+                const float ox[4] = {-1.0f, 1.0f, 1.0f, -1.0f};
+                const float oy[4] = {1.0f, 1.0f, -1.0f, -1.0f};
+                const ImVec2 pos[4] = {ImVec2(x0, y0), ImVec2(x1, y0), ImVec2(x1, y1), ImVec2(x0, y1)};
+                ImU32 cols[4];
+                for (int c = 0; c < 4; ++c) {
+                    float rgba[4];
+                    if (w->hasGradient) {
+                        // min is the left edge across, the bottom edge up.
+                        const float t = w->gradientVertical ? (oy[c] > 0.0f ? 1.0f : 0.0f)
+                                                            : (ox[c] > 0.0f ? 1.0f : 0.0f);
+                        for (int k = 0; k < 4; ++k) {
+                            rgba[k] = (w->gradientMin[k] + (w->gradientMax[k] - w->gradientMin[k]) * t) *
+                                      w->color[k];
+                        }
+                    } else {
+                        for (int k = 0; k < 4; ++k) rgba[k] = w->color[k];
+                    }
+                    cols[c] = packColor(rgba, w->alpha);
+                }
+                dl->PushTextureID(reinterpret_cast<ImTextureID>(tex));
+                dl->PrimReserve(6, 4);
+                const auto base = static_cast<ImDrawIdx>(dl->_VtxCurrentIdx);
+                for (int c = 0; c < 4; ++c) {
+                    const float sx = ox[c] * cs + oy[c] * sn;
+                    const float sy = -ox[c] * sn + oy[c] * cs;
+                    dl->PrimWriteVtx(pos[c], ImVec2(cu + sx * hu, cv - sy * hv), cols[c]);
+                }
+                dl->PrimWriteIdx(base); dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 1));
+                dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 2));
+                dl->PrimWriteIdx(base); dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 2));
+                dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + 3));
                 dl->PopTextureID();
             } else {
                 dl->AddImage(reinterpret_cast<ImTextureID>(tex),

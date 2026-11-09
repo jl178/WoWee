@@ -1582,6 +1582,8 @@ bool Application::initialize() {
             addonManager_->setExtraAddonRoot(assetManager->getOverridePath() + "/interface/addons");
             addonsDir_ = addonsDir;
             addonManager_->scanAddons(addonsDir);
+            // So an addon's own art and fonts resolve from wherever it was found.
+            assetManager->setAddonDirectories(addonManager_->addonDirectories());
             // Wire Lua errors to UI error display
             addonManager_->getLuaEngine()->setLuaErrorCallback([gh = gameHandler.get()](const std::string& err) {
                 // Not addUIError: that reports by firing an event, which runs
@@ -3373,7 +3375,10 @@ void Application::loadExpansionTables(const game::ExpansionProfile& profile) {
 }
 
 void Application::rescanAddons() {
-    if (addonManager_ && !addonsDir_.empty()) addonManager_->scanAddons(addonsDir_);
+    if (addonManager_ && !addonsDir_.empty()) {
+        addonManager_->scanAddons(addonsDir_);
+        if (assetManager) assetManager->setAddonDirectories(addonManager_->addonDirectories());
+    }
 }
 
 void Application::reloadExpansionData() {
@@ -5710,6 +5715,18 @@ void Application::render() {
                         map->setScreenRect(mm->left * sc,
                                            io.DisplaySize.y - (mm->bottom + mm->rectH) * sc,
                                            mm->rectW * sc, mm->rectH * sc);
+                        // Minimap:SetMaskTexture. The stock mask is the round
+                        // Textures\MinimapMask; an addon that hands it a solid
+                        // texture (ElvUI's square minimap) gets a square map.
+                        // Only once the interface has said something, so the
+                        // client's own square/round setting stands otherwise.
+                        if (mm->minimapMaskSet) {
+                            std::string lowerMask = mm->minimapMask;
+                            for (char& ch : lowerMask) {
+                                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                            }
+                            map->setSquareShape(lowerMask.find("minimapmask") == std::string::npos);
+                        }
 
                         // The zoom buttons move a number on the frame, and the
                         // map has to be told: Minimap:SetZoom is the interface

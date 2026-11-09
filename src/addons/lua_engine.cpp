@@ -215,8 +215,36 @@ static int lua_Frame_RegisterEvent(lua_State* L) {
 /// a single UnregisterEvent takes, so the global dispatch list is cleaned the
 /// way it already knows how rather than by a second copy of that logic.
 static int lua_Frame_UnregisterEvent(lua_State* L);
+/// frame:RegisterAllEvents() - every event the client fires reaches this
+/// frame, until UnregisterAllEvents. /eventtrace, DevTools and many debugging
+/// and logging addons are built on it; it was a no-op, so they heard nothing.
+/// Kept in __WoweeAllEventFrames, which dispatchEvent walks after the frames
+/// registered for the event by name.
+static int lua_Frame_RegisterAllEvents(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_getglobal(L, "__WoweeAllEventFrames");
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_setglobal(L, "__WoweeAllEventFrames");
+    }
+    lua_pushvalue(L, 1);
+    lua_pushboolean(L, 1);
+    lua_rawset(L, -3);
+    lua_pop(L, 1);
+    return 0;
+}
+
 static int lua_Frame_UnregisterAllEvents(lua_State* L) {
     luaL_checktype(L, 1, LUA_TTABLE);
+    lua_getglobal(L, "__WoweeAllEventFrames");
+    if (lua_istable(L, -1)) {
+        lua_pushvalue(L, 1);
+        lua_pushnil(L);
+        lua_rawset(L, -3);
+    }
+    lua_pop(L, 1);
     lua_getfield(L, 1, "__events");
     if (!lua_istable(L, -1)) { lua_pop(L, 1); return 0; }
     // Collected first: unregistering rewrites this table, and a traversal that
@@ -366,9 +394,71 @@ namespace {
 uint32_t widgetIdOf(lua_State* L, int index) {
     if (!lua_istable(L, index)) return 0;
     lua_getfield(L, index, "__wid");
-    const uint32_t id = static_cast<uint32_t>(lua_tointeger(L, -1));
+    uint32_t id = static_cast<uint32_t>(lua_tointeger(L, -1));
     lua_pop(L, 1);
+    if (id == 0) {
+        // [0] is the widget's own userdata, as in the real client. A table
+        // that carries only that - the "surrogate" restrictedframes.lua builds
+        // for a secure frame handle, { [0] = frame[0], [1] = frame } with the
+        // frame's metatable - is the same widget, and every method called on
+        // it has to act on the frame.
+        lua_rawgeti(L, index, 0);
+        if (lua_type(L, -1) == LUA_TLIGHTUSERDATA) {
+            id = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(lua_touserdata(L, -1)));
+        }
+        lua_pop(L, 1);
+    }
     return id;
+}
+
+/// Stamp a newly made widget table with [0], the userdata that names its
+/// widget. Addons test for it to tell a widget from a plain table, and the
+/// secure handle code copies it to make a stand-in for the frame.
+static void setWidgetUserdata(lua_State* L, int tableIndex, uint32_t id) {
+    const int abs = tableIndex > 0 ? tableIndex : lua_gettop(L) + tableIndex + 1;
+    lua_pushlightuserdata(L, reinterpret_cast<void*>(static_cast<uintptr_t>(id)));
+    lua_rawseti(L, abs, 0);
+}
+
+/// Remember a texture or font string's table against its widget, so
+/// GetRegions can hand the regions back - frames have __WoweeFramesByWid for
+/// the same reason.
+static void registerRegionTable(lua_State* L, int tableIndex, uint32_t id) {
+    const int abs = tableIndex > 0 ? tableIndex : lua_gettop(L) + tableIndex + 1;
+    lua_getglobal(L, "__WoweeRegionsByWid");
+    if (lua_istable(L, -1)) {
+        lua_pushinteger(L, static_cast<lua_Integer>(id));
+        lua_pushvalue(L, abs);
+        lua_rawset(L, -3);
+    }
+    lua_pop(L, 1);
+}
+
+/// __WoweeRealFrame(t) - the frame a surrogate stands for, or t itself.
+///
+/// For the methods written in Lua, which keep their state in fields on the
+/// frame table (__attributes, __id): called through a surrogate they would
+/// read and write the surrogate's own empty fields instead.
+static int lua_WoweeRealFrame(lua_State* L) {
+    if (!lua_istable(L, 1)) { lua_settop(L, 1); return 1; }
+    lua_pushstring(L, "__wid");
+    lua_rawget(L, 1);
+    const bool own = !lua_isnil(L, -1);
+    lua_pop(L, 1);
+    if (own) { lua_settop(L, 1); return 1; }
+    lua_rawgeti(L, 1, 0);
+    if (lua_type(L, -1) == LUA_TLIGHTUSERDATA) {
+        const auto id = static_cast<lua_Integer>(reinterpret_cast<uintptr_t>(lua_touserdata(L, -1)));
+        lua_pop(L, 1);
+        lua_getglobal(L, "__WoweeFramesByWid");
+        if (lua_istable(L, -1)) {
+            lua_pushinteger(L, id);
+            lua_rawget(L, -2);
+            if (lua_istable(L, -1)) return 1;
+        }
+    }
+    lua_settop(L, 1);
+    return 1;
 }
 
 wowee::ui::Widget* widgetOf(lua_State* L, int index) {
@@ -461,6 +551,118 @@ uint32_t widgetIdByAnchorName(lua_State* L, int selfIndex, const char* name) {
 }
 
 LuaEngine* engineFrom(lua_State* L);
+
+/// One frame of a stack, the way the real client's debugstack and error
+/// frame print it: "file:line: in function `name'", or "in function
+/// <file:defined>" for an anonymous one, or "in main chunk".
+static std::string describeStackLevel(lua_State* L, int level, bool* ok) {
+    lua_Debug ar;
+    *ok = lua_getstack(L, level, &ar) && lua_getinfo(L, "Sln", &ar);
+    if (!*ok) return {};
+    std::string out = ar.short_src[0] ? ar.short_src : "?";
+    if (ar.currentline > 0) out += ":" + std::to_string(ar.currentline);
+    out += ": ";
+    if (ar.what && std::strcmp(ar.what, "main") == 0) {
+        out += "in main chunk";
+    } else if (ar.name && *ar.name) {
+        out += "in function `";
+        out += ar.name;
+        out += "'";
+    } else if (ar.what && std::strcmp(ar.what, "C") == 0) {
+        out += "?";
+    } else {
+        out += "in function <";
+        out += ar.short_src[0] ? ar.short_src : "?";
+        out += ":" + std::to_string(ar.linedefined) + ">";
+    }
+    return out;
+}
+
+/// debugstack([start [, countTop [, countBottom]]]) - the call stack as text,
+/// from the function that called debugstack (start 1) outwards. The first
+/// countTop levels and the last countBottom, with "..." between when some
+/// were left out; 12 and 10 by default, as in the client.
+///
+/// It answered "" before. oUF names the function that registered an element
+/// by matching this - debugstack(2,2,0):match(": in function [`<](.-)['>]") -
+/// and AceLocale and the error reporters read it too.
+static int lua_debugstack(lua_State* L) {
+    const int start = static_cast<int>(luaL_optnumber(L, 1, 1));
+    const int top = static_cast<int>(luaL_optnumber(L, 2, 12));
+    const int bottom = static_cast<int>(luaL_optnumber(L, 3, 10));
+    std::vector<std::string> lines;
+    for (int level = start < 0 ? 0 : start; level < start + 256; ++level) {
+        bool ok = false;
+        std::string s = describeStackLevel(L, level, &ok);
+        if (!ok) break;
+        lines.push_back(std::move(s));
+    }
+    std::string out;
+    const int n = static_cast<int>(lines.size());
+    for (int i = 0; i < n; ++i) {
+        if (i < top || i >= n - bottom) {
+            out += lines[static_cast<size_t>(i)];
+            out += "\n";
+        } else if (i == top) {
+            out += "...\n";
+        }
+    }
+    lua_pushstring(L, out.c_str());
+    return 1;
+}
+
+/// __WoweeBindStatusBarFill(bar, texture) - make the texture the bar's fill
+/// region (Widget::barFillRegion). The bar goes on drawing the fill; the
+/// region is laid out over it and passes its setters through.
+static int lua_WoweeBindStatusBarFill(lua_State* L) {
+    auto* tree = wowee::addons::getWidgetTree(L);
+    if (!tree) return 0;
+    auto* bar = tree->get(widgetIdOf(L, 1));
+    auto* tex = tree->get(widgetIdOf(L, 2));
+    if (!bar || !tex) return 0;
+    bar->barFillRegion = tex->id;
+    tex->fillOfBar = bar->id;
+    tex->clientDrawn = true;
+    tex->texturePath = bar->barTexture;
+    tree->markLayoutDirty();
+    return 0;
+}
+
+/// The bar a texture is the fill of, or null.
+static wowee::ui::Widget* fillBarOf(lua_State* L, const wowee::ui::Widget* tex) {
+    if (!tex || tex->fillOfBar == 0) return nullptr;
+    auto* tree = wowee::addons::getWidgetTree(L);
+    return tree ? tree->get(tex->fillOfBar) : nullptr;
+}
+
+/// __WoweeSetClientDrawn(widget, flag) - see Widget::clientDrawn.
+static int lua_WoweeSetClientDrawn(lua_State* L) {
+    if (auto* tree = wowee::addons::getWidgetTree(L)) {
+        lua_getfield(L, 1, "__wid");
+        const auto id = static_cast<uint32_t>(lua_tointeger(L, -1));
+        lua_pop(L, 1);
+        if (auto* w = tree->get(id)) w->clientDrawn = lua_toboolean(L, 2) != 0;
+    }
+    return 0;
+}
+
+/// The default error handler (geterrorhandler()): log the error with the
+/// stack it was raised on, note it in lua_errors.txt, and hand the message
+/// back so an xpcall caller still has it.
+static int lua_WoweeReportError(lua_State* L) {
+    const char* msg = lua_tostring(L, 1);
+    std::string text = msg ? msg : "(error)";
+    for (int level = 1; level < 14; ++level) {
+        bool ok = false;
+        std::string s = describeStackLevel(L, level, &ok);
+        if (!ok) break;
+        text += "\n      at " + s;
+    }
+    LOG_ERROR("LuaEngine: ", text);
+    if (LuaEngine* engine = engineFrom(L)) engine->noteLuaError(text);
+    lua_settop(L, 1);
+    return 1;
+}
 
 /// Report a script that raised, from the free functions that call one.
 ///
@@ -1038,7 +1240,12 @@ static int lua_Region_SetParent(lua_State* L) {
 
 static int lua_Region_GetParent(lua_State* L) {
     luaL_checktype(L, 1, LUA_TTABLE);
-    lua_getfield(L, 1, "__parent");
+    // The frame itself when asked through a secure handle's surrogate, which
+    // has no fields of its own.
+    lua_pushcfunction(L, lua_WoweeRealFrame);
+    lua_pushvalue(L, 1);
+    lua_call(L, 1, 1);
+    lua_getfield(L, -1, "__parent");
     return 1;
 }
 
@@ -1100,12 +1307,20 @@ int lua_Region_SetScale(lua_State* L) {
         const float v = static_cast<float>(luaL_optnumber(L, 2, 1.0));
         // A scale of zero collapses the frame and everything under it to
         // nothing, with no way back from Lua; WoW rejects it too.
-        if (v > 0.0f) w->scale = v;
+        if (v > 0.0f && v != w->scale) {
+            w->scale = v;
+            // Everything under it is measured again: a frame's size in its own
+            // units is the screen's divided by its scale, and an addon that
+            // sets the scale and then asks the size - ElvUI sizes its whole
+            // parent frame from UIParent:GetSize() right after
+            // UIParent:SetScale() - was answered with the old one.
+            if (auto* tree = wowee::addons::getWidgetTree(L)) tree->markLayoutDirty();
+        }
     }
     return 0;
 }
 int lua_Region_GetEffectiveScale(lua_State* L) {
-    const auto* w = widgetOf(L, 1);
+    const auto* w = measuredWidgetOf(L, 1);
     lua_pushnumber(L, w ? w->effScale : 1.0);
     return 1;
 }
@@ -3890,6 +4105,8 @@ int lua_Texture_SetTexture(lua_State* L) {
         w->solidColor = false;
         w->texturePath = luaL_optstring(L, 2, "");
     }
+    // A bar's fill region: the picture is the bar's.
+    if (auto* bar = fillBarOf(L, w); bar && !w->solidColor) bar->barTexture = w->texturePath;
     // Stock answers 1 when the texture is there and nil when it is not, and
     // FrameXML tests it: LFDDungeonReadyDialog falls back to the Deadmines
     // picture when SetTexture fails. Returning nothing made every call a
@@ -3912,6 +4129,10 @@ int lua_Texture_SetTexture(lua_State* L) {
 }
 int lua_Texture_GetTexture(lua_State* L) {
     const auto* w = widgetOf(L, 1);
+    if (const auto* bar = fillBarOf(L, w)) {
+        lua_pushstring(L, bar->barTexture.c_str());
+        return 1;
+    }
     lua_pushstring(L, w ? w->texturePath.c_str() : "");
     return 1;
 }
@@ -3968,6 +4189,11 @@ int lua_Region_SetVertexColor(lua_State* L) {
         w->color[1] = static_cast<float>(luaOptNumberText(L, 3, 1.0));
         w->color[2] = static_cast<float>(luaOptNumberText(L, 4, 1.0));
         w->color[3] = static_cast<float>(luaOptNumberText(L, 5, 1.0));
+        // A bar's fill region: its colour is the bar's colour, which is all
+        // SetStatusBarColor is in the client.
+        if (auto* bar = fillBarOf(L, w)) {
+            for (int i = 0; i < 4; ++i) bar->barColor[i] = w->color[i];
+        }
     }
     return 0;
 }
@@ -3981,6 +4207,7 @@ int lua_Region_SetDrawLayer(lua_State* L) {
         // behind the fill rather than over it.
         if (w->isStatusBar) w->barLayer = layer;
         else                w->layer = layer;
+        if (auto* bar = fillBarOf(L, w)) bar->barLayer = layer;
         w->subLevel = static_cast<int>(luaL_optnumber(L, 3, 0));
     }
     return 0;
@@ -4075,8 +4302,52 @@ int lua_FontString_SetText(lua_State* L) {
     lua_setfield(L, 1, "_text");
     return 0;
 }
+/// GameTooltip:AddFontStrings(left, right) - two font strings become the
+/// tooltip's next line. The line number is one past every line its template
+/// declared (<Name>TextLeft1..N) and every pair added before, which is where
+/// the real client puts them.
+int lua_Tooltip_AddFontStrings(lua_State* L) {
+    auto* tree = wowee::addons::getWidgetTree(L);
+    auto* tip = widgetOf(L, 1);
+    if (!tree || !tip) return 0;
+    int declared = 0;
+    if (!tip->name.empty()) {
+        while (tree->findByName(tip->name + "TextLeft" + std::to_string(declared + 1))) {
+            ++declared;
+        }
+    }
+    const int line = declared + static_cast<int>(tip->tooltipAddedLines.size()) + 1;
+    uint32_t ids[2] = {0, 0};
+    for (int side = 0; side < 2; ++side) {
+        if (!lua_istable(L, 2 + side)) continue;
+        if (auto* fs = tree->get(widgetIdOf(L, 2 + side))) {
+            fs->tooltipLineOwner = tip->id;
+            fs->tooltipLineIndex = line;
+            fs->tooltipLineRight = side == 1;
+            ids[side] = fs->id;
+        }
+    }
+    tip->isTooltip = true;
+    tip->tooltipAddedLines.emplace_back(ids[0], ids[1]);
+    return 0;
+}
+
 int lua_FontString_GetText(lua_State* L) {
     const auto* w = widgetOf(L, 1);
+    // A line handed over with AddFontStrings answers with that line.
+    if (w && w->text.empty() && w->tooltipLineOwner != 0) {
+        auto* tree = wowee::addons::getWidgetTree(L);
+        const wowee::ui::Widget* owner = tree ? tree->get(w->tooltipLineOwner) : nullptr;
+        const size_t n = static_cast<size_t>(w->tooltipLineIndex);
+        if (owner && n >= 1 && n <= owner->tooltipLines.size()) {
+            const auto& line = owner->tooltipLines[n - 1];
+            const std::string& t = w->tooltipLineRight ? line.right : line.left;
+            if (t.empty()) lua_pushnil(L); else lua_pushstring(L, t.c_str());
+            return 1;
+        }
+        lua_pushnil(L);
+        return 1;
+    }
     // A tooltip's GameTooltipTextLeft<n> / TextRight<n>. The lines live in the
     // tooltip's own list here and those FontStrings stay empty, so reading a
     // tooltip the stock way - _G[tip:GetName().."TextLeft"..i]:GetText(),
@@ -4109,11 +4380,17 @@ int lua_FontString_GetText(lua_State* L) {
     return 1;
 }
 int lua_FontString_SetJustifyH(lua_State* L) {
-    if (auto* w = widgetOf(L, 1)) w->justifyH = luaL_optstring(L, 2, "CENTER");
+    if (auto* w = widgetOf(L, 1)) {
+        w->justifyH = luaL_optstring(L, 2, "CENTER");
+        w->fontOwned |= wowee::ui::Widget::kFontOwnJustifyH;
+    }
     return 0;
 }
 int lua_FontString_SetJustifyV(lua_State* L) {
-    if (auto* w = widgetOf(L, 1)) w->justifyV = luaL_optstring(L, 2, "MIDDLE");
+    if (auto* w = widgetOf(L, 1)) {
+        w->justifyV = luaL_optstring(L, 2, "MIDDLE");
+        w->fontOwned |= wowee::ui::Widget::kFontOwnJustifyV;
+    }
     return 0;
 }
 int lua_FontString_GetJustifyV(lua_State* L) {
@@ -4187,16 +4464,18 @@ int lua_FontString_SetTextColor(lua_State* L) {
         lua_pop(L, 1);
     }
     if (w) {
-        w->color[0] = static_cast<float>(luaL_optnumber(L, 2, 1.0));
-        w->color[1] = static_cast<float>(luaL_optnumber(L, 3, 1.0));
-        w->color[2] = static_cast<float>(luaL_optnumber(L, 4, 1.0));
-        w->color[3] = static_cast<float>(luaL_optnumber(L, 5, 1.0));
+        w->color[0] = static_cast<float>(luaOptNumberText(L, 2, 1.0));
+        w->color[1] = static_cast<float>(luaOptNumberText(L, 3, 1.0));
+        w->color[2] = static_cast<float>(luaOptNumberText(L, 4, 1.0));
+        w->color[3] = static_cast<float>(luaOptNumberText(L, 5, 1.0));
+        w->fontOwned |= wowee::ui::Widget::kFontOwnColor;
     }
     return 0;
 }
 
 int lua_FontString_SetFont(lua_State* L) {
     if (auto* w = widgetOf(L, 1)) {
+        w->fontOwned |= wowee::ui::Widget::kFontOwnFace;
         if (lua_isstring(L, 2)) w->fontFace = lua_tostring(L, 2);
         // The flags argument, where "OUTLINE" and "THICKOUTLINE" arrive.
         if (const char* flags = lua_isstring(L, 4) ? lua_tostring(L, 4) : nullptr) {
@@ -4264,8 +4543,10 @@ int lua_FontString_SetSpacing(lua_State* L) {
 /// Shared because a button says the same thing a different way: a font string
 /// has SetFontObject, a button has SetNormalFontObject and the font belongs to
 /// the font string it holds.
-static void applyFontObject(lua_State* L, int fontIndex, wowee::ui::Widget* w) {
+static void applyFontObject(lua_State* L, int fontIndex, wowee::ui::Widget* w,
+                            uint8_t skip = 0) {
     if (!w) return;
+    using wowee::ui::Widget;
     if (lua_isstring(L, fontIndex)) {       // by name
         // Remembered, not only unpacked. GetFontObject has to hand the object
         // back, and the fields copied out of it cannot be reassembled into the
@@ -4278,6 +4559,7 @@ static void applyFontObject(lua_State* L, int fontIndex, wowee::ui::Widget* w) {
         lua_pushvalue(L, fontIndex);
     }
     if (lua_istable(L, -1)) {
+      if (!(skip & Widget::kFontOwnFace)) {
         lua_getfield(L, -1, "height");
         if (lua_isnumber(L, -1)) w->fontHeight = static_cast<float>(lua_tonumber(L, -1));
         lua_pop(L, 1);
@@ -4290,21 +4572,27 @@ static void applyFontObject(lua_State* L, int fontIndex, wowee::ui::Widget* w) {
         lua_getfield(L, -1, "outline");
         if (lua_isstring(L, -1)) w->fontOutline = lua_tostring(L, -1);
         lua_pop(L, 1);
+      }
         // Which way it sits in its box. A font object carries this and it was
         // being read off the object by nothing, so GameFontNormalLeft and
         // GameFontNormal drew identically.
-        lua_getfield(L, -1, "justifyH");
-        if (lua_isstring(L, -1)) w->justifyH = lua_tostring(L, -1);
-        lua_pop(L, 1);
-        lua_getfield(L, -1, "justifyV");
-        if (lua_isstring(L, -1)) w->justifyV = lua_tostring(L, -1);
-        lua_pop(L, 1);
+        if (!(skip & Widget::kFontOwnJustifyH)) {
+            lua_getfield(L, -1, "justifyH");
+            if (lua_isstring(L, -1)) w->justifyH = lua_tostring(L, -1);
+            lua_pop(L, 1);
+        }
+        if (!(skip & Widget::kFontOwnJustifyV)) {
+            lua_getfield(L, -1, "justifyV");
+            if (lua_isstring(L, -1)) w->justifyV = lua_tostring(L, -1);
+            lua_pop(L, 1);
+        }
         const char* keys[4] = {"r", "g", "b", "a"};
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 4 && !(skip & Widget::kFontOwnColor); ++i) {
             lua_getfield(L, -1, keys[i]);
             if (lua_isnumber(L, -1)) w->color[i] = static_cast<float>(lua_tonumber(L, -1));
             lua_pop(L, 1);
         }
+      if (!(skip & Widget::kFontOwnShadow)) {
         lua_getfield(L, -1, "shadowX");
         if (lua_isnumber(L, -1)) {
             w->hasShadow = true;
@@ -4322,24 +4610,43 @@ static void applyFontObject(lua_State* L, int fontIndex, wowee::ui::Widget* w) {
             }
             lua_pop(L, 1);
         }
+      }
     }
     lua_pop(L, 1);
+}
+
+/// __WoweeApplyFontRaw(user, font) - a font object has changed: give the
+/// widget that follows it the settings it has not set for itself.
+static int lua_WoweeApplyFontRaw(lua_State* L) {
+    auto* tree = wowee::addons::getWidgetTree(L);
+    wowee::ui::Widget* w = widgetOf(L, 1);
+    if (w && w->kind != wowee::ui::WidgetKind::FontString && tree) {
+        lua_getfield(L, 1, "__fontString");
+        if (lua_istable(L, -1)) {
+            if (auto* fs = tree->get(widgetIdOf(L, lua_gettop(L)))) w = fs;
+        }
+        lua_pop(L, 1);
+    }
+    if (w) applyFontObject(L, 2, w, w->fontOwned);
+    return 0;
 }
 
 int lua_FontString_SetShadowOffset(lua_State* L) {
     if (auto* w = widgetOf(L, 1)) {
         w->hasShadow = true;
-        w->shadowX = static_cast<float>(luaL_optnumber(L, 2, 1.0));
-        w->shadowY = static_cast<float>(luaL_optnumber(L, 3, -1.0));
+        w->shadowX = static_cast<float>(luaOptNumberText(L, 2, 1.0));
+        w->shadowY = static_cast<float>(luaOptNumberText(L, 3, -1.0));
+        w->fontOwned |= wowee::ui::Widget::kFontOwnShadow;
     }
     return 0;
 }
 int lua_FontString_SetShadowColor(lua_State* L) {
     if (auto* w = widgetOf(L, 1)) {
-        w->shadowColor[0] = static_cast<float>(luaL_optnumber(L, 2, 0.0));
-        w->shadowColor[1] = static_cast<float>(luaL_optnumber(L, 3, 0.0));
-        w->shadowColor[2] = static_cast<float>(luaL_optnumber(L, 4, 0.0));
-        w->shadowColor[3] = static_cast<float>(luaL_optnumber(L, 5, 1.0));
+        w->fontOwned |= wowee::ui::Widget::kFontOwnShadow;
+        w->shadowColor[0] = static_cast<float>(luaOptNumberText(L, 2, 0.0));
+        w->shadowColor[1] = static_cast<float>(luaOptNumberText(L, 3, 0.0));
+        w->shadowColor[2] = static_cast<float>(luaOptNumberText(L, 4, 0.0));
+        w->shadowColor[3] = static_cast<float>(luaOptNumberText(L, 5, 1.0));
     }
     return 0;
 }
@@ -4358,6 +4665,7 @@ int lua_FontString_SetTextHeight(lua_State* L) {
     if (auto* w = widgetOf(L, 1)) {
         const double h = luaL_optnumber(L, 2, 0.0);
         if (h > 0.0) w->fontHeight = static_cast<float>(h);
+        w->fontOwned |= wowee::ui::Widget::kFontOwnFace;
     }
     return 0;
 }
@@ -4374,7 +4682,22 @@ int lua_FontString_SetFontObject(lua_State* L) {
         }
         lua_pop(L, 1);
     }
+    // Taking a font object anew takes all of it, and from now on follows it.
+    if (w) w->fontOwned = 0;
     applyFontObject(L, 2, w);
+    lua_getglobal(L, "__WoweeFontInherit");
+    if (lua_isfunction(L, -1)) {
+        lua_pushvalue(L, 1);
+        if (lua_isstring(L, 2)) lua_getglobal(L, lua_tostring(L, 2));
+        else lua_pushvalue(L, 2);
+        if (lua_istable(L, -1)) {
+            lua_call(L, 2, 0);
+        } else {
+            lua_pop(L, 3);
+        }
+    } else {
+        lua_pop(L, 1);
+    }
     return 0;
 }
 
@@ -4423,6 +4746,10 @@ int lua_EditBox_GetInputLanguage(lua_State* L) {
 /// to seed the colour picker.
 int lua_Region_GetVertexColor(lua_State* L) {
     const auto* w = widgetOf(L, 1);
+    if (const auto* bar = fillBarOf(L, w)) {
+        for (int i = 0; i < 4; ++i) lua_pushnumber(L, bar->barColor[i]);
+        return 4;
+    }
     for (int i = 0; i < 4; ++i) lua_pushnumber(L, w ? w->color[i] : 1.0);
     return 4;
 }
@@ -4453,17 +4780,18 @@ int lua_Frame_SetNormalFontObject(lua_State* L) {
     // settings were applied to the button, the label arrived afterwards with
     // none of them, and a button that asked for GameFontNormalLeft drew its
     // text centred at the default size.
+    //
+    // No longer made here, though. The client makes a button's label when
+    // there is something to put in it (SetText, or a <ButtonText>), and the
+    // font named now is applied to it then - mt:SetText and mt:SetFontString
+    // both take __normalFont. Made eagerly, the label was a region the
+    // client does not have, ahead of every region the button's template
+    // declares, and addons that find a part of a button by its position in
+    // GetRegions() found this instead.
     lua_getfield(L, 1, "__fontString");
     if (!lua_istable(L, -1)) {
         lua_pop(L, 1);
-        lua_getfield(L, 1, "GetFontString");
-        if (lua_isfunction(L, -1)) {
-            lua_pushvalue(L, 1);
-            if (lua_pcall(L, 1, 1, 0) != 0) {
-                lua_pop(L, 1);
-                lua_pushnil(L);
-            }
-        }
+        return 0;
     }
     const uint32_t fsId =
         lua_istable(L, -1) ? widgetIdOf(L, lua_gettop(L)) : 0;
@@ -4491,8 +4819,129 @@ int lua_Frame_SetNormalFontObject(lua_State* L) {
     return 0;
 }
 
-/// Attach the shared region methods to the table on top of the stack.
-void installRegionMethods(lua_State* L, bool isTexture, bool isFontString) {
+// ── Texture state the renderer draws from ───────────────────────────────────
+//
+// Each was a no-op or absent. ElvUI desaturates unusable action buttons and
+// item icons (SetDesaturated, 26 calls), rotates its arrows and the minimap
+// ping (SetRotation, 16), fades its data bars with SetGradientAlpha, and
+// strips Blizzard frames with DisableDrawLayer.
+
+int lua_Texture_SetDesaturated(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) w->desaturated = lua_toboolean(L, 2) != 0;
+    // 1 where the client can desaturate, which it always can here.
+    lua_pushnumber(L, 1);
+    return 1;
+}
+int lua_Texture_IsDesaturated(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushboolean(L, w && w->desaturated);
+    return 1;
+}
+int lua_Texture_SetRotation(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) w->rotation = static_cast<float>(luaL_optnumber(L, 2, 0.0));
+    return 0;
+}
+int lua_Texture_GetRotation(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushnumber(L, w ? w->rotation : 0.0);
+    return 1;
+}
+/// SetGradient(orientation, r1, g1, b1, r2, g2, b2) and SetGradientAlpha with
+/// an alpha after each colour.
+static int setGradient(lua_State* L, bool withAlpha) {
+    auto* w = widgetOf(L, 1);
+    if (!w) return 0;
+    std::string o = luaL_optstring(L, 2, "HORIZONTAL");
+    toLowerInPlace(o);
+    w->gradientVertical = (o == "vertical");
+    const int stride = withAlpha ? 4 : 3;
+    for (int k = 0; k < 4; ++k) {
+        w->gradientMin[k] = (k < stride) ? static_cast<float>(luaL_optnumber(L, 3 + k, 1.0)) : 1.0f;
+        w->gradientMax[k] = (k < stride) ? static_cast<float>(luaL_optnumber(L, 3 + stride + k, 1.0)) : 1.0f;
+    }
+    w->hasGradient = true;
+    return 0;
+}
+int lua_Texture_SetHorizTile(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) w->horizTile = lua_toboolean(L, 2) != 0;
+    return 0;
+}
+int lua_Texture_GetHorizTile(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushboolean(L, w && w->horizTile);
+    return 1;
+}
+int lua_Texture_SetVertTile(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) w->vertTile = lua_toboolean(L, 2) != 0;
+    return 0;
+}
+int lua_Texture_GetVertTile(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushboolean(L, w && w->vertTile);
+    return 1;
+}
+int lua_Texture_SetGradient(lua_State* L) { return setGradient(L, false); }
+int lua_Texture_SetGradientAlpha(lua_State* L) { return setGradient(L, true); }
+/// GetTexCoord() -> the eight corner coordinates, upper-left, lower-left,
+/// upper-right, lower-right, as the client answers whichever form was set.
+int lua_Texture_GetTexCoord(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    if (!w) return 0;
+    if (w->texCoordRotated) {
+        for (float v : w->texCoordQuad) lua_pushnumber(L, v);
+        return 8;
+    }
+    const float l = w->texCoord[0], r = w->texCoord[1], t = w->texCoord[2], b = w->texCoord[3];
+    const float q[8] = {l, t, l, b, r, t, r, b};
+    for (float v : q) lua_pushnumber(L, v);
+    return 8;
+}
+/// GetDrawLayer() -> layer, sublevel.
+int lua_Region_GetDrawLayer(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    static const char* kNames[] = {"BACKGROUND", "BORDER", "ARTWORK", "OVERLAY", "HIGHLIGHT"};
+    const auto layer = w ? static_cast<unsigned>(w->layer) : 2u;
+    lua_pushstring(L, kNames[layer < 5 ? layer : 2]);
+    lua_pushnumber(L, w ? w->subLevel : 0);
+    return 2;
+}
+/// Frame:DisableDrawLayer(layer) / EnableDrawLayer(layer).
+static int setDrawLayerEnabled(lua_State* L, bool enabled) {
+    auto* w = widgetOf(L, 1);
+    if (!w) return 0;
+    const auto bit = static_cast<uint8_t>(1u << static_cast<unsigned>(
+        wowee::ui::parseDrawLayer(luaL_optstring(L, 2, "ARTWORK"))));
+    if (enabled) w->disabledLayers = static_cast<uint8_t>(w->disabledLayers & ~bit);
+    else         w->disabledLayers = static_cast<uint8_t>(w->disabledLayers | bit);
+    return 0;
+}
+int lua_Frame_DisableDrawLayer(lua_State* L) { return setDrawLayerEnabled(L, false); }
+int lua_Frame_EnableDrawLayer(lua_State* L) { return setDrawLayerEnabled(L, true); }
+
+int lua_FontString_GetShadowColor(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    for (int i = 0; i < 4; ++i) lua_pushnumber(L, w ? w->shadowColor[i] : 0.0);
+    return 4;
+}
+int lua_FontString_GetShadowOffset(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushnumber(L, w ? w->shadowX : 0.0);
+    lua_pushnumber(L, w ? w->shadowY : 0.0);
+    return 2;
+}
+
+/// GetSize() -> width, height, for a frame or a region: the pair the client
+/// answers, from the same measurement GetWidth and GetHeight make. It was a
+/// no-op, and ElvUI sizes each unit frame's mover with mover:Size(frame:GetSize()).
+int lua_Region_GetSize(lua_State* L) {
+    lua_settop(L, 1);
+    lua_Region_GetWidth(L);    // self, width
+    lua_Region_GetHeight(L);   // self, width, height - both read argument 1
+    return 2;
+}
+
+/// Fill the method table on top of the stack with a region kind's methods.
+static void fillRegionMethodTable(lua_State* L, bool isTexture, bool isFontString) {
     auto set = [&](const char* name, lua_CFunction fn) {
         lua_pushcfunction(L, fn);
         lua_setfield(L, -2, name);
@@ -4528,6 +4977,7 @@ void installRegionMethods(lua_State* L, bool isTexture, bool isFontString) {
     set("GetStringHeight", lua_Region_GetTextHeight);
     set("GetFieldSize", lua_Region_GetFieldSize);
     set("GetHeight", lua_Region_GetHeight);
+    set("GetSize", lua_Region_GetSize);
     set("GetLeft", lua_Region_GetLeft);
     set("GetRight", lua_Region_GetRight);
     set("GetBottom", lua_Region_GetBottom);
@@ -4570,7 +5020,19 @@ void installRegionMethods(lua_State* L, bool isTexture, bool isFontString) {
         set("SetTexCoord", lua_Texture_SetTexCoord);
         set("SetBlendMode", lua_Texture_SetBlendMode);
         set("GetBlendMode", lua_Texture_GetBlendMode);
+        set("SetDesaturated", lua_Texture_SetDesaturated);
+        set("IsDesaturated", lua_Texture_IsDesaturated);
+        set("SetRotation", lua_Texture_SetRotation);
+        set("GetRotation", lua_Texture_GetRotation);
+        set("SetGradient", lua_Texture_SetGradient);
+        set("SetGradientAlpha", lua_Texture_SetGradientAlpha);
+        set("GetTexCoord", lua_Texture_GetTexCoord);
+        set("SetHorizTile", lua_Texture_SetHorizTile);
+        set("GetHorizTile", lua_Texture_GetHorizTile);
+        set("SetVertTile", lua_Texture_SetVertTile);
+        set("GetVertTile", lua_Texture_GetVertTile);
     }
+    set("GetDrawLayer", lua_Region_GetDrawLayer);
     if (isFontString) {
         set("GetFont", lua_FontString_GetFont);
         set("SetFont", lua_FontString_SetFont);
@@ -4597,28 +5059,84 @@ void installRegionMethods(lua_State* L, bool isTexture, bool isFontString) {
         // most of them outside the XML - had none of these and raised on the
         // first call: Bagnon's options panel sets SetNonSpaceWrap on its
         // description text and took the whole panel down with it.
+        set("GetShadowColor", lua_FontString_GetShadowColor);
+        set("GetShadowOffset", lua_FontString_GetShadowOffset);
         set("SetWordWrap", lua_FontString_SetWordWrap);
         set("CanWordWrap", lua_FontString_CanWordWrap);
         set("SetNonSpaceWrap", lua_FontString_SetNonSpaceWrap);
     }
-    // Anything still unimplemented stays a no-op rather than an error, which is
-    // what keeps a large addon running while the surface is filled in.
-    // The same enumerated set the frame metatable uses, and for the same
-    // reason: a region carries data fields beside its methods, and answering
-    // both with a no-op makes a field that was never set look present.
-    // Built once and shared. This used to compile a fresh chunk for every
-    // region created, which over a FrameXML load is thousands of compiles of
-    // the same three lines.
-    lua_getfield(L, LUA_REGISTRYINDEX, "wowee_region_mt");
+}
+
+/// Give the region on top of the stack its kind's metatable.
+///
+/// One metatable per kind - Texture, FontString - whose __index is a table of
+/// methods, as in the real client. The methods used to be copied onto every
+/// region as fields of its own (some fifty per texture, thousands of regions
+/// in the interface), behind a metatable whose __index was a function. Both
+/// halves broke the way addons extend widgets: ElvUI's toolkit does
+///
+///     local mt = getmetatable(object:CreateTexture()).__index
+///     mt.SetInside = SetInside
+///
+/// once per widget type and expects every texture to have it - and indexing a
+/// function raised, which took the whole toolkit file down, and with it every
+/// skin, every unit frame and every bar.
+///
+/// Anything still unimplemented stays a no-op rather than an error: the same
+/// enumerated set the frame metatable uses, behind the method table, so a data
+/// field that was never set still reads as nil.
+void installRegionMethods(lua_State* L, bool isTexture, bool isFontString) {
+    const char* key = isTexture ? "wowee_texture_mt"
+                    : isFontString ? "wowee_fontstring_mt" : "wowee_region_mt";
+    lua_getfield(L, LUA_REGISTRYINDEX, key);
     if (!lua_istable(L, -1)) {
         lua_pop(L, 1);
+        lua_newtable(L);                       // the metatable
+        lua_newtable(L);                       // its method table
+        fillRegionMethodTable(L, isTexture, isFontString);
+        // The fallback behind the methods. The two animation methods are
+        // read from the globals the animation bootstrap publishes when they
+        // are first asked for, since a region can be made before it runs.
+        //
+        // A no-op only for a name this kind of region has in the client's
+        // API. The fallback used to answer every widget method name - frame
+        // methods included - so a texture claimed SetHighlightTexture and
+        // CreateTexture, and the ordinary way an addon asks what something
+        // is, `if obj.SetHighlightTexture then` (a button) `elseif
+        // obj.SetTexture then` (a texture), took the button branch for a
+        // texture and then called a CreateTexture that returned nothing.
+        // ElvUI's skins do exactly that on every highlight they restyle.
+        lua_pushstring(L, isTexture ? "texture" : (isFontString ? "fontstring" : "region"));
+        lua_setglobal(L, "__WoweeRegionKindForFallback");
         luaL_dostring(L,
-            "local known = __WoweeWidgetMethods or {} "
+            "local kind = __WoweeRegionKindForFallback "
+            "__WoweeRegionKindForFallback = nil "
+            "local names = 'GetAlpha GetName GetObjectType IsObjectType SetAlpha ClearAllPoints "
+            "  GetAnimationGroups GetBottom GetCenter GetHeight GetLeft GetNumPoints GetPoint GetRect "
+            "  GetRight GetSize GetTop GetWidth Hide IsDragging IsProtected IsShown IsVisible "
+            "  SetAllPoints SetHeight SetParent SetPoint SetSize SetWidth Show GetParent "
+            "  GetDrawLayer SetDrawLayer SetVertexColor GetVertexColor' "
+            "if kind == 'texture' then names = names .. ' GetBlendMode GetTexCoord GetTexture "
+            "  IsDesaturated SetBlendMode SetDesaturated SetGradient SetGradientAlpha SetTexCoord "
+            "  SetTexture SetRotation SetNonBlocking GetNonBlocking SetTexCoordModifiesRect "
+            "  GetTexCoordModifiesRect SetHorizTile SetVertTile GetHorizTile GetVertTile' end "
+            "if kind == 'fontstring' then names = names .. ' CanNonSpaceWrap CanWordWrap "
+            "  GetStringHeight GetStringWidth GetText IsTruncated SetAlphaGradient SetFormattedText "
+            "  SetNonSpaceWrap SetText SetTextHeight SetWordWrap GetFont GetFontObject GetJustifyH "
+            "  GetJustifyV GetShadowColor GetShadowOffset GetSpacing GetTextColor SetFont "
+            "  SetFontObject SetJustifyH SetJustifyV SetShadowColor SetShadowOffset SetSpacing "
+            "  SetTextColor' end "
+            "local known = {} "
+            "for n in names:gmatch('%S+') do known[n] = true end "
             "return { __index = function(_, k) "
+            "  if k == 'CreateAnimationGroup' then return rawget(_G, '__WoweeCreateAnimationGroup') end "
+            "  if k == 'StopAnimating' then return rawget(_G, '__WoweeStopAnimating') end "
             "  if type(k)=='string' and known[k] then return function() end end "
             "end }");
+        lua_setmetatable(L, -2);
+        lua_setfield(L, -2, "__index");
         lua_pushvalue(L, -1);
-        lua_setfield(L, LUA_REGISTRYINDEX, "wowee_region_mt");
+        lua_setfield(L, LUA_REGISTRYINDEX, key);
     }
     lua_setmetatable(L, -2);
 }
@@ -4862,6 +5380,80 @@ int lua_Frame_GetChildren(lua_State* L) {
     return pushed;
 }
 
+/// frame:GetRegions() - the frame's textures and font strings, in the order
+/// they were made; frame:GetNumRegions() - how many.
+///
+/// Both were no-ops, so the first answered nothing. That is the whole of how
+/// skins work: ElvUI's StripTextures walks GetRegions and hides every texture
+/// it finds, so every Blizzard window it reskinned kept its original art
+/// underneath the new - and the nameplate code finds a plate by its first
+/// region's texture.
+int lua_Frame_GetRegions(lua_State* L) {
+    auto* tree = wowee::addons::getWidgetTree(L);
+    const uint32_t id = widgetIdOf(L, 1);
+    if (!tree || id == 0) return 0;
+    const auto* w = tree->get(id);
+    if (!w) return 0;
+    lua_getglobal(L, "__WoweeRegionsByWid");
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); return 0; }
+    const int registry = lua_gettop(L);
+    if (!lua_checkstack(L, static_cast<int>(w->children.size()) + 2)) {
+        lua_pop(L, 1);
+        return 0;
+    }
+    int pushed = 0;
+    for (const uint32_t childId : w->children) {
+        const auto* child = tree->get(childId);
+        if (!child || child->kind == wowee::ui::WidgetKind::Frame) continue;
+        lua_pushinteger(L, static_cast<lua_Integer>(childId));
+        lua_rawget(L, registry);
+        if (lua_istable(L, -1)) ++pushed;
+        else lua_pop(L, 1);
+    }
+    lua_remove(L, registry);
+    return pushed;
+}
+
+int lua_Frame_GetNumRegions(lua_State* L) {
+    const int top = lua_gettop(L);
+    const int n = lua_Frame_GetRegions(L);
+    lua_settop(L, top);
+    lua_pushnumber(L, n);
+    return 1;
+}
+
+/// frame:GetNumChildren() - how many child frames GetChildren would answer.
+int lua_Frame_GetNumChildren(lua_State* L) {
+    const int top = lua_gettop(L);
+    const int n = lua_Frame_GetChildren(L);
+    lua_settop(L, top);
+    lua_pushnumber(L, n);
+    return 1;
+}
+
+/// EnumerateFrames([frame]) - the frame made after this one, or the first
+/// frame when given none; nil after the last. Every frame, in the order they
+/// were created, which is how the client walks them. ElvUI's toolkit uses it to
+/// reach one frame of each type and extend that type's methods.
+int lua_EnumerateFrames(lua_State* L) {
+    auto* tree = wowee::addons::getWidgetTree(L);
+    if (!tree) { lua_pushnil(L); return 1; }
+    uint32_t after = lua_istable(L, 1) ? widgetIdOf(L, 1) : 0;
+    lua_getglobal(L, "__WoweeFramesByWid");
+    if (!lua_istable(L, -1)) { lua_pushnil(L); return 1; }
+    const int registry = lua_gettop(L);
+    for (size_t id = static_cast<size_t>(after) + 1; id < tree->size(); ++id) {
+        const auto* w = tree->get(static_cast<uint32_t>(id));
+        if (!w || w->kind != wowee::ui::WidgetKind::Frame) continue;
+        lua_pushinteger(L, static_cast<lua_Integer>(id));
+        lua_rawget(L, registry);
+        if (lua_istable(L, -1)) return 1;
+        lua_pop(L, 1);
+    }
+    lua_pushnil(L);
+    return 1;
+}
+
 int lua_Frame_EnableKeyboard(lua_State* L) {
     // Through the tree, which indexes keyboard frames for topKeyboardFrame.
     if (auto* tree = wowee::addons::getWidgetTree(L))
@@ -4931,6 +5523,12 @@ int lua_Frame_SetClampRectInsets(lua_State* L) {
 int lua_Frame_SetBackdrop(lua_State* L) {
     auto* w = widgetOf(L, 1);
     if (!w) return 0;
+    // Kept as given, for GetBackdrop.
+    if (lua_istable(L, 1)) {
+        lua_pushstring(L, "__backdrop");
+        if (lua_istable(L, 2)) lua_pushvalue(L, 2); else lua_pushnil(L);
+        lua_rawset(L, 1);
+    }
     if (!lua_istable(L, 2)) {          // SetBackdrop(nil) clears it
         w->hasBackdrop = false;
         return 0;
@@ -4975,20 +5573,20 @@ int lua_Frame_SetBackdrop(lua_State* L) {
 
 int lua_Frame_SetBackdropColor(lua_State* L) {
     if (auto* w = widgetOf(L, 1)) {
-        w->backdropColor[0] = static_cast<float>(luaL_optnumber(L, 2, 1.0));
-        w->backdropColor[1] = static_cast<float>(luaL_optnumber(L, 3, 1.0));
-        w->backdropColor[2] = static_cast<float>(luaL_optnumber(L, 4, 1.0));
-        w->backdropColor[3] = static_cast<float>(luaL_optnumber(L, 5, 1.0));
+        w->backdropColor[0] = static_cast<float>(luaOptNumberText(L, 2, 1.0));
+        w->backdropColor[1] = static_cast<float>(luaOptNumberText(L, 3, 1.0));
+        w->backdropColor[2] = static_cast<float>(luaOptNumberText(L, 4, 1.0));
+        w->backdropColor[3] = static_cast<float>(luaOptNumberText(L, 5, 1.0));
     }
     return 0;
 }
 
 int lua_Frame_SetBackdropBorderColor(lua_State* L) {
     if (auto* w = widgetOf(L, 1)) {
-        w->borderColor[0] = static_cast<float>(luaL_optnumber(L, 2, 1.0));
-        w->borderColor[1] = static_cast<float>(luaL_optnumber(L, 3, 1.0));
-        w->borderColor[2] = static_cast<float>(luaL_optnumber(L, 4, 1.0));
-        w->borderColor[3] = static_cast<float>(luaL_optnumber(L, 5, 1.0));
+        w->borderColor[0] = static_cast<float>(luaOptNumberText(L, 2, 1.0));
+        w->borderColor[1] = static_cast<float>(luaOptNumberText(L, 3, 1.0));
+        w->borderColor[2] = static_cast<float>(luaOptNumberText(L, 4, 1.0));
+        w->borderColor[3] = static_cast<float>(luaOptNumberText(L, 5, 1.0));
     }
     return 0;
 }
@@ -4997,6 +5595,9 @@ int lua_StatusBar_SetMinMaxValues(lua_State* L) {
     if (auto* w = widgetOf(L, 1)) {
         w->barMin = static_cast<float>(luaL_optnumber(L, 2, 0.0));
         w->barMax = static_cast<float>(luaL_optnumber(L, 3, 1.0));
+        if (w->barFillRegion != 0) {
+            if (auto* tree = wowee::addons::getWidgetTree(L)) tree->markLayoutDirty();
+        }
     }
     return 0;
 }
@@ -5012,6 +5613,10 @@ int lua_StatusBar_SetValue(lua_State* L) {
     const float value = static_cast<float>(luaL_optnumber(L, 2, 0.0));
     const bool changed = (value != w->barValue);
     w->barValue = value;
+    // The fill region moves with the value.
+    if (changed && w->barFillRegion != 0) {
+        if (auto* tree = wowee::addons::getWidgetTree(L)) tree->markLayoutDirty();
+    }
 
     // A value set from code fires OnValueChanged, as in WoW - for a status bar
     // as well as a slider. The note here used to say a status bar does not,
@@ -5516,11 +6121,61 @@ int lua_ColorSelect_SetValueThumbTexture(lua_State* L) {
     return setColorRole(L, wowee::ui::Widget::ColorRole::ValueThumb);
 }
 
+static int lua_Frame_CreateTexture(lua_State* L);
+
+/// "$parent" at the head of a name given to CreateFrame, CreateTexture or
+/// CreateFontString, replaced with the parent's name - the nearest named
+/// ancestor's, as in XML - which is what the client does at runtime as well
+/// as in markup. Left literal, "$parentScrollFrame" was the name, and the
+/// globals the template derives from it (CopyChatFrameScrollFrameScrollBar,
+/// the bar ElvUI's chat copy window skins) were never there.
+static void substituteParentToken(lua_State* L, int nameIdx, int parentIdx) {
+    if (lua_type(L, nameIdx) != LUA_TSTRING) return;
+    std::string name = lua_tostring(L, nameIdx);
+    if (name.size() < 7) return;
+    std::string head = name.substr(0, 7);
+    toLowerInPlace(head);
+    if (head != "$parent") return;
+    std::string parentName;
+    if (auto* tree = wowee::addons::getWidgetTree(L)) {
+        const wowee::ui::Widget* p = tree->get(widgetIdOf(L, parentIdx));
+        for (int guard = 0; p && guard < 64; ++guard) {
+            if (!p->name.empty()) { parentName = p->name; break; }
+            p = p->parent ? tree->get(p->parent) : nullptr;
+        }
+    }
+    const std::string resolved = parentName + name.substr(7);
+    lua_pushstring(L, resolved.c_str());
+    lua_replace(L, nameIdx);
+}
+
 int lua_Slider_SetThumbTexture(lua_State* L) {
     auto* w = widgetOf(L, 1);
     if (!w) return 0;
     if (lua_isstring(L, 2)) {
         w->thumbTexture = lua_tostring(L, 2);
+        // The grip is a region in the client either way: given a file, the
+        // slider puts it on the grip it has, or makes one. Keeping only the
+        // path left GetThumbTexture() with nothing to answer, and every skin
+        // that sets a slider's grip and then colours and sizes it raised.
+        auto* tree = wowee::addons::getWidgetTree(L);
+        if (auto* thumb = tree ? tree->get(w->thumbRegion) : nullptr) {
+            thumb->texturePath = w->thumbTexture;
+            thumb->solidColor = false;
+        } else {
+            const std::string path = w->thumbTexture;
+            lua_pushcfunction(L, lua_Frame_CreateTexture);
+            lua_pushvalue(L, 1);
+            lua_pushnil(L);
+            lua_pushstring(L, "OVERLAY");
+            lua_call(L, 3, 1);
+            if (auto* t = widgetOf(L, -1)) {
+                t->texturePath = path;
+                w = widgetOf(L, 1);   // the tree may have grown under it
+                if (w) w->thumbRegion = t->id;
+            }
+            lua_pop(L, 1);
+        }
     } else if (lua_istable(L, 2)) {
         auto* tree = wowee::addons::getWidgetTree(L);
         const uint32_t tid = widgetIdOf(L, 2);
@@ -5551,18 +6206,215 @@ int lua_StatusBar_SetStatusBarTexture(lua_State* L) {
         else if (lua_istable(L, 2)) {
             if (auto* tex = widgetOf(L, 2)) w->barTexture = tex->texturePath;
         }
+        if (auto* tree = wowee::addons::getWidgetTree(L)) {
+            if (auto* fill = tree->get(w->barFillRegion)) fill->texturePath = w->barTexture;
+        }
     }
     return 0;
 }
 int lua_StatusBar_SetStatusBarColor(lua_State* L) {
     if (auto* w = widgetOf(L, 1)) {
-        w->barColor[0] = static_cast<float>(luaL_optnumber(L, 2, 1.0));
-        w->barColor[1] = static_cast<float>(luaL_optnumber(L, 3, 1.0));
-        w->barColor[2] = static_cast<float>(luaL_optnumber(L, 4, 1.0));
-        w->barColor[3] = static_cast<float>(luaL_optnumber(L, 5, 1.0));
+        w->barColor[0] = static_cast<float>(luaOptNumberText(L, 2, 1.0));
+        w->barColor[1] = static_cast<float>(luaOptNumberText(L, 3, 1.0));
+        w->barColor[2] = static_cast<float>(luaOptNumberText(L, 4, 1.0));
+        w->barColor[3] = static_cast<float>(luaOptNumberText(L, 5, 1.0));
     }
     return 0;
 }
+/// The getters of three setters that have been here all along. Addons read
+/// colours back to restore or blend them: oUF's Cutaway reads the health
+/// bar's colour every frame, ElvUI's skins read a backdrop's colour back
+/// before changing it, and its nameplates read the stock health bar's colour
+/// to learn a unit's reaction. Each was a field nothing set, so every one of
+/// those calls raised.
+int lua_StatusBar_GetStatusBarColor(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    for (int i = 0; i < 4; ++i) lua_pushnumber(L, w ? w->barColor[i] : 1.0);
+    return 4;
+}
+int lua_Frame_GetBackdropColor(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    for (int i = 0; i < 4; ++i) lua_pushnumber(L, w ? w->backdropColor[i] : 1.0);
+    return 4;
+}
+/// frame:GetBackdrop() - a copy of the table SetBackdrop was given (insets
+/// copied too), or nil when there is none.
+int lua_Frame_GetBackdrop(lua_State* L) {
+    if (!lua_istable(L, 1)) return luaReturnNil(L);
+    lua_pushstring(L, "__backdrop");
+    lua_rawget(L, 1);
+    if (!lua_istable(L, -1)) { lua_pushnil(L); return 1; }
+    const int src = lua_gettop(L);
+    lua_newtable(L);
+    lua_pushnil(L);
+    while (lua_next(L, src) != 0) {
+        if (lua_istable(L, -1)) {
+            const int inner = lua_gettop(L);
+            lua_newtable(L);
+            lua_pushnil(L);
+            while (lua_next(L, inner) != 0) {
+                lua_pushvalue(L, -2);
+                lua_insert(L, -2);
+                lua_rawset(L, -4);
+            }
+            lua_remove(L, inner);
+        }
+        lua_pushvalue(L, -2);
+        lua_insert(L, -2);
+        lua_rawset(L, -4);
+    }
+    return 1;
+}
+int lua_Frame_GetBackdropBorderColor(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    for (int i = 0; i < 4; ++i) lua_pushnumber(L, w ? w->borderColor[i] : 1.0);
+    return 4;
+}
+
+// ── Getters for state the setters always kept ───────────────────────────────
+//
+// The 3.3.5 widget API is mostly pairs, and this client had implemented the
+// setter half of these and not the getter - an addon that reads back what it
+// set (to restore it, or to decide whether to change it) called nil.
+
+int lua_Frame_IsMouseWheelEnabled(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushboolean(L, w && w->wheelEnabled);
+    return 1;
+}
+int lua_Frame_GetMinResize(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushnumber(L, w ? w->minResizeW : 0.0);
+    lua_pushnumber(L, w ? w->minResizeH : 0.0);
+    return 2;
+}
+int lua_Frame_GetMaxResize(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushnumber(L, w ? w->maxResizeW : 0.0);
+    lua_pushnumber(L, w ? w->maxResizeH : 0.0);
+    return 2;
+}
+int lua_Frame_GetClampRectInsets(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushnumber(L, w ? w->clampInsetL : 0.0);
+    lua_pushnumber(L, w ? w->clampInsetR : 0.0);
+    lua_pushnumber(L, w ? w->clampInsetT : 0.0);
+    lua_pushnumber(L, w ? w->clampInsetB : 0.0);
+    return 4;
+}
+/// GetEffectiveAlpha() - this frame's alpha times every ancestor's.
+int lua_Frame_GetEffectiveAlpha(lua_State* L) {
+    auto* tree = wowee::addons::getWidgetTree(L);
+    const auto* w = widgetOf(L, 1);
+    double a = 1.0;
+    for (int guard = 0; w && tree && guard < 128; ++guard) {
+        a *= w->alpha;
+        w = w->parent ? tree->get(w->parent) : nullptr;
+    }
+    lua_pushnumber(L, a);
+    return 1;
+}
+int lua_Cooldown_GetReverse(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushboolean(L, w && w->cooldownReverse);
+    return 1;
+}
+int lua_Cooldown_GetDrawEdge(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushboolean(L, w && w->cooldownDrawEdge);
+    return 1;
+}
+/// Minimap:SetMaskTexture(path) - see Widget::minimapMask.
+int lua_Minimap_SetMaskTexture(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) {
+        w->minimapMask = luaL_optstring(L, 2, "Textures\\MinimapMask");
+        w->minimapMaskSet = true;
+    }
+    return 0;
+}
+
+int lua_EditBox_IsMultiLine(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushboolean(L, w && w->editMultiLine);
+    return 1;
+}
+int lua_EditBox_IsNumeric(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushboolean(L, w && w->editNumeric);
+    return 1;
+}
+int lua_EditBox_IsAutoFocus(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushboolean(L, w && w->editAutoFocus);
+    return 1;
+}
+int lua_MessageFrame_GetMaxLines(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushnumber(L, w ? static_cast<double>(w->maxMessages) : 0.0);
+    return 1;
+}
+int lua_MessageFrame_GetFadeDuration(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushnumber(L, w ? w->messageFadeDuration : 0.0);
+    return 1;
+}
+int lua_MessageFrame_GetInsertMode(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushstring(L, (w && w->messagesInsertTop) ? "TOP" : "BOTTOM");
+    return 1;
+}
+int lua_MessageFrame_GetHyperlinksEnabled(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushboolean(L, !w || w->hyperlinksEnabled);
+    return 1;
+}
+/// GetCurrentScroll() - how many lines up from the bottom the frame is
+/// scrolled; AtTop() - whether it is scrolled as far up as the history goes.
+int lua_MessageFrame_GetCurrentScroll(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushnumber(L, w ? w->messageScroll : 0);
+    return 1;
+}
+int lua_MessageFrame_AtTop(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    const bool top = w && !w->messages.empty() &&
+                     w->messageScroll >= static_cast<int>(w->messages.size()) - 1;
+    lua_pushboolean(L, top);
+    return 1;
+}
+int lua_MessageFrame_ScrollToTop(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) {
+        w->messageScroll = w->messages.empty() ? 0 : static_cast<int>(w->messages.size()) - 1;
+    }
+    return 0;
+}
+/// Slider:GetThumbTexture() - the grip, as the region it is.
+int lua_Slider_GetThumbTexture(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    if (!w || w->thumbRegion == 0) return luaReturnNil(L);
+    lua_getglobal(L, "__WoweeRegionsByWid");
+    if (!lua_istable(L, -1)) return luaReturnNil(L);
+    lua_pushinteger(L, static_cast<lua_Integer>(w->thumbRegion));
+    lua_rawget(L, -2);
+    return 1;
+}
+
+int lua_StatusBar_SetRotatesTexture(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) w->barRotatesTexture = lua_toboolean(L, 2) != 0;
+    return 0;
+}
+int lua_StatusBar_GetRotatesTexture(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushboolean(L, w && w->barRotatesTexture);
+    return 1;
+}
+
+int lua_StatusBar_GetOrientation(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushstring(L, (w && w->barVertical) ? "VERTICAL" : "HORIZONTAL");
+    return 1;
+}
+
 int lua_StatusBar_SetOrientation(lua_State* L) {
     if (auto* w = widgetOf(L, 1)) {
         const std::string o = luaL_optstring(L, 2, "HORIZONTAL");
@@ -5573,6 +6425,7 @@ int lua_StatusBar_SetOrientation(lua_State* L) {
 
 // Frame method: frame:CreateTexture(name, layer) → a real region
 static int lua_Frame_CreateTexture(lua_State* L) {
+    substituteParentToken(L, 2, 1);
     auto* tree = wowee::addons::getWidgetTree(L);
     const uint32_t parent = widgetIdOf(L, 1);
     const char* name = luaL_optstring(L, 2, "");
@@ -5587,6 +6440,8 @@ static int lua_Frame_CreateTexture(lua_State* L) {
         }
         lua_pushinteger(L, static_cast<lua_Integer>(id));
         lua_setfield(L, -2, "__wid");
+        setWidgetUserdata(L, -1, id);
+        registerRegionTable(L, -1, id);
     }
     // A region's parent, which is the frame it was created on.
     //
@@ -5608,6 +6463,7 @@ static int lua_Frame_CreateTexture(lua_State* L) {
 
 // Frame method: frame:CreateFontString(name, layer, template) → a real region
 static int lua_Frame_CreateFontString(lua_State* L) {
+    substituteParentToken(L, 2, 1);
     auto* tree = wowee::addons::getWidgetTree(L);
     const uint32_t parent = widgetIdOf(L, 1);
     const char* name = luaL_optstring(L, 2, "");
@@ -5622,6 +6478,8 @@ static int lua_Frame_CreateFontString(lua_State* L) {
         }
         lua_pushinteger(L, static_cast<lua_Integer>(id));
         lua_setfield(L, -2, "__wid");
+        setWidgetUserdata(L, -1, id);
+        registerRegionTable(L, -1, id);
     }
     // A region's parent, which is the frame it was created on.
     //
@@ -5743,8 +6601,41 @@ static int lua_RecordMissingApi(lua_State* L) {
     return 0;
 }
 
+/// Whether the code that did a global lookup belongs to a third-party addon -
+/// a file under an AddOns directory that is not one of Blizzard's own.
+///
+/// The missing-API fallback exists to carry FrameXML through names this client
+/// has not implemented. Answering an addon's lookups the same way is wrong in
+/// the way that matters most for addons: libraries are written as "if _G.X
+/// then (another copy is loaded) ... end", and a stand-in for X made every
+/// one of them believe a copy was already there - ChatThrottleLib compared the
+/// stand-in's version with its own and raised, and LibStub-style guards took
+/// the wrong branch throughout. In the real client an unknown global is nil,
+/// and an addon is written against that.
+///
+/// Level 2 is the function that indexed _G: level 0 is this C function and
+/// level 1 the __index handler that called it.
+static int lua_WoweeLookupFromAddon(lua_State* L) {
+    lua_Debug ar;
+    bool addon = false;
+    if (lua_getstack(L, 2, &ar) && lua_getinfo(L, "S", &ar) && ar.source &&
+        ar.source[0] == '@') {
+        std::string src(ar.source + 1);
+        for (char& c : src) {
+            c = (c == '\\') ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        const size_t at = src.rfind("addons/");
+        if (at != std::string::npos) {
+            addon = src.compare(at + 7, 9, "blizzard_") != 0;
+        }
+    }
+    lua_pushboolean(L, addon ? 1 : 0);
+    return 1;
+}
+
 // CreateFrame(frameType, name, parent, template)
 static int lua_CreateFrame(lua_State* L) {
+    substituteParentToken(L, 2, 3);
     const char* frameType = luaL_optstring(L, 1, "Frame");
     const char* name = luaL_optstring(L, 2, nullptr);
     // Which of the per-type methods go on this frame; see where they are set,
@@ -5862,6 +6753,7 @@ static int lua_CreateFrame(lua_State* L) {
         }
         lua_pushinteger(L, static_cast<lua_Integer>(id));
         lua_setfield(L, -2, "__wid");
+        setWidgetUserdata(L, -1, id);
 
         // Remember the table against its widget id so input dispatch can get
         // back from a hit to the frame whose scripts must run.
@@ -5928,6 +6820,32 @@ static int lua_CreateFrame(lua_State* L) {
         // CVar only when it is absent.
         lua_pushcfunction(L, lua_StatusBar_SetValue);
         lua_setfield(L, -2, "SetDisplayValue");
+    }
+
+    // An edit box comes with regions of its own before anything is declared
+    // in it: the client builds its text, its selection highlight and its
+    // cursor as five regions when the box is made, so the first region an
+    // XML <Layers> block adds is the sixth. Addons count on that - ElvUI and
+    // every skin strip a box's border with select(6, box:GetRegions()) - and
+    // with none here, the sixth was past the end and the call raised.
+    // Unnamed and hidden; this client draws the text, selection and cursor
+    // itself.
+    {
+        const char* ftype = luaL_optstring(L, 1, "Frame");
+        std::string lowerType(ftype);
+        toLowerInPlace(lowerType);
+        if (lowerType == "editbox") {
+            const int frameIdx = lua_gettop(L);
+            const char* kinds[5] = {"FontString", "Texture", "Texture", "Texture", "Texture"};
+            for (const char* kind : kinds) {
+                lua_pushcfunction(L, std::strcmp(kind, "FontString") == 0
+                                         ? lua_Frame_CreateFontString : lua_Frame_CreateTexture);
+                lua_pushvalue(L, frameIdx);
+                lua_call(L, 1, 1);
+                if (auto* r = widgetOf(L, -1)) r->shown = false;
+                lua_pop(L, 1);
+            }
+        }
     }
 
     // The fourth argument names a template, which FrameXML uses constantly:
@@ -6100,6 +7018,31 @@ bool LuaEngine::initialize() {
         lua_pushnil(L_);
         lua_setglobal(L_, *g);
     }
+    // collectgarbage, which the client does give addons - ElvUI ends its
+    // initialisation with collectgarbage("collect"), and raising there took
+    // the end of that initialisation with it. The collector's pacing belongs
+    // to this client (stepGarbageCollector), so the options that would take
+    // it over - stop, restart, setpause, setstepmul - are accepted and do
+    // nothing; collect, count and step do what they say.
+    lua_pushcfunction(L_, [](lua_State* L) -> int {
+        const std::string opt = luaL_optstring(L, 1, "collect");
+        if (opt == "collect") {
+            lua_gc(L, LUA_GCCOLLECT, 0);
+            lua_pushnumber(L, 0);
+            return 1;
+        }
+        if (opt == "count") {
+            lua_pushnumber(L, lua_gc(L, LUA_GCCOUNT, 0) + lua_gc(L, LUA_GCCOUNTB, 0) / 1024.0);
+            return 1;
+        }
+        if (opt == "step") {
+            lua_pushboolean(L, lua_gc(L, LUA_GCSTEP, static_cast<int>(luaL_optnumber(L, 2, 0))));
+            return 1;
+        }
+        lua_pushnumber(L, 0);
+        return 1;
+    });
+    lua_setglobal(L_, "collectgarbage");
 
     // Publish the widget tree before any API is registered, so a script that
     // runs during registration still finds it.
@@ -6114,6 +7057,113 @@ bool LuaEngine::initialize() {
 
     registerCoreAPI();
     registerEventAPI();
+
+    // The string and table library additions the client makes, under the
+    // library names as well as the bare ones: string.join, string.split and
+    // string.trim, table.wipe, strconcat. Addons use both spellings - ElvUI's
+    // datatexts open with string.join(...) at file scope, and every one of
+    // them failed to load without it.
+    bootstrap(
+        "string.join = string.join or rawget(_G, 'strjoin')\n"
+        "string.split = string.split or rawget(_G, 'strsplit')\n"
+        "string.trim = string.trim or rawget(_G, 'strtrim')\n"
+        "if not rawget(_G, 'strconcat') then\n"
+        "  function strconcat(...) return table.concat({...}) end\n"
+        "end\n"
+        "table.wipe = table.wipe or rawget(_G, 'wipe')\n"
+        "if not rawget(_G, 'wipe') and table.wipe then wipe = table.wipe end\n");
+
+    // The rest of the 3.3.5 widget API that is state and nothing more: a value
+    // the setter keeps and the getter hands back, or one method answered in
+    // terms of another. Each name here was either absent or the shared no-op,
+    // found by walking the documented API for every widget type against the
+    // method tables while bringing ElvUI up.
+    bootstrap(
+        "local mt = __WoweeFrameMT\n"
+        "local real = __WoweeRealFrame\n"
+        "function mt:GetFrameType() return self:GetObjectType() end\n"
+        "function mt:IsFrameType(t) return self:IsObjectType(t) end\n"
+        // Whether insecure code may change this frame now: always out of
+        // combat, and in combat only for a frame that is not protected.
+        "function mt:CanChangeAttribute()\n"
+        "  return not InCombatLockdown() or not self:IsProtected()\n"
+        "end\n"
+        "mt.CanChangeProtectedState = mt.CanChangeAttribute\n"
+        // A setter kept, a getter added; the setter's own work, where it has
+        // any, still runs.
+        "local function pair(setName, getName, key, default)\n"
+        "  local set = rawget(mt, setName)\n"
+        "  mt[setName] = function(self, v, ...)\n"
+        "    rawset(real(self), key, v)\n"
+        "    if set then return set(self, v, ...) end\n"
+        "  end\n"
+        "  mt[getName] = function(self)\n"
+        "    local v = rawget(real(self), key)\n"
+        "    if v == nil then return default end\n"
+        "    return v\n"
+        "  end\n"
+        "end\n"
+        // Stereoscopic depth: kept, and does nothing on a flat screen.
+        "pair('SetDepth', 'GetDepth', '__depth', 0)\n"
+        "mt.GetEffectiveDepth = mt.GetDepth\n"
+        "pair('SetAltArrowKeyMode', 'GetAltArrowKeyMode', '__altArrowKeyMode', false)\n"
+        "pair('SetBlinkSpeed', 'GetBlinkSpeed', '__blinkSpeed', 0.5)\n"
+        "pair('SetDisabledFontObject', 'GetDisabledFontObject', '__disabledFontObject', nil)\n"
+        "pair('SetHighlightFontObject', 'GetHighlightFontObject', '__highlightFontObject', nil)\n"
+        "pair('SetPassword', 'IsPassword', '__password', false)\n"
+        "pair('SetPushedTextOffset', 'GetPushedTextOffset', '__pushedTextOffset', nil)\n"
+        "do\n"
+        "  local get = mt.GetPushedTextOffset\n"
+        "  mt.GetPushedTextOffset = function(self)\n"
+        "    local x = get(self)\n"
+        "    if x == nil then return 1.5, -1.5 end\n"
+        "    return x, rawget(real(self), '__pushedTextOffsetY') or -1.5\n"
+        "  end\n"
+        "  local set = mt.SetPushedTextOffset\n"
+        "  mt.SetPushedTextOffset = function(self, x, y)\n"
+        "    rawset(real(self), '__pushedTextOffsetY', y)\n"
+        "    return set(self, x, y)\n"
+        "  end\n"
+        "end\n"
+        // The tooltip's anchor, as SetOwner was given it.
+        "do\n"
+        "  local setOwner = rawget(mt, 'SetOwner')\n"
+        "  if setOwner then\n"
+        "    mt.SetOwner = function(self, owner, anchor, ...)\n"
+        "      rawset(real(self), '__anchorType', anchor or 'ANCHOR_LEFT')\n"
+        "      return setOwner(self, owner, anchor, ...)\n"
+        "    end\n"
+        "  end\n"
+        "  function mt:GetAnchorType() return rawget(real(self), '__anchorType') or 'ANCHOR_LEFT' end\n"
+        "end\n"
+        // Whether a frame of this kind has a handler of that name.
+        "local common = {OnShow=1, OnHide=1, OnUpdate=1, OnEvent=1, OnLoad=1, OnSizeChanged=1,\n"
+        "  OnEnter=1, OnLeave=1, OnMouseDown=1, OnMouseUp=1, OnMouseWheel=1, OnDragStart=1,\n"
+        "  OnDragStop=1, OnReceiveDrag=1, OnKeyDown=1, OnKeyUp=1, OnChar=1,\n"
+        "  OnAttributeChanged=1, OnHyperlinkClick=1, OnHyperlinkEnter=1, OnHyperlinkLeave=1}\n"
+        "local byType = {\n"
+        "  Button = {OnClick=1, PreClick=1, PostClick=1, OnDoubleClick=1},\n"
+        "  CheckButton = {OnClick=1, PreClick=1, PostClick=1, OnDoubleClick=1},\n"
+        "  StatusBar = {OnValueChanged=1, OnMinMaxChanged=1},\n"
+        "  Slider = {OnValueChanged=1, OnMinMaxChanged=1},\n"
+        "  EditBox = {OnTextChanged=1, OnTextSet=1, OnEnterPressed=1, OnEscapePressed=1,\n"
+        "    OnSpacePressed=1, OnTabPressed=1, OnEditFocusGained=1, OnEditFocusLost=1,\n"
+        "    OnCursorChanged=1, OnInputLanguageChanged=1, OnCharComposition=1},\n"
+        "  ScrollFrame = {OnVerticalScroll=1, OnHorizontalScroll=1, OnScrollRangeChanged=1},\n"
+        "  ScrollingMessageFrame = {OnMessageScrollChanged=1},\n"
+        "  GameTooltip = {OnTooltipSetItem=1, OnTooltipSetUnit=1, OnTooltipSetSpell=1,\n"
+        "    OnTooltipSetQuest=1, OnTooltipSetAchievement=1, OnTooltipSetDefaultAnchor=1,\n"
+        "    OnTooltipCleared=1, OnTooltipAddMoney=1},\n"
+        "  ColorSelect = {OnColorSelect=1},\n"
+        "  Cooldown = {},\n"
+        "  Model = {OnAnimFinished=1, OnUpdateModel=1}, PlayerModel = {OnAnimFinished=1, OnUpdateModel=1},\n"
+        "  MovieFrame = {OnMovieFinished=1, OnMovieShowSubtitle=1, OnMovieHideSubtitle=1},\n"
+        "}\n"
+        "function mt:HasScript(name)\n"
+        "  if common[name] then return true end\n"
+        "  local t = byType[self:GetObjectType()]\n"
+        "  return (t and t[name]) and true or false\n"
+        "end\n");
 
     // Last, so every bootstrap block above reads a _G that answers honestly.
     installMissingApiFallback();
@@ -6379,6 +7429,7 @@ void LuaEngine::registerCoreAPI() {
         {"IsEventRegistered", lua_Frame_IsEventRegistered},
         {"UnregisterEvent", lua_Frame_UnregisterEvent},
         {"UnregisterAllEvents", lua_Frame_UnregisterAllEvents},
+        {"RegisterAllEvents",   lua_Frame_RegisterAllEvents},
         {"SetScript",       lua_Frame_SetScript},
         {"GetScript",       lua_Frame_GetScript},
         {"GetName",         lua_Frame_GetName},
@@ -6487,6 +7538,7 @@ void LuaEngine::registerCoreAPI() {
         {"ClearLines",      lua_Tooltip_ClearLines},
         {"SetFrameStack",   lua_Tooltip_SetFrameStack},
         {"AppendText",      lua_Tooltip_AppendText},
+        {"AddFontStrings",  lua_Tooltip_AddFontStrings},
         {"NumLines",        lua_Tooltip_NumLines},
         {"Clear",           lua_MessageFrame_Clear},
         {"GetNumMessages",  lua_MessageFrame_GetNumMessages},
@@ -6598,6 +7650,37 @@ void LuaEngine::registerCoreAPI() {
         {"SetBackdrop",           lua_Frame_SetBackdrop},
         {"SetBackdropColor",      lua_Frame_SetBackdropColor},
         {"SetBackdropBorderColor",lua_Frame_SetBackdropBorderColor},
+        {"GetBackdrop",           lua_Frame_GetBackdrop},
+        {"GetBackdropColor",      lua_Frame_GetBackdropColor},
+        {"GetBackdropBorderColor",lua_Frame_GetBackdropBorderColor},
+        {"GetStatusBarColor",     lua_StatusBar_GetStatusBarColor},
+        {"GetOrientation",        lua_StatusBar_GetOrientation},
+        {"SetRotatesTexture",     lua_StatusBar_SetRotatesTexture},
+        {"GetRotatesTexture",     lua_StatusBar_GetRotatesTexture},
+        {"DisableDrawLayer",      lua_Frame_DisableDrawLayer},
+        {"EnableDrawLayer",       lua_Frame_EnableDrawLayer},
+        {"IsMouseWheelEnabled",   lua_Frame_IsMouseWheelEnabled},
+        {"SetMaskTexture",        lua_Minimap_SetMaskTexture},
+        {"GetMinResize",          lua_Frame_GetMinResize},
+        {"GetMaxResize",          lua_Frame_GetMaxResize},
+        {"GetClampRectInsets",    lua_Frame_GetClampRectInsets},
+        {"GetEffectiveAlpha",     lua_Frame_GetEffectiveAlpha},
+        {"GetReverse",            lua_Cooldown_GetReverse},
+        {"GetDrawEdge",           lua_Cooldown_GetDrawEdge},
+        {"GetShadowColor",        lua_FontString_GetShadowColor},
+        {"GetShadowOffset",       lua_FontString_GetShadowOffset},
+        {"IsMultiLine",           lua_EditBox_IsMultiLine},
+        {"IsNumeric",             lua_EditBox_IsNumeric},
+        {"IsAutoFocus",           lua_EditBox_IsAutoFocus},
+        {"GetMaxLines",           lua_MessageFrame_GetMaxLines},
+        {"GetFadeDuration",       lua_MessageFrame_GetFadeDuration},
+        {"GetInsertMode",         lua_MessageFrame_GetInsertMode},
+        {"GetHyperlinksEnabled",  lua_MessageFrame_GetHyperlinksEnabled},
+        {"GetCurrentScroll",      lua_MessageFrame_GetCurrentScroll},
+        {"AtTop",                 lua_MessageFrame_AtTop},
+        {"ScrollToTop",           lua_MessageFrame_ScrollToTop},
+        {"GetThumbTexture",       lua_Slider_GetThumbTexture},
+        {"GetSize",               lua_Region_GetSize},
         {"SetMinMaxValues",       lua_StatusBar_SetMinMaxValues},
         {"GetMinMaxValues",       lua_StatusBar_GetMinMaxValues},
         {"SetValue",              lua_StatusBar_SetValue},
@@ -6653,6 +7736,9 @@ void LuaEngine::registerCoreAPI() {
         {"SetParent",       lua_Region_SetParent},
         {"GetParent",       lua_Region_GetParent},
         {"GetChildren",     lua_Frame_GetChildren},
+        {"GetRegions",      lua_Frame_GetRegions},
+        {"GetNumRegions",   lua_Frame_GetNumRegions},
+        {"GetNumChildren",  lua_Frame_GetNumChildren},
         {"CreateTexture",   lua_Frame_CreateTexture},
         {"CreateFontString", lua_Frame_CreateFontString},
         {nullptr, nullptr}
@@ -6671,6 +7757,22 @@ void LuaEngine::registerCoreAPI() {
         lua_setfield(L_, -2, r->name);
     }
     lua_setglobal(L_, "__WoweeFrameMT");
+    lua_pushcfunction(L_, lua_WoweeRealFrame);
+    lua_setglobal(L_, "__WoweeRealFrame");
+    lua_pushcfunction(L_, lua_EnumerateFrames);
+    lua_setglobal(L_, "EnumerateFrames");
+    lua_pushcfunction(L_, lua_WoweeSetClientDrawn);
+    lua_setglobal(L_, "__WoweeSetClientDrawn");
+    lua_pushcfunction(L_, lua_WoweeBindStatusBarFill);
+    lua_setglobal(L_, "__WoweeBindStatusBarFill");
+    lua_pushcfunction(L_, lua_WoweeApplyFontRaw);
+    lua_setglobal(L_, "__WoweeApplyFontRaw");
+    lua_newtable(L_);
+    lua_setglobal(L_, "__WoweeRegionsByWid");
+    lua_pushcfunction(L_, lua_WoweeReportError);
+    lua_setglobal(L_, "__WoweeReportError");
+    lua_pushcfunction(L_, lua_debugstack);
+    lua_setglobal(L_, "debugstack");
 
     // Commonly called frame methods that are no-ops for now, so an addon
     // calling one gets silence rather than an error.
@@ -7146,11 +8248,34 @@ void LuaEngine::registerCoreAPI() {
         "    local ok, out = pcall(string.format, fmt, ...)\n"
         "    self:SetText(ok and out or fmt)\n"
         "end\n"
+        // Through a secure handle's surrogate, the frame itself: the
+        // attribute is the frame's, and so is the OnAttributeChanged that it
+        // fires (which receives the frame, not the stand-in).
+        "local realFrame = __WoweeRealFrame\n"
         "function mt:SetAttribute(name, value)\n"
-        "    self.__attributes = self.__attributes or {}\n"
-        "    self.__attributes[name] = value\n"
+        "    self = realFrame(self)\n"
+        "    local at = rawget(self, '__attributes')\n"
+        "    if not at then at = {}; rawset(self, '__attributes', at) end\n"
+        "    at[name] = value\n"
         "    local handler = self.__scripts and self.__scripts.OnAttributeChanged\n"
         "    if handler then handler(self, name, value) end\n"
+        "end\n"
+        // (isProtected, isProtectedExplicitly). Explicit: the frame was
+        // declared protected="true" or inherits a template that was
+        // (SecureFrameTemplate and everything built on it). Implicit: an
+        // ancestor is - a protected frame's children move with it, so they
+        // are protected too. UIParent is declared protected, which makes
+        // nearly everything implicitly protected, as in the real client.
+        "function mt:IsProtected()\n"
+        "    self = realFrame(self)\n"
+        "    if rawget(self, '__protected') then return true, true end\n"
+        "    local p = self:GetParent()\n"
+        "    local guard = 0\n"
+        "    while p and guard < 64 do\n"
+        "        if rawget(realFrame(p), '__protected') then return true, false end\n"
+        "        p = p:GetParent(); guard = guard + 1\n"
+        "    end\n"
+        "    return nil, nil\n"
         "end\n"
         // The three-argument form names one attribute in pieces, and falls
         // back to the bare name when no piece-specific value was set - which
@@ -7170,9 +8295,9 @@ void LuaEngine::registerCoreAPI() {
         //
         // The order is the client's: most specific first, the bare name last.
         "function mt:GetAttribute(a, b, c)\n"
-        "    if not self.__attributes then return nil end\n"
-        "    if b == nil then return self.__attributes[a] end\n"
-        "    local at = self.__attributes\n"
+        "    local at = rawget(self, '__attributes') or rawget(realFrame(self), '__attributes')\n"
+        "    if not at then return nil end\n"
+        "    if b == nil then return at[a] end\n"
         "    local p, s = a or '', c or ''\n"
         "    local v = at[p .. b .. s]\n"
         "    if v == nil then v = at['*' .. b .. s] end\n"
@@ -7188,8 +8313,8 @@ void LuaEngine::registerCoreAPI() {
         // The scroll getters are real bindings now, applied after this block.
         // Zero when unset, which is what the real client answers and what
         // FrameXML concatenates into a name without checking.
-        "function mt:SetID(id) self.__id = id end\n"
-        "function mt:GetID() return self.__id or 0 end\n"
+        "function mt:SetID(id) rawset(realFrame(self), '__id', id) end\n"
+        "function mt:GetID() return rawget(realFrame(self), '__id') or 0 end\n"
         "function mt:GetScrollChild() return self.__scrollChild end\n"
         // A label handed over after the button's <NormalFont> was named takes
         // that font, unless it brought a font object of its own - which is
@@ -7229,12 +8354,15 @@ void LuaEngine::registerCoreAPI() {
         "function mt:GetStatusBarTexture()\n"
         "    if not self.__barTexture then\n"
         "        self.__barTexture = self:CreateTexture(nil, 'ARTWORK')\n"
+        "        __WoweeBindStatusBarFill(self, self.__barTexture)\n"
         "    end\n"
         "    return self.__barTexture\n"
         "end\n"
         "function mt:GetFontString()\n"
         "    if not self.__fontString then\n"
         "        self.__fontString = self:CreateFontString(nil, 'OVERLAY')\n"
+        "        local f = rawget(self, '__normalFont')\n"
+        "        if f and self.SetNormalFontObject then self:SetNormalFontObject(f) end\n"
         "    end\n"
         "    return self.__fontString\n"
         "end\n"
@@ -7290,10 +8418,13 @@ void LuaEngine::registerCoreAPI() {
         "       and self:IsObjectType('Button') then\n"
         "        self:GetFontString()\n"
         "        if self.__fontString then\n"
-        "            self.__fontString:SetPoint('CENTER')\n"
-        "            local f = self.GetNormalFontObject and self:GetNormalFontObject()\n"
-        "            if f and self.__fontString.SetFontObject then\n"
-        "                self.__fontString:SetFontObject(f)\n"
+        // The button's normal font, through the button - which also puts a
+        // left- or right-justified label against that edge - and centred if
+        // that left it unplaced.
+        "            local f = rawget(self, '__normalFont')\n"
+        "            if f and self.SetNormalFontObject then self:SetNormalFontObject(f) end\n"
+        "            if self.__fontString:GetNumPoints() == 0 then\n"
+        "                self.__fontString:SetPoint('CENTER')\n"
         "            end\n"
         "        end\n"
         "    end\n"
@@ -7983,38 +9114,15 @@ void LuaEngine::registerCoreAPI() {
         "_G['LibStub'] = LibStub\n"
     );
 
-    // CallbackHandler-1.0 - minimal implementation for Ace3-based addons
-    bootstrap(
-        "if LibStub then\n"
-        "  local CBH = LibStub:NewLibrary('CallbackHandler-1.0', 7)\n"
-        "  if CBH then\n"
-        "    CBH.mixins = { 'RegisterCallback', 'UnregisterCallback', 'UnregisterAllCallbacks', 'Fire' }\n"
-        "    function CBH:New(target, regName, unregName, unregAllName, onUsed)\n"
-        "      local registry = setmetatable({}, { __index = CBH })\n"
-        "      registry.callbacks = {}\n"
-        "      target = target or {}\n"
-        "      target[regName or 'RegisterCallback'] = function(self, event, method, ...)\n"
-        "        if not registry.callbacks[event] then registry.callbacks[event] = {} end\n"
-        "        local handler = type(method) == 'function' and method or self[method]\n"
-        "        registry.callbacks[event][self] = handler\n"
-        "      end\n"
-        "      target[unregName or 'UnregisterCallback'] = function(self, event)\n"
-        "        if registry.callbacks[event] then registry.callbacks[event][self] = nil end\n"
-        "      end\n"
-        "      target[unregAllName or 'UnregisterAllCallbacks'] = function(self)\n"
-        "        for event, handlers in pairs(registry.callbacks) do handlers[self] = nil end\n"
-        "      end\n"
-        "      registry.Fire = function(self, event, ...)\n"
-        "        if not self.callbacks[event] then return end\n"
-        "        for obj, handler in pairs(self.callbacks[event]) do\n"
-        "          handler(obj, event, ...)\n"
-        "        end\n"
-        "      end\n"
-        "      return registry\n"
-        "    end\n"
-        "  end\n"
-        "end\n"
-    );
+    // No CallbackHandler-1.0 here. There was one, registered at the newest
+    // minor version so that every addon's own embedded copy stood down in its
+    // favour - and it called its handlers the wrong way: a function was
+    // passed (registrant, event, ...) where the library passes (event, ...),
+    // and a method name was not called as a method at all. Every Ace3 addon
+    // ran on it. ElvUI's action buttons were the visible case: LibActionButton
+    // fires OnButtonUpdate with the button, ElvUI's handler received the event
+    // name in its place, and every bar raised as it was built. The client has
+    // no such library; addons ship their own, and now they get it.
 
     // Noop stubs for commonly called functions that don't need implementation
     bootstrap(
@@ -8923,10 +10031,23 @@ void LuaEngine::registerCoreAPI() {
         "ShoppingTooltip1 = CreateFrame('Frame', 'ShoppingTooltip1')\n"
         "ShoppingTooltip2 = CreateFrame('Frame', 'ShoppingTooltip2')\n"
         // Error handling stubs (used by many addons)
-        "local _errorHandler = function(err) return err end\n"
+        // The default handler reports, as the real client's does (it shows the
+        // error frame); it used to return the message and nothing else, so
+        // every error an addon routed through xpcall(f, geterrorhandler()) -
+        // which is all of AceAddon's and CallbackHandler's - vanished without
+        // a log line, and an addon that failed in OnInitialize looked like an
+        // addon that did nothing.
+        "local _errorHandler = __WoweeReportError\n"
         "function geterrorhandler() return _errorHandler end\n"
-        "function seterrorhandler(fn) if type(fn)=='function' then _errorHandler=fn end end\n"
-        "function debugstack(start, count1, count2) return '' end\n"
+        // A handler set by the interface still gets every error, and decides
+        // what to show, as in the client - FrameXML installs _ERRORMESSAGE,
+        // which shows nothing unless the scriptErrors CVar is on. The error
+        // is recorded here first all the same, so a handler that stays quiet
+        // cannot make an error vanish from the log and lua_errors.txt.
+        "function seterrorhandler(fn)\n"
+        "  if type(fn) ~= 'function' then error('Usage: seterrorhandler(errfunc)', 2) end\n"
+        "  _errorHandler = function(err) __WoweeReportError(err) return fn(err) end\n"
+        "end\n"
         // A name is as valid as a function here, and FrameXML mostly passes a
         // name: UIDropDownMenu_Initialize does
         // securecall("UIDropDownMenu_InitializeHelper", frame), and the helper
@@ -9247,6 +10368,123 @@ void LuaEngine::registerCoreAPI() {
         "C_ChatInfo.IsAddonMessagePrefixRegistered = IsAddonMessagePrefixRegistered\n"
         "C_ChatInfo.SendAddonMessage = SendAddonMessage\n"
     );
+
+    // Font objects, completed: every FontInstance method, CreateFont, and the
+    // part the client is built around - a font object is live. A font string
+    // that inherits one (inherits="GameFontNormal", SetFontObject) follows it
+    // when it changes, for each setting the string has not set for itself.
+    //
+    // ElvUI restyles the whole interface this way: it sets GameTooltipText,
+    // ChatFontNormal, SystemFont_Shadow_Med1 and the rest to its own face and
+    // size, and every label built on them changes with it. A font object here
+    // was a table whose settings were copied once, when a string first took
+    // them, and whose setters (SetShadowOffset among them) did not exist - so
+    // the restyle raised on its first line and would have changed nothing.
+    bootstrap(
+        "local fontMT = __WoweeFontMT\n"
+        "local methods = fontMT.__index\n"
+        "local users = setmetatable({}, { __mode = 'k' })\n"   // font -> {user = true}
+        "local inheritsFrom = setmetatable({}, { __mode = 'k' })\n" // user -> font
+        "local function usersOf(font)\n"
+        "  local u = users[font]\n"
+        "  if not u then u = setmetatable({}, { __mode = 'k' }); users[font] = u end\n"
+        "  return u\n"
+        "end\n"
+        "function __WoweeFontInherit(user, font)\n"
+        "  local old = inheritsFrom[user]\n"
+        "  if old and users[old] then users[old][user] = nil end\n"
+        "  inheritsFrom[user] = font\n"
+        "  if font then usersOf(font)[user] = true end\n"
+        "end\n"
+        // Hand a font object's settings down to everything that follows it.
+        // A font string is given the ones it has not set itself; a font
+        // object takes them all and passes them on.
+        "local propagate\n"
+        "local apply = __WoweeApplyFontRaw\n"
+        "propagate = function(font, depth)\n"
+        "  if depth > 8 then return end\n"
+        "  local u = users[font]\n"
+        "  if not u then return end\n"
+        "  for user in pairs(u) do\n"
+        "    if getmetatable(user) == fontMT then\n"
+        "      for _, k in ipairs({'font','height','outline','r','g','b','a','shadowX','shadowY',\n"
+        "                          'shadowR','shadowG','shadowB','shadowA','justifyH','justifyV','spacing'}) do\n"
+        "        if not (rawget(user, '__own') and user.__own[k]) then rawset(user, k, rawget(font, k)) end\n"
+        "      end\n"
+        "      propagate(user, depth + 1)\n"
+        "    elseif apply then\n"
+        "      apply(user, font)\n"
+        "    end\n"
+        "  end\n"
+        "end\n"
+        "local function own(self, ...)\n"
+        "  local o = rawget(self, '__own')\n"
+        "  if not o then o = {}; rawset(self, '__own', o) end\n"
+        "  for i = 1, select('#', ...) do o[select(i, ...)] = true end\n"
+        "end\n"
+        "function methods:SetFont(f, h, flags)\n"
+        "  self.font, self.height, self.outline = f, h, flags\n"
+        "  own(self, 'font', 'height', 'outline')\n"
+        "  propagate(self, 0)\n"
+        "  return 1\n"
+        "end\n"
+        "function methods:SetTextColor(r, g, b, a)\n"
+        "  self.r, self.g, self.b, self.a = r, g, b, a or 1\n"
+        "  own(self, 'r', 'g', 'b', 'a')\n"
+        "  propagate(self, 0)\n"
+        "end\n"
+        "function methods:SetShadowColor(r, g, b, a)\n"
+        "  self.shadowR, self.shadowG, self.shadowB, self.shadowA = r, g, b, a or 1\n"
+        "  own(self, 'shadowR', 'shadowG', 'shadowB', 'shadowA')\n"
+        "  propagate(self, 0)\n"
+        "end\n"
+        "function methods:GetShadowColor()\n"
+        "  return self.shadowR or 0, self.shadowG or 0, self.shadowB or 0, self.shadowA or 1\n"
+        "end\n"
+        "function methods:SetShadowOffset(x, y)\n"
+        "  self.shadowX, self.shadowY = x, y\n"
+        "  own(self, 'shadowX', 'shadowY')\n"
+        "  propagate(self, 0)\n"
+        "end\n"
+        "function methods:GetShadowOffset() return self.shadowX or 0, self.shadowY or 0 end\n"
+        "function methods:SetJustifyH(j) self.justifyH = j; own(self, 'justifyH'); propagate(self, 0) end\n"
+        "function methods:SetJustifyV(j) self.justifyV = j; own(self, 'justifyV'); propagate(self, 0) end\n"
+        "function methods:SetSpacing(s) self.spacing = s; own(self, 'spacing'); propagate(self, 0) end\n"
+        "function methods:GetSpacing() return self.spacing or 0 end\n"
+        "function methods:SetAlpha(a) self.alpha = a end\n"
+        "function methods:GetAlpha() return self.alpha or 1 end\n"
+        "function methods:GetName() return rawget(self, '__fontName') end\n"
+        "function methods:IsObjectType(t) return t == 'Font' end\n"
+        // CopyFontObject takes the other's settings once; SetFontObject
+        // follows it from then on.
+        "local fields = {'font','height','outline','r','g','b','a','shadowX','shadowY',\n"
+        "                'shadowR','shadowG','shadowB','shadowA','justifyH','justifyV','spacing'}\n"
+        "function methods:CopyFontObject(other)\n"
+        "  if type(other) == 'string' then other = rawget(_G, other) end\n"
+        "  if type(other) ~= 'table' then return end\n"
+        "  for _, k in ipairs(fields) do rawset(self, k, rawget(other, k)) end\n"
+        "  propagate(self, 0)\n"
+        "end\n"
+        "function methods:SetFontObject(other)\n"
+        "  if type(other) == 'string' then other = rawget(_G, other) end\n"
+        "  if type(other) ~= 'table' then return end\n"
+        "  rawset(self, '__own', nil)\n"
+        "  for _, k in ipairs(fields) do rawset(self, k, rawget(other, k)) end\n"
+        "  __WoweeFontInherit(self, other)\n"
+        "  propagate(self, 0)\n"
+        "end\n"
+        "function methods:GetFontObject() return inheritsFrom[self] end\n"
+        // CreateFont(name) - a new font object, global under that name, set
+        // up like GameFontNormal until told otherwise.
+        "function CreateFont(name)\n"
+        "  local f = setmetatable({ height = 12, r = 1, g = 1, b = 1, a = 1,\n"
+        "                          font = 'Fonts\\\\FRIZQT__.TTF' }, fontMT)\n"
+        "  if type(name) == 'string' and name ~= '' then\n"
+        "    rawset(f, '__fontName', name)\n"
+        "    _G[name] = f\n"
+        "  end\n"
+        "  return f\n"
+        "end\n");
 
     // Action bar constants and functions used by action bar addons
     bootstrap(
@@ -9737,6 +10975,46 @@ void LuaEngine::dispatchEvent(const std::string& eventName,
         lua_pop(L_, 1); // pop event frame list
     }
     lua_pop(L_, 1); // pop __WoweeFrameEvents
+
+    // Frames that asked for everything (RegisterAllEvents), unless they also
+    // asked for this one by name and have heard it already.
+    lua_getglobal(L_, "__WoweeAllEventFrames");
+    if (lua_istable(L_, -1)) {
+        std::vector<int> refs;
+        lua_pushnil(L_);
+        while (lua_next(L_, -2) != 0) {
+            lua_pop(L_, 1);
+            lua_pushvalue(L_, -1);
+            refs.push_back(luaL_ref(L_, LUA_REGISTRYINDEX));
+        }
+        for (const int ref : refs) {
+            lua_rawgeti(L_, LUA_REGISTRYINDEX, ref);
+            luaL_unref(L_, LUA_REGISTRYINDEX, ref);
+            const int frame = lua_gettop(L_);
+            lua_getfield(L_, frame, "__events");
+            const bool named = lua_istable(L_, -1) &&
+                               (lua_getfield(L_, -1, eventName.c_str()), !lua_isnil(L_, -1));
+            lua_settop(L_, frame);
+            if (!named) {
+                lua_getfield(L_, frame, "__scripts");
+                if (lua_istable(L_, -1)) {
+                    lua_getfield(L_, -1, "OnEvent");
+                    if (lua_isfunction(L_, -1)) {
+                        lua_pushvalue(L_, frame);
+                        lua_pushstring(L_, eventName.c_str());
+                        for (const auto& arg : args) pushEventArg(L_, arg);
+                        if (pcallScript(L_, "OnEvent", 2 + static_cast<int>(args.size()), 0) != 0) {
+                            const char* ferr = lua_tostring(L_, -1);
+                            noteLuaError(ferr ? ferr : "(unknown)");
+                            LOG_ERROR("LuaEngine: frame OnEvent error: ", ferr ? ferr : "(unknown)");
+                        }
+                    }
+                }
+            }
+            lua_settop(L_, frame - 1);
+        }
+    }
+    lua_pop(L_, 1);
 }
 
 namespace {
@@ -9924,6 +11202,8 @@ void LuaEngine::installMissingApiFallback() {
 
     lua_pushcfunction(L_, lua_RecordMissingApi);
     lua_setglobal(L_, "__WoweeRecordMissingApi");
+    lua_pushcfunction(L_, lua_WoweeLookupFromAddon);
+    lua_setglobal(L_, "__WoweeLookupFromAddon");
 
     // Counting functions answer zero rather than nothing.
     //
@@ -10025,6 +11305,7 @@ void LuaEngine::installMissingApiFallback() {
         "}\n"
         "__WoweeFrameXmlPending = {}\n"
         "local seen = {}\n"
+        "local lookupFromAddon = __WoweeLookupFromAddon\n"
         "setmetatable(_G, { __index = function(_, k)\n"
         "  if type(k) ~= 'string' then return nil end\n"
         "  if not string.find(k, '^%u') then return nil end\n"
@@ -10084,6 +11365,13 @@ void LuaEngine::installMissingApiFallback() {
         // to action button eleven - and the answer is nil, not an object that
         // the caller then tries to concatenate. Two files died on that one.
         "  if string.find(k, '[^%w_]') then return nil end\n"
+        // A third-party addon is answered as the real client answers it:
+        // nil. See lua_WoweeLookupFromAddon. Still recorded, under its own
+        // prefix, so the report says what addons reached for.
+        "  if lookupFromAddon() then\n"
+        "    if not seen[k] then seen[k] = true; __WoweeRecordMissingApi('addon:' .. k) end\n"
+        "    return nil\n"
+        "  end\n"
         "  if not seen[k] then seen[k] = true; __WoweeRecordMissingApi(k) end\n"
         "  return missing\n"
         "end })\n");
@@ -10523,6 +11811,82 @@ std::string LuaEngine::bindingCommandFor(int sdlKeycode, bool shift, bool ctrl, 
 
 std::string LuaEngine::bindingCommandForKey(const std::string& key) {
     return ui::KeybindingManager::getInstance().resolveCommand(key);
+}
+
+namespace {
+std::string plateKey(uint64_t guid) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%016llX", static_cast<unsigned long long>(guid));
+    return buf;
+}
+}  // namespace
+
+bool LuaEngine::acquireNameplate(uint64_t guid, NameplateParts& out) {
+    if (!L_) return false;
+    const int top = lua_gettop(L_);
+    lua_getglobal(L_, "__WoweeNameplateAcquire");
+    if (!lua_isfunction(L_, -1)) { lua_settop(L_, top); return false; }
+    lua_pushstring(L_, plateKey(guid).c_str());
+    if (lua_pcall(L_, 1, 14, 0) != 0) {
+        noteLuaError(std::string("nameplate: ") + luaL_optstring(L_, -1, "?"));
+        lua_settop(L_, top);
+        return false;
+    }
+    uint32_t* fields[14] = {&out.frame, &out.health, &out.cast, &out.threat, &out.border,
+                            &out.castBorder, &out.castShield, &out.castIcon, &out.highlight,
+                            &out.name, &out.level, &out.boss, &out.raid, &out.elite};
+    for (int i = 0; i < 14; ++i) {
+        *fields[i] = static_cast<uint32_t>(lua_tointeger(L_, top + 1 + i));
+    }
+    lua_settop(L_, top);
+    return out.frame != 0;
+}
+
+void LuaEngine::updateNameplate(uint64_t guid, const NameplateState& s) {
+    if (!L_) return;
+    const int top = lua_gettop(L_);
+    lua_getglobal(L_, "__WoweeNameplateUpdate");
+    if (!lua_isfunction(L_, -1)) { lua_settop(L_, top); return; }
+    lua_checkstack(L_, 40);
+    lua_pushstring(L_, plateKey(guid).c_str());
+    lua_pushnumber(L_, s.x);
+    lua_pushnumber(L_, s.y);
+    lua_pushnumber(L_, s.alpha);
+    lua_pushnumber(L_, s.health);
+    lua_pushnumber(L_, s.healthMax);
+    for (float c : s.barColor) lua_pushnumber(L_, c);
+    lua_pushstring(L_, s.name.c_str());
+    for (float c : s.nameColor) lua_pushnumber(L_, c);
+    lua_pushstring(L_, s.level.c_str());
+    for (float c : s.levelColor) lua_pushnumber(L_, c);
+    lua_pushboolean(L_, s.skull);
+    lua_pushboolean(L_, s.elite);
+    lua_pushboolean(L_, s.highlight);
+    lua_pushboolean(L_, s.threat);
+    for (float c : s.threatColor) lua_pushnumber(L_, c);
+    lua_pushnumber(L_, s.raidIcon);
+    lua_pushboolean(L_, s.casting);
+    lua_pushnumber(L_, s.castValue);
+    lua_pushnumber(L_, s.castMax);
+    lua_pushboolean(L_, s.shielded);
+    if (s.castIcon.empty()) lua_pushnil(L_); else lua_pushstring(L_, s.castIcon.c_str());
+    if (lua_pcall(L_, lua_gettop(L_) - top - 1, 0, 0) != 0) {
+        noteLuaError(std::string("nameplate: ") + luaL_optstring(L_, -1, "?"));
+    }
+    lua_settop(L_, top);
+}
+
+void LuaEngine::releaseNameplate(uint64_t guid) {
+    if (!L_) return;
+    const int top = lua_gettop(L_);
+    lua_getglobal(L_, "__WoweeNameplateRelease");
+    if (lua_isfunction(L_, -1)) {
+        lua_pushstring(L_, plateKey(guid).c_str());
+        if (lua_pcall(L_, 1, 0, 0) != 0) {
+            noteLuaError(std::string("nameplate: ") + luaL_optstring(L_, -1, "?"));
+        }
+    }
+    lua_settop(L_, top);
 }
 
 bool LuaEngine::dispatchBindingKey(int sdlKeycode, bool shift, bool ctrl, bool alt, bool down) {
@@ -12575,67 +13939,113 @@ bool LuaEngine::dispatchSlashCommand(const std::string& command, const std::stri
 
 // ---- SavedVariables serialization ----
 
-static void serializeLuaValue(lua_State* L, int idx, std::string& out, int indent);
+// Written so that the next session can run it. A mistake here is not one lost
+// value but a file that fails to load, taking every variable in it along.
+//
+//   * Strings are written by length, not up to the first NUL, and every
+//     control byte is escaped. A profile export (ElvUI's, WeakAuras') is
+//     compressed binary held in a string; a dropped \r or a raw \0 corrupted
+//     it or cut it short.
+//   * Numbers that are not finite are written as expressions. "%.17g" gives
+//     "inf" and "nan", which are not Lua, so one division by zero anywhere in
+//     an addon's settings made the whole file unloadable.
+//   * Keys are written as what they are: a fractional number key was
+//     truncated to an integer (so two keys could become one), and boolean
+//     keys were dropped. A key whose value cannot be stored (a function) is
+//     left out rather than written as `[k] = nil`.
+//   * A table that contains itself is written once and the loop cut, rather
+//     than recursed into until the stack runs out.
+static void serializeLuaValue(lua_State* L, int idx, std::string& out, int indent,
+                              std::vector<const void*>& path);
 
-static void serializeLuaTable(lua_State* L, int idx, std::string& out, int indent) {
+static void serializeLuaString(lua_State* L, int idx, std::string& out) {
+    size_t len = 0;
+    const char* s = lua_tolstring(L, idx, &len);
+    out += '"';
+    for (size_t i = 0; i < len; ++i) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 32 || c == 127) {
+                    // Always three digits, so a digit that follows is not
+                    // read as part of the escape.
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "\\%03u", static_cast<unsigned>(c));
+                    out += buf;
+                } else {
+                    out += static_cast<char>(c);
+                }
+        }
+    }
+    out += '"';
+}
+
+static void serializeLuaNumber(double v, std::string& out) {
+    if (std::isnan(v)) { out += "(0/0)"; return; }
+    if (std::isinf(v)) { out += v > 0 ? "math.huge" : "-math.huge"; return; }
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%.17g", v);
+    out += buf;
+}
+
+static void serializeLuaTable(lua_State* L, int idx, std::string& out, int indent,
+                              std::vector<const void*>& path) {
+    const void* self = lua_topointer(L, idx);
+    if (std::find(path.begin(), path.end(), self) != path.end()) {
+        out += "{}";
+        return;
+    }
+    path.push_back(self);
     out += "{\n";
     std::string pad(indent + 2, ' ');
     lua_pushnil(L);
     while (lua_next(L, idx) != 0) {
-        out += pad;
-        // Key
-        if (lua_type(L, -2) == LUA_TSTRING) {
-            const char* k = lua_tostring(L, -2);
-            out += "[\"";
-            for (const char* p = k; *p; ++p) {
-                if (*p == '"' || *p == '\\') out += '\\';
-                out += *p;
-            }
-            out += "\"] = ";
-        } else if (lua_type(L, -2) == LUA_TNUMBER) {
-            out += "[" + std::to_string(static_cast<long long>(lua_tonumber(L, -2))) + "] = ";
-        } else {
+        const int kt = lua_type(L, -2);
+        const int vt = lua_type(L, -1);
+        const bool storableValue = vt == LUA_TTABLE || vt == LUA_TSTRING ||
+                                   vt == LUA_TNUMBER || vt == LUA_TBOOLEAN;
+        const bool storableKey = kt == LUA_TSTRING || kt == LUA_TBOOLEAN ||
+                                 (kt == LUA_TNUMBER && !std::isnan(lua_tonumber(L, -2)));
+        if (!storableValue || !storableKey) {
             lua_pop(L, 1);
             continue;
         }
-        // Value
-        serializeLuaValue(L, lua_gettop(L), out, indent + 2);
+        out += pad;
+        out += '[';
+        if (kt == LUA_TSTRING) serializeLuaString(L, lua_gettop(L) - 1, out);
+        else if (kt == LUA_TNUMBER) serializeLuaNumber(lua_tonumber(L, -2), out);
+        else out += lua_toboolean(L, -2) ? "true" : "false";
+        out += "] = ";
+        serializeLuaValue(L, lua_gettop(L), out, indent + 2, path);
         out += ",\n";
         lua_pop(L, 1);
     }
     out += std::string(indent, ' ') + "}";
+    path.pop_back();
 }
 
-static void serializeLuaValue(lua_State* L, int idx, std::string& out, int indent) {
+static void serializeLuaValue(lua_State* L, int idx, std::string& out, int indent,
+                              std::vector<const void*>& path) {
     switch (lua_type(L, idx)) {
         case LUA_TNIL:     out += "nil"; break;
         case LUA_TBOOLEAN: out += lua_toboolean(L, idx) ? "true" : "false"; break;
-        case LUA_TNUMBER: {
-            double v = lua_tonumber(L, idx);
-            char buf[64];
-            snprintf(buf, sizeof(buf), "%.17g", v);
-            out += buf;
-            break;
-        }
-        case LUA_TSTRING: {
-            const char* s = lua_tostring(L, idx);
-            out += "\"";
-            for (const char* p = s; *p; ++p) {
-                if (*p == '"' || *p == '\\') out += '\\';
-                else if (*p == '\n') { out += "\\n"; continue; }
-                else if (*p == '\r') continue;
-                out += *p;
-            }
-            out += "\"";
-            break;
-        }
-        case LUA_TTABLE:
-            serializeLuaTable(L, idx, out, indent);
-            break;
+        case LUA_TNUMBER:  serializeLuaNumber(lua_tonumber(L, idx), out); break;
+        case LUA_TSTRING:  serializeLuaString(L, idx, out); break;
+        case LUA_TTABLE:   serializeLuaTable(L, idx, out, indent, path); break;
         default:
             out += "nil"; // Functions, userdata, etc. can't be serialized
             break;
     }
+}
+
+static void serializeLuaValue(lua_State* L, int idx, std::string& out, int indent) {
+    std::vector<const void*> path;
+    serializeLuaValue(L, idx, out, indent, path);
 }
 
 void LuaEngine::setAddonList(const std::vector<TocFile>& addons) {
@@ -12763,7 +14173,8 @@ int luaTracebackHandler(lua_State* L) {
 
 /// Loads and runs a chunk with the traceback handler in place. Returns the
 /// same non-zero-on-error convention as luaL_dostring.
-int runChunk(lua_State* L, const char* chunk, size_t len, const char* name) {
+int runChunk(lua_State* L, const char* chunk, size_t len, const char* name,
+             const std::string* addonName = nullptr) {
     const int base = lua_gettop(L);
     lua_pushcfunction(L, luaTracebackHandler);
     if (luaL_loadbuffer(L, chunk, len, name) != 0) {
@@ -12772,7 +14183,32 @@ int runChunk(lua_State* L, const char* chunk, size_t len, const char* name) {
         lua_remove(L, base + 1);
         return 1;
     }
-    const int rc = lua_pcall(L, 0, 0, base + 1);
+    int nargs = 0;
+    if (addonName && !addonName->empty()) {
+        // (addonName, addonTable): the table is the addon's own, made the
+        // first time any of its files runs and shared by all of them. Kept in
+        // the registry, out of reach of _G, which is the point of it.
+        lua_pushlstring(L, addonName->data(), addonName->size());
+        lua_getfield(L, LUA_REGISTRYINDEX, "wowee_addon_tables");
+        if (!lua_istable(L, -1)) {
+            lua_pop(L, 1);
+            lua_newtable(L);
+            lua_pushvalue(L, -1);
+            lua_setfield(L, LUA_REGISTRYINDEX, "wowee_addon_tables");
+        }
+        lua_pushlstring(L, addonName->data(), addonName->size());
+        lua_rawget(L, -2);
+        if (!lua_istable(L, -1)) {
+            lua_pop(L, 1);
+            lua_newtable(L);
+            lua_pushlstring(L, addonName->data(), addonName->size());
+            lua_pushvalue(L, -2);
+            lua_rawset(L, -4);
+        }
+        lua_remove(L, -2);  // the registry's table of tables
+        nargs = 2;
+    }
+    const int rc = lua_pcall(L, nargs, 0, base + 1);
     lua_remove(L, base + 1);
     return rc;
 }
@@ -12879,7 +14315,7 @@ bool LuaEngine::executeFile(const std::string& path) {
         source.erase(0, 3);
     }
     const std::string chunkName = "@" + path;
-    int err = runChunk(L_, source.c_str(), source.size(), chunkName.c_str());
+    int err = runChunk(L_, source.c_str(), source.size(), chunkName.c_str(), &addonContext_);
     if (err != 0) {
         const char* errMsg = lua_tostring(L_, -1);
         std::string msg = errMsg ? errMsg : "(unknown error)";
@@ -12930,10 +14366,14 @@ bool LuaEngine::evaluateBoolean(const std::string& expression) {
 }
 
 bool LuaEngine::executeString(const std::string& code) {
+    return executeString(code, code);
+}
+
+bool LuaEngine::executeString(const std::string& code, const std::string& chunkName) {
     if (!L_) return false;
 
     BudgetGuard guard(L_, chunkTimeoutMs_);
-    int err = runChunk(L_, code.c_str(), code.size(), code.c_str());
+    int err = runChunk(L_, code.c_str(), code.size(), chunkName.c_str());
     if (err != 0) {
         const char* errMsg = lua_tostring(L_, -1);
         std::string msg = errMsg ? errMsg : "(unknown error)";

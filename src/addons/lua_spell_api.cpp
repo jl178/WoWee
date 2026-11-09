@@ -6,6 +6,7 @@
 #include "addons/lua_engine.hpp"
 #include "core/logger.hpp"
 #include <set>
+#include <unordered_set>
 
 namespace wowee::addons {
 
@@ -120,9 +121,62 @@ static int lua_GetTotemTimeLeft(lua_State* L) {
     return 1;
 }
 
+/// The spell a range question is about, in the two forms the client takes:
+/// (bookIndex, "spell"|"pet", ...) or (name, ...). Sets argsUsed to how many
+/// arguments the spell took, so the unit is read from the one after.
+static uint32_t rangeSpellArg(lua_State* L, game::GameHandler* gh, int& argsUsed) {
+    if (lua_type(L, 1) == LUA_TNUMBER && lua_type(L, 2) == LUA_TSTRING) {
+        const std::string book = lua_tostring(L, 2);
+        if (book == "spell" || book == "pet") {
+            argsUsed = 2;
+            const int slot = static_cast<int>(lua_tonumber(L, 1));
+            if (book == "pet") {
+                const auto& pet = gh->getPetSpells();
+                return (slot >= 1 && slot <= static_cast<int>(pet.size()))
+                    ? pet[static_cast<size_t>(slot - 1)] : 0;
+            }
+            return spellIdForBookSlot(gh, slot);
+        }
+    }
+    argsUsed = 1;
+    const char* name = lua_tostring(L, 1);
+    if (!name || !*name) return 0;
+    return highestKnownRankByName(gh, name);
+}
+
+/// SpellHasRange(index, "bookType") or SpellHasRange("name") -> 1 or nil.
+/// Whether the spell has a range at all - a self-only spell (a shout, an
+/// armour buff) does not, and range indicators skip it. LibSpellRange and
+/// ElvUI's action bars ask it before asking IsSpellInRange.
+static int lua_SpellHasRange(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh) return luaReturnNil(L);
+    int used = 0;
+    const uint32_t spellId = rangeSpellArg(L, gh, used);
+    if (spellId == 0) return luaReturnNil(L);
+    const auto data = gh->getSpellData(spellId);
+    if (data.maxRange <= 0.0f) return luaReturnNil(L);
+    lua_pushnumber(L, 1);
+    return 1;
+}
+
 static int lua_IsSpellInRange(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnNil(L); }
+    // IsSpellInRange(index, "bookType", "unit") or IsSpellInRange("name",
+    // "unit"). A number with a book is a spellbook slot, as everywhere else
+    // that takes a book type; a number on its own was read as a spell id
+    // here, which the client never does.
+    if (lua_type(L, 1) == LUA_TNUMBER && lua_type(L, 2) == LUA_TSTRING) {
+        int used = 0;
+        const uint32_t id = rangeSpellArg(L, gh, used);
+        if (used == 2) {
+            if (id == 0) return luaReturnNil(L);
+            std::string unit = luaL_optstring(L, 3, "target");
+            toLowerInPlace(unit);
+            return pushSpellRangeAnswer(L, gh, id, resolveUnitGuid(gh, unit));
+        }
+    }
     const char* spellNameOrId = luaL_checkstring(L, 1);
     const char* uid = luaL_optstring(L, 2, "target");
 
@@ -181,132 +235,244 @@ static bool classCanDispel(uint8_t classId, uint8_t dispelType) {
     }
 }
 
-static int lua_UnitAura(lua_State* L, bool wantBuff) {
+/// The unit token the stock client hands back as an aura's caster: the
+/// player's own units first, then the group, then whatever else the player
+/// has a name for. Nil (an empty string here) for a caster that has none -
+/// the real client never answers with a guid, and an addon that passes the
+/// caster to UnitIsUnit or UnitName needs a token it can use.
+static std::string unitTokenForGuid(game::GameHandler* gh, uint64_t guid) {
+    if (!gh || guid == 0) return {};
+    if (guid == gh->getPlayerGuid()) return "player";
+    if (guid == gh->getPetGuid()) return "pet";
+    if (guid == gh->playerVehicleGuid()) return "vehicle";
+    if (gh->isInGroup()) {
+        const bool raid = game::groupIsRaid(gh->getPartyData().groupType);
+        if (!raid) {
+            for (int i = 1; i <= 4; ++i) {
+                const std::string t = "party" + std::to_string(i);
+                if (resolveUnitGuid(gh, t) == guid) return t;
+            }
+            for (int i = 1; i <= 4; ++i) {
+                const std::string t = "partypet" + std::to_string(i);
+                if (resolveUnitGuid(gh, t) == guid) return t;
+            }
+        } else {
+            if (const int idx = raidIndexOf(gh, guid); idx > 0) return "raid" + std::to_string(idx);
+            const int n = static_cast<int>(raidRoster(gh).size());
+            for (int i = 1; i <= n; ++i) {
+                const std::string t = "raidpet" + std::to_string(i);
+                if (resolveUnitGuid(gh, t) == guid) return t;
+            }
+        }
+    }
+    if (guid == gh->getTargetGuid()) return "target";
+    if (guid == gh->getFocusGuid()) return "focus";
+    if (guid == gh->getMouseoverGuid()) return "mouseover";
+    return {};
+}
+
+/// UnitAura's filter, as the client reads it: words separated by "|" or
+/// spaces, any order, any case.
+struct AuraFilter {
+    bool harmful = false;
+    bool player = false;
+    bool raid = false;
+    bool cancelable = false;
+    bool notCancelable = false;
+};
+
+static AuraFilter parseAuraFilter(const char* text, bool defaultHarmful) {
+    AuraFilter f;
+    f.harmful = defaultHarmful;
+    if (!text) return f;
+    std::string s(text);
+    for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t end = s.find_first_of("| ", pos);
+        if (end == std::string::npos) end = s.size();
+        const std::string word = s.substr(pos, end - pos);
+        if (word == "HELPFUL") f.harmful = false;
+        else if (word == "HARMFUL") f.harmful = true;
+        else if (word == "PLAYER") f.player = true;
+        else if (word == "RAID") f.raid = true;
+        else if (word == "CANCELABLE") f.cancelable = true;
+        else if (word == "NOT_CANCELABLE") f.notCancelable = true;
+        pos = end + 1;
+    }
+    return f;
+}
+
+/// Spell.dbc Attributes bit 31, SPELL_ATTR0_CANT_CANCEL.
+static constexpr uint32_t kAttrCantCancel = 0x80000000u;
+
+/// UnitAura / UnitBuff / UnitDebuff, which are one function in the client
+/// with three doors.
+///
+///   UnitAura(unit, index [, filter])
+///   UnitAura(unit, name [, rank [, filter]])
+///
+/// -> name, rank, icon, count, debuffType, duration, expirationTime,
+///    unitCaster, isStealable, shouldConsolidate, spellId
+///
+/// UnitBuff and UnitDebuff are the same with HELPFUL or HARMFUL fixed; a
+/// third argument of true to either is the old "castable"/"dispellable" flag
+/// and means RAID.
+///
+/// What changed, and why each one mattered to a real interface:
+///   * a name in place of the index looks the aura up by name - "do I have
+///     Arcane Intellect" is how buff reminders and ElvUI's own checks ask, and
+///     the index read of a string raised;
+///   * PLAYER, RAID (on buffs too: the ones this character can cast),
+///     CANCELABLE and NOT_CANCELABLE filter, and filter *before* counting, so
+///     index n is the n-th aura that passes - oUF's aura filters and raid
+///     frame buff indicators are built on that;
+///   * rank is Spell.dbc's rank text rather than empty;
+///   * the caster is a unit token or nil, never a guid string, so it can be
+///     handed to UnitIsUnit, UnitName or UnitClass as addons do to colour or
+///     filter by who cast it.
+static int unitAuraQuery(lua_State* L, int forced /* 0 any, 1 helpful, 2 harmful */) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnNil(L); }
     const char* uid = luaL_optstring(L, 1, "player");
-    int index = static_cast<int>(luaL_optnumber(L, 2, 1));
-    if (index < 1) { return luaReturnNil(L); }
-
     std::string uidStr(uid);
     toLowerInPlace(uidStr);
+
+    const bool byName = lua_type(L, 2) == LUA_TSTRING && !lua_isnumber(L, 2);
+    int index = 0;
+    std::string wantedName, wantedRank;
+    const char* filterText = nullptr;
+    bool castableFlag = false;
+    if (byName) {
+        wantedName = lua_tostring(L, 2);
+        if (lua_type(L, 3) == LUA_TSTRING) wantedRank = lua_tostring(L, 3);
+        if (lua_type(L, 4) == LUA_TSTRING) filterText = lua_tostring(L, 4);
+        else if (lua_type(L, 4) == LUA_TBOOLEAN) castableFlag = lua_toboolean(L, 4) != 0;
+    } else {
+        index = static_cast<int>(luaL_optnumber(L, 2, 1));
+        if (index < 1) { return luaReturnNil(L); }
+        if (lua_type(L, 3) == LUA_TSTRING) filterText = lua_tostring(L, 3);
+        else if (lua_type(L, 3) == LUA_TBOOLEAN) castableFlag = lua_toboolean(L, 3) != 0;
+    }
+    AuraFilter filter = parseAuraFilter(filterText, forced == 2);
+    if (forced == 1) filter.harmful = false;
+    if (forced == 2) filter.harmful = true;
+    if (castableFlag) filter.raid = true;
 
     const std::vector<game::AuraSlot>* auras = nullptr;
     uint64_t unitGuid = 0;
     if (uidStr == "player")      { auras = &gh->getPlayerAuras(); unitGuid = gh->getPlayerGuid(); }
     else if (uidStr == "target") { auras = &gh->getTargetAuras(); unitGuid = gh->getTargetGuid(); }
     else {
-        // Try party/raid/focus via GUID lookup in unitAurasCache
         unitGuid = resolveUnitGuid(gh, uidStr);
-        if (unitGuid != 0) auras = gh->getUnitAuras(unitGuid);
+        if (unitGuid != 0) {
+            if (unitGuid == gh->getPlayerGuid()) auras = &gh->getPlayerAuras();
+            else if (unitGuid == gh->getTargetGuid()) auras = &gh->getTargetAuras();
+            else auras = gh->getUnitAuras(unitGuid);
+        }
     }
     if (!auras) { return luaReturnNil(L); }
 
-    // "RAID" on a debuff means only what this character can remove. The index
-    // counts into the filtered list, so the test has to come before the count
-    // - filtering after it would answer the wrong aura for every index past
-    // the first one skipped.
-    const char* filterArg = luaL_optstring(L, 3, "");
-    bool dispellableOnly = false;
-    if (!wantBuff && filterArg) {
-        std::string f(filterArg);
-        for (char& c : f) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-        dispellableOnly = f.find("RAID") != std::string::npos;
-    }
     const uint8_t playerClass = gh->getPlayerClass();
+    const uint64_t playerGuid = gh->getPlayerGuid();
+    const uint64_t vehicleGuid = gh->playerVehicleGuid();
 
-    // Filter to buffs or debuffs and find the Nth one
+    // Names of the spells this character knows, built once and only for a
+    // RAID buff filter: "a buff I could cast" is a buff whose spell, by name,
+    // is in the spell book - Arcane Intellect of any rank, or Arcane
+    // Brilliance's single-target cousin.
+    std::unordered_set<std::string> knownNames;
+    if (filter.raid && !filter.harmful) {
+        for (uint32_t id : gh->getKnownSpells()) {
+            const std::string& n = gh->getSpellName(id);
+            if (!n.empty()) knownNames.insert(n);
+        }
+    }
+
     int found = 0;
     for (const auto& aura : *auras) {
         if (aura.isEmpty() || aura.spellId == 0) continue;
-        bool isDebuff = (aura.flags & 0x80) != 0;
-        if (wantBuff ? isDebuff : !isDebuff) continue;
+        const bool isDebuff = (aura.flags & 0x80) != 0;
+        if (filter.harmful != isDebuff) continue;
         // Only what the stock client lists (Wow.exe 0x72C510): an aura with
         // no Spell.dbc row - a realm's own spell - or one its row hides is
         // not there at all and takes no index, rather than an "Unknown" with
         // no icon.
         if (!gh->isAuraListed(aura, unitGuid)) continue;
-        if (dispellableOnly &&
-            !classCanDispel(playerClass, gh->getSpellDispelType(aura.spellId))) {
+        if (filter.player && aura.casterGuid != playerGuid &&
+            (vehicleGuid == 0 || aura.casterGuid != vehicleGuid)) {
             continue;
         }
-        found++;
-        if (found == index) {
-            // Return: name, rank, icon, count, debuffType, duration, expirationTime, ...spellId
-            std::string name = gh->getSpellName(aura.spellId);
-            lua_pushstring(L, name.empty() ? "Unknown" : name.c_str()); // name
-            lua_pushstring(L, "");           // rank
-            std::string iconPath = gh->getSpellIconPath(aura.spellId);
-            if (!iconPath.empty()) lua_pushstring(L, iconPath.c_str());
-            else lua_pushnil(L);             // icon texture path
-            lua_pushnumber(L, aura.charges); // count
-            // debuffType: resolve from Spell.dbc dispel type
-            {
-                uint8_t dt = gh->getSpellDispelType(aura.spellId);
-                switch (dt) {
-                    case 1:  lua_pushstring(L, "Magic");  break;
-                    case 2:  lua_pushstring(L, "Curse");  break;
-                    case 3:  lua_pushstring(L, "Disease"); break;
-                    case 4:  lua_pushstring(L, "Poison"); break;
-                    default: lua_pushnil(L);              break;
-                }
+        if (filter.raid) {
+            if (isDebuff) {
+                if (!classCanDispel(playerClass, gh->getSpellDispelType(aura.spellId))) continue;
+            } else if (!knownNames.count(gh->getSpellName(aura.spellId))) {
+                continue;
             }
-            lua_pushnumber(L, aura.maxDurationMs > 0 ? aura.maxDurationMs / 1000.0 : 0); // duration
-            // expirationTime: GetTime() + remaining seconds (so addons can compute countdown)
-            if (aura.durationMs > 0) {
-                uint64_t auraNowMs = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch()).count());
-                int32_t remMs = aura.getRemainingMs(auraNowMs);
-                lua_pushnumber(L, luaGetTimeNow() + remMs / 1000.0);
-            } else {
-                lua_pushnumber(L, 0);  // permanent aura
-            }
-            // caster: return unit ID string if caster is known
-            if (aura.casterGuid != 0) {
-                if (aura.casterGuid == gh->getPlayerGuid())
-                    lua_pushstring(L, "player");
-                else if (aura.casterGuid == gh->getTargetGuid())
-                    lua_pushstring(L, "target");
-                else if (aura.casterGuid == gh->getFocusGuid())
-                    lua_pushstring(L, "focus");
-                else if (aura.casterGuid == gh->getPetGuid())
-                    lua_pushstring(L, "pet");
-                else {
-                    char cBuf[32];
-                    snprintf(cBuf, sizeof(cBuf), "0x%016llX", (unsigned long long)aura.casterGuid);
-                    lua_pushstring(L, cBuf);
-                }
-            } else {
-                lua_pushnil(L);
-            }
-            // isStealable: what the target frame's Stealable border reads
-            // (targetframe.lua shows it for a buff when this is true and the
-            // target is not the player). The 3.3.5 client answers true for a
-            // helpful Magic aura on a unit the player can attack, and only for
-            // a player who can steal one - which is a mage with Spellsteal, so
-            // nobody else ever sees the border.
-            {
-                constexpr uint32_t kSpellsteal = 30449;
-                bool stealable = false;
-                if (!isDebuff && gh->getSpellDispelType(aura.spellId) == 1 &&
-                    gh->getKnownSpells().count(kSpellsteal) != 0) {
-                    const uint64_t unitGuid = resolveUnitGuid(gh, uidStr);
-                    if (unitGuid != 0 && unitGuid != gh->getPlayerGuid()) {
-                        auto ent = gh->getEntityManager().getEntity(unitGuid);
-                        if (ent && ent->isUnit()) {
-                            const auto* u = static_cast<const game::Unit*>(ent.get());
-                            stealable = u->isHostile() ||
-                                        !gh->isFriendlyFaction(u->getFactionTemplate());
-                        }
-                    }
-                }
-                lua_pushboolean(L, stealable ? 1 : 0);
-            }
-            lua_pushboolean(L, 0);           // shouldConsolidate
-            lua_pushnumber(L, aura.spellId); // spellId
-            return 11;
         }
+        if (filter.cancelable || filter.notCancelable) {
+            gh->getSpellName(aura.spellId);  // fills the cache
+            const auto it = gh->spellNameCacheRef().find(aura.spellId);
+            const uint32_t attr = it != gh->spellNameCacheRef().end() ? it->second.attr : 0;
+            const bool cancelable = !isDebuff && (attr & kAttrCantCancel) == 0;
+            if (filter.cancelable && !cancelable) continue;
+            if (filter.notCancelable && cancelable) continue;
+        }
+        const std::string& name = gh->getSpellName(aura.spellId);
+        if (byName) {
+            if (name != wantedName) continue;
+            if (!wantedRank.empty() && gh->getSpellRank(aura.spellId) != wantedRank) continue;
+        } else if (++found != index) {
+            continue;
+        }
+
+        lua_pushstring(L, name.empty() ? "Unknown" : name.c_str());              // name
+        lua_pushstring(L, gh->getSpellRank(aura.spellId).c_str());                 // rank
+        const std::string iconPath = gh->getSpellIconPath(aura.spellId);
+        if (!iconPath.empty()) lua_pushstring(L, iconPath.c_str());                // icon
+        else lua_pushnil(L);
+        lua_pushnumber(L, aura.charges);                                           // count
+        switch (gh->getSpellDispelType(aura.spellId)) {                            // debuffType
+            case 1:  lua_pushstring(L, "Magic");   break;
+            case 2:  lua_pushstring(L, "Curse");   break;
+            case 3:  lua_pushstring(L, "Disease"); break;
+            case 4:  lua_pushstring(L, "Poison");  break;
+            default: lua_pushnil(L);               break;
+        }
+        lua_pushnumber(L, aura.maxDurationMs > 0 ? aura.maxDurationMs / 1000.0 : 0);  // duration
+        if (aura.durationMs > 0) {                                                 // expirationTime
+            const uint64_t nowMs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            lua_pushnumber(L, luaGetTimeNow() + aura.getRemainingMs(nowMs) / 1000.0);
+        } else {
+            lua_pushnumber(L, 0);
+        }
+        const std::string caster = unitTokenForGuid(gh, aura.casterGuid);           // unitCaster
+        if (caster.empty()) lua_pushnil(L); else lua_pushstring(L, caster.c_str());
+        // isStealable: what the target frame's Stealable border reads
+        // (targetframe.lua shows it for a buff when this is true and the
+        // target is not the player). The 3.3.5 client answers true for a
+        // helpful Magic aura on a unit the player can attack, and only for a
+        // player who can steal one - which is a mage with Spellsteal.
+        {
+            constexpr uint32_t kSpellsteal = 30449;
+            bool stealable = false;
+            if (!isDebuff && gh->getSpellDispelType(aura.spellId) == 1 &&
+                gh->getKnownSpells().count(kSpellsteal) != 0 &&
+                unitGuid != 0 && unitGuid != playerGuid) {
+                auto ent = gh->getEntityManager().getEntity(unitGuid);
+                if (ent && ent->isUnit()) {
+                    const auto* u = static_cast<const game::Unit*>(ent.get());
+                    stealable = u->isHostile() ||
+                                !gh->isFriendlyFaction(u->getFactionTemplate());
+                }
+            }
+            lua_pushboolean(L, stealable ? 1 : 0);
+        }
+        lua_pushboolean(L, 0);                                                     // shouldConsolidate
+        lua_pushnumber(L, aura.spellId);                                           // spellId
+        return 11;
     }
     lua_pushnil(L);
     return 1;
@@ -463,19 +629,9 @@ static int lua_CancelPlayerBuff(lua_State* L) {
     return 0;
 }
 
-static int lua_UnitBuff(lua_State* L) { return lua_UnitAura(L, true); }
-static int lua_UnitDebuff(lua_State* L) { return lua_UnitAura(L, false); }
-
-// UnitAura(unit, index, filter) - generic aura query with filter string
-// filter: "HELPFUL" = buffs, "HARMFUL" = debuffs, "PLAYER" = cast by player,
-//         "HELPFUL|PLAYER" = buffs cast by player, etc.
-static int lua_UnitAuraGeneric(lua_State* L) {
-    const char* filter = luaL_optstring(L, 3, "HELPFUL");
-    std::string f(filter ? filter : "HELPFUL");
-    for (char& c : f) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    bool wantBuff = (f.find("HARMFUL") == std::string::npos);
-    return lua_UnitAura(L, wantBuff);
-}
+static int lua_UnitBuff(lua_State* L) { return unitAuraQuery(L, 1); }
+static int lua_UnitDebuff(lua_State* L) { return unitAuraQuery(L, 2); }
+static int lua_UnitAuraGeneric(lua_State* L) { return unitAuraQuery(L, 0); }
 
 // ---------- UnitCastingInfo / UnitChannelInfo ----------
 // Internal helper: pushes cast/channel info for a unit.
@@ -1453,6 +1609,7 @@ void registerSpellLuaAPI(lua_State* L) {
             return 1;
         }},
                 {"IsSpellInRange",    lua_IsSpellInRange},
+                {"SpellHasRange",     lua_SpellHasRange},
                 {"UnitBuff",          lua_UnitBuff},
                 {"UnitDebuff",        lua_UnitDebuff},
                 {"UnitAura",          lua_UnitAuraGeneric},

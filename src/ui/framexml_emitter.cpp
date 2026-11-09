@@ -672,7 +672,14 @@ struct Emitter {
             line(name + " = {}");
             line("do local base = rawget(_G, " + quote(*inh) + ")");
             line("  if type(base) == 'table' then");
-            line("    for k, v in pairs(base) do " + name + "[k] = v end");
+            // The settings, not the bookkeeping: __-prefixed fields are the
+            // base's own (who inherits from it, its name).
+            line("    for k, v in pairs(base) do");
+            line("      if type(k) ~= 'string' or k:sub(1, 2) ~= '__' then " + name + "[k] = v end");
+            line("    end");
+            // And kept in step with it afterwards, as a font object that
+            // inherits another is in the client.
+            line("    if __WoweeFontInherit then __WoweeFontInherit(" + name + ", base) end");
             line("  end");
             line("end");
             // pairs() copies fields and not the metatable, and a font object's
@@ -690,6 +697,7 @@ struct Emitter {
             // ...and one made fresh here has no metatable either.
             line("if __WoweeFontMT then setmetatable(" + name + ", __WoweeFontMT) end");
         }
+        line("rawset(" + name + ", '__fontName', " + quote(name) + ")");
         if (height > 0.0f) line(name + ".height = " + std::to_string(height));
         if (const std::string* f = node.attr("font"))
             line(name + ".font = " + quote(*f));
@@ -997,6 +1005,15 @@ struct Emitter {
         // reported as the dungeon finder icon missing from the minimap.
         if (const std::string* hidden = node.attr("hidden")) {
             line(var + (attrIsTrue(*hidden) ? ":Hide()" : ":Show()"));
+        }
+        // protected="true": an explicitly protected frame, which is what
+        // SecureFrameTemplate and everything built on it is. IsProtected
+        // reports it, and the secure handle machinery (restrictedframes.lua)
+        // keys on it - a handle to an unprotected frame may not be used in
+        // combat, so without this every state driver and secure snippet
+        // stopped working the moment combat began.
+        if (node.attrBool("protected")) {
+            line("rawset(" + var + ", '__protected', true)");
         }
 
         if (const XmlNode* size = node.child("Size")) {
@@ -1321,7 +1338,8 @@ struct Emitter {
         // windows, the character sheet - so leaving it unread meant StartMoving
         // was asked of a frame that had never been told it was movable, and
         // every one of those windows was nailed down.
-        emitTextAttr(node, var);
+        // (The text= attribute is applied after the button's regions; see
+        // below.)
         // A frame declares this the same way it declares movable, and it was
         // going nowhere: the chat window says resizable="true" and its size
         // grabber called StartSizing on a frame that had never been told it
@@ -1490,6 +1508,12 @@ struct Emitter {
         // Before Frames and Scripts, so a child anchoring to $parentNormalTexture
         // and an OnLoad reading its own label both find something there.
         emitButtonRegions(node, var, name);
+        // The label, once the <ButtonText> it belongs in exists. Set before it,
+        // a button made a font string of its own to hold the words and then
+        // took the declared one as well - two text regions where the client
+        // has one, and every addon that finds a button's text by position
+        // (select(3, button:GetRegions()) and the like) found the stray.
+        emitTextAttr(node, var);
         // A scroll frame's content, which is a frame like any other but reached
         // through SetScrollChild rather than sitting in Frames.
         // HybridScrollFrameScrollChild_OnLoad does self:GetParent().scrollChild
@@ -1716,12 +1740,34 @@ EmitResult emitFrameXml(const XmlNode& rootIn) {
     if (root.name != "Ui") {
         e.result.warnings.push_back("root element is <" + root.name + ">, expected <Ui>");
     }
+    // Where the Lua emitted so far was last cut into a step.
+    size_t flushedAt = 0;
+    bool firstLuaStep = true;
+    auto flushLua = [&]() {
+        if (e.result.lua.size() <= flushedAt) return;
+        std::string chunk = e.result.lua.substr(flushedAt);
+        flushedAt = e.result.lua.size();
+        // Each step is its own chunk, so each needs the table every frame's
+        // temporaries live in; the first already opens with it.
+        if (!firstLuaStep) chunk = "local __w = {}\n" + chunk;
+        firstLuaStep = false;
+        e.result.steps.push_back({EmitResult::Step::Kind::Lua, std::move(chunk)});
+    };
     for (const XmlNode& node : root.children) {
         if (node.name == "Script") {
-            if (const std::string* file = node.attr("file")) e.result.scriptFiles.push_back(*file);
-            else if (!node.text.empty()) e.result.lua += node.text + "\n";
+            if (const std::string* file = node.attr("file")) {
+                flushLua();
+                e.result.scriptFiles.push_back(*file);
+                e.result.steps.push_back({EmitResult::Step::Kind::Script, *file});
+            } else if (!node.text.empty()) {
+                e.result.lua += node.text + "\n";
+            }
         } else if (node.name == "Include") {
-            if (const std::string* file = node.attr("file")) e.result.includeFiles.push_back(*file);
+            if (const std::string* file = node.attr("file")) {
+                flushLua();
+                e.result.includeFiles.push_back(*file);
+                e.result.steps.push_back({EmitResult::Step::Kind::Include, *file});
+            }
         } else if (node.name == "Font") {
             e.emitFont(node);
         } else if (isFrameElement(node.name)) {
@@ -1770,6 +1816,7 @@ EmitResult emitFrameXml(const XmlNode& rootIn) {
                                         "nothing inside it was built");
         }
     }
+    flushLua();
     return std::move(e.result);
 }
 

@@ -398,11 +398,41 @@ inline uint64_t resolveUnitGuid(game::GameHandler* gh, const std::string& uid) {
         if (gh->getBankerGuid() != 0)            return gh->getBankerGuid();
         return gh->getTargetGuid();
     }
-    // Compound unit IDs: targettarget, focustarget, pettarget, mouseovertarget
-    if (uid == "targettarget")    return getEntityTargetGuid(gh, gh->getTargetGuid());
-    if (uid == "focustarget")     return getEntityTargetGuid(gh, gh->getFocusGuid());
-    if (uid == "pettarget")       return getEntityTargetGuid(gh, gh->getPetGuid());
-    if (uid == "mouseovertarget") return getEntityTargetGuid(gh, gh->getMouseoverGuid());
+    // Any unit followed by "target", as many times as it is written:
+    // targettarget, targettargettarget, focustarget, party2target,
+    // raid14target, arena1target, partypet1target. The client resolves the
+    // suffix by walking each unit's target field, so every base token works
+    // with it; this knew four fixed spellings, and ElvUI's party and raid
+    // targets and its target-of-target-of-target frame all read as nobody.
+    if (uid.size() > 6 && uid.compare(uid.size() - 6, 6, "target") == 0) {
+        const uint64_t base = resolveUnitGuid(gh, uid.substr(0, uid.size() - 6));
+        return base ? getEntityTargetGuid(gh, base) : 0;
+    }
+    // partypet1-4 and raidpet1-40: the pet of that member. A member's pet is
+    // whatever unit in view that member summoned and controls - a hunter's or
+    // warlock's pet carries a pet number, a ghoul or a water elemental only
+    // the player-controlled flag - and the player's own is the one the client
+    // already tracks.
+    if ((uid.rfind("partypet", 0) == 0 && uid.size() > 8) ||
+        (uid.rfind("raidpet", 0) == 0 && uid.size() > 7)) {
+        const bool party = uid[1] == 'a' && uid[2] == 'r';
+        const std::string owner = (party ? "party" : "raid") + uid.substr(party ? 8 : 7);
+        const uint64_t ownerGuid = resolveUnitGuid(gh, owner);
+        if (ownerGuid == 0) return 0;
+        if (ownerGuid == gh->getPlayerGuid()) return gh->getPetGuid();
+        uint64_t controlled = 0;
+        for (const auto& [guid, ent] : gh->getEntityManager().getEntities()) {
+            if (!ent || ent->getType() != game::ObjectType::UNIT) continue;
+            if (game::unitSummonedByGuid(*ent) != ownerGuid) continue;
+            const auto* u = static_cast<const game::Unit*>(ent.get());
+            if ((u->getUnitFlags() & game::UNIT_FLAG_PLAYER_CONTROLLED) == 0) continue;
+            const auto& f = ent->getFields();
+            auto pn = f.find(game::fieldIndex(game::UF::UNIT_FIELD_PETNUMBER));
+            if (pn != f.end() && pn->second != 0) return guid;
+            if (controlled == 0) controlled = guid;
+        }
+        return controlled;
+    }
     // party1-party4, raid1-raid40
     if (uid.rfind("party", 0) == 0 && uid.size() > 5) {
         int idx = 0;

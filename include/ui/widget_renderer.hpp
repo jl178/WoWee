@@ -132,6 +132,9 @@ private:
     VkDescriptorSet texture(const std::string& path, bool add = false);
     /// Already-uploaded texture for a path, without triggering an upload.
     [[nodiscard]] VkDescriptorSet resident(const std::string& path, bool add = false) const;
+    /// The grey (desaturated) copy of a texture, made the first time it is
+    /// asked for and kept with the rest; `colour` until it exists.
+    VkDescriptorSet greyTexture(const std::string& path, bool add, VkDescriptorSet colour);
 
     /// scale is pixels per interface unit. The rect arrives in pixels, but a
     /// backdrop's insets and edge size are authored in units like everything

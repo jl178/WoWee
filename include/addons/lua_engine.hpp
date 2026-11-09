@@ -41,6 +41,19 @@ public:
 
     bool executeFile(const std::string& path);
     bool executeString(const std::string& code);
+    /// The same, under a chunk name of the caller's choosing - "@path" for
+    /// the Lua an XML file was turned into, so its errors name the file and
+    /// line, and so code built from it is known to be that file's.
+    bool executeString(const std::string& code, const std::string& chunkName);
+
+    /// The addon whose files are being run. While set, every file executeFile
+    /// runs receives `...` = (addonName, addonTable), as in the real client:
+    /// the name from the .toc and one private table shared by every file of
+    /// that addon (`local addonName, ns = ...`). Empty for FrameXML, whose
+    /// files are given nothing. The table lives as long as the Lua state, so
+    /// a load-on-demand part loaded later finds the same one.
+    void setAddonContext(const std::string& addonName) { addonContext_ = addonName; }
+    [[nodiscard]] const std::string& addonContext() const { return addonContext_; }
 
     /// Run a Lua expression and answer whether it came out true.
     ///
@@ -246,6 +259,37 @@ public:
     /// empty.
     std::string bindingCommandForKey(const std::string& key);
 
+    /// The stock nameplate frames (nameplate_frames_lua.hpp): a WorldFrame
+    /// child per unit the client draws a plate for, carrying that unit's state
+    /// in the stock regions so nameplate addons can read and restyle it.
+    struct NameplateParts {
+        uint32_t frame = 0, health = 0, cast = 0, threat = 0, border = 0,
+                 castBorder = 0, castShield = 0, castIcon = 0, highlight = 0,
+                 name = 0, level = 0, boss = 0, raid = 0, elite = 0;
+    };
+    struct NameplateState {
+        float x = 0, y = 0;           ///< the plate's TOP, in root interface units
+        float alpha = 1;
+        double health = 0, healthMax = 1;
+        float barColor[3] = {1, 0, 0};
+        std::string name;
+        float nameColor[3] = {1, 1, 1};
+        std::string level;
+        float levelColor[3] = {1, 1, 1};
+        bool skull = false, elite = false, highlight = false;
+        bool threat = false;
+        float threatColor[3] = {1, 0, 0};
+        int raidIcon = 0;             ///< 1-8, 0 for none
+        bool casting = false, shielded = false;
+        double castValue = 0, castMax = 1;
+        std::string castIcon;
+    };
+    /// The plate frame for a unit, made or reused; false when there is no
+    /// interface to make one in (FrameXML off).
+    bool acquireNameplate(uint64_t guid, NameplateParts& out);
+    void updateNameplate(uint64_t guid, const NameplateState& state);
+    void releaseNameplate(uint64_t guid);
+
     /// A controller button, by its binding name.
     ///
     /// Given to the key binding panel while it is waiting for a key, which is
@@ -343,6 +387,7 @@ private:
     /// Guards against two handlers triggering each other without end.
     int eventDepth_ = 0;
     std::string lastError_;
+    std::string addonContext_;
     unsigned long long chunkTimeoutMs_ = 0;
 
     /// A 1.12 combat log line: the event, the GlobalStrings pattern and its

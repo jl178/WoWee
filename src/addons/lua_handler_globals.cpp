@@ -1,6 +1,7 @@
 #include "addons/lua_handler_globals.hpp"
 
 #include <cstring>
+#include <string>
 
 extern "C" {
 #include <lua.h>
@@ -68,7 +69,41 @@ void pushSaveTable(lua_State* L) {
 void setLegacyHandlerGlobals(bool on) { gLegacyHandlerGlobals = on; }
 bool legacyHandlerGlobals() { return gLegacyHandlerGlobals; }
 
+namespace {
+/// The error with the stack it was raised on. A script handler that raised
+/// used to be reported by its message alone - which names the line that
+/// broke, not the handler or the chain of calls that reached it - so an
+/// addon's error from inside an OnEvent read as a bare "attempt to perform
+/// arithmetic on local 'x'" with nothing to say who called.
+int scriptTraceback(lua_State* L) {
+    const char* msg = lua_tostring(L, 1);
+    std::string out = msg ? msg : "(error)";
+    for (int level = 1; level < 14; ++level) {
+        lua_Debug ar;
+        if (!lua_getstack(L, level, &ar) || !lua_getinfo(L, "Sln", &ar)) break;
+        out += "\n      at ";
+        out += ar.short_src[0] ? ar.short_src : "?";
+        out += ":" + std::to_string(ar.currentline);
+        if (ar.name) { out += " in "; out += ar.name; }
+    }
+    lua_pushstring(L, out.c_str());
+    return 1;
+}
+}  // namespace
+
+int pcallScriptInner(lua_State* L, const char* script, int nargs, int errfunc);
+
 int pcallScript(lua_State* L, const char* script, int nargs, int errfunc) {
+    if (errfunc != 0) return pcallScriptInner(L, script, nargs, errfunc);
+    const int fnIdx = lua_gettop(L) - nargs;
+    lua_pushcfunction(L, scriptTraceback);
+    lua_insert(L, fnIdx);
+    const int rc = pcallScriptInner(L, script, nargs, fnIdx);
+    lua_remove(L, fnIdx);
+    return rc;
+}
+
+int pcallScriptInner(lua_State* L, const char* script, int nargs, int errfunc) {
     if (!gLegacyHandlerGlobals || nargs < 1)
         return lua_pcall(L, nargs, 0, errfunc);
 

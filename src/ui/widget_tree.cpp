@@ -865,6 +865,30 @@ void WidgetTree::noteScreenSize(float pixelW, float pixelH) {
     // The same scale the full pass works out, so a rect resolved before that
     // pass is in the units everything else will be in.
     uiScale_ = (pixelH / kInterfaceHeight) * userScale_;
+    // And the screen and UIParent placed, as the full pass places them. The
+    // on-demand resolver stops at these two and takes their rects as given,
+    // so until the first full pass every frame measured against them came
+    // out zero by zero - an addon reading UIParent:GetSize() while it loads
+    // or at PLAYER_LOGIN (before the loading screen has lifted, when nothing
+    // has drawn) sized its whole interface to nothing. ElvUI does both.
+    const float screenW = pixelW / uiScale_;
+    const float screenH = pixelH / uiScale_;
+    if (Widget* root = node(rootId_)) {
+        root->left = 0.0f;
+        root->bottom = 0.0f;
+        root->rectW = screenW;
+        root->rectH = screenH;
+        root->effScale = 1.0f;
+    }
+    if (Widget* ui = node(uiParentId_)) {
+        const float inL = safeLeft_ / uiScale_;
+        const float inB = safeBottom_ / uiScale_;
+        ui->left = inL;
+        ui->bottom = inB;
+        ui->rectW = std::max(screenW - inL - safeRight_ / uiScale_, 1.0f);
+        ui->rectH = std::max(screenH - inB - safeTop_ / uiScale_, 1.0f);
+        ui->effScale = 1.0f;
+    }
     markLayoutDirty();
 }
 
@@ -1413,6 +1437,22 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
             const float span = parent->rectW - w->rectW;
             w->left   = parent->left + (span > 0.0f ? span * f : 0.0f);
             w->bottom = parent->bottom + (parent->rectH - w->rectH) * 0.5f;
+        }
+    }
+
+    // A status bar's fill texture - GetStatusBarTexture()'s region - covers
+    // the filled part of its bar, whatever anchors it has, because in the
+    // client the bar is what sizes it. Addons anchor to its edge: oUF's heal
+    // prediction starts its bars at the health fill's RIGHT, and ElvUI's
+    // cutaway health and power spark do the same.
+    if (w->fillOfBar != 0) {
+        const Widget* bar = node(w->fillOfBar);
+        if (bar && bar->rectW > 0.0f && bar->rectH > 0.0f) {
+            const float f = bar->barFraction();
+            w->left = bar->left;
+            w->bottom = bar->bottom;
+            w->rectW = bar->barVertical ? bar->rectW : bar->rectW * f;
+            w->rectH = bar->barVertical ? bar->rectH * f : bar->rectH;
         }
     }
 

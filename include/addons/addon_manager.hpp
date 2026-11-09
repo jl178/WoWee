@@ -55,11 +55,22 @@ public:
     /// each is loaded whole or not at all, so one of them raising during load
     /// costs its entire panel rather than degrading it.
     [[nodiscard]] const std::vector<TocFile>& getLoadOnDemandAddons() const { return lodAddons_; }
+    /// Every addon found, by name, with the directory it is in - what
+    /// "Interface\\AddOns\\<Name>\\..." in its own files refers to. See
+    /// AssetManager::setAddonDirectories.
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>> addonDirectories() const {
+        std::vector<std::pair<std::string, std::string>> out;
+        for (const auto* list : {&addons_, &lodAddons_})
+            for (const auto& a : *list) out.emplace_back(a.addonName, a.basePath);
+        return out;
+    }
 
     /// Load a load-on-demand addon by name. Names are matched without regard to
     /// case, because the interface asks for "Blizzard_TalentUI" and the
     /// directory on a case-sensitive filesystem is blizzard_talentui.
     bool loadAddOnByName(const std::string& name, std::string& reason);
+    /// Load every load-on-demand addon whose ## LoadWith names this one.
+    void loadAddOnsLoadingWith(const std::string& name);
     [[nodiscard]] bool isAddOnLoadedByName(const std::string& name) const;
     LuaEngine* getLuaEngine() { return &luaEngine_; }
     [[nodiscard]] bool isInitialized() const { return luaEngine_.isInitialized(); }

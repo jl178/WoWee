@@ -1523,7 +1523,18 @@ static int lua_GetCVar(lua_State* L) {
     // Enemy nameplates and the minimap's rotation used to be here too - the V
     // key and the minimap's menu turn them without SetCVar - and are rows
     // bound in kClientCVars now, which answers from the row the same way.
-    if (n == "gxwindow") {
+    if (n == "gxresolution") {
+        // The size the game is drawn at, "WIDTHxHEIGHT", as the client
+        // answers it. Addons read the physical pixel height from it to work
+        // out a pixel-perfect scale - ElvUI does so at file scope, and with
+        // no answer its whole scale computation divided by nil.
+        if (auto* svc = getLuaServices(L); svc && svc->window) {
+            const std::string res = std::to_string(svc->window->getWidth()) + "x" +
+                                    std::to_string(svc->window->getHeight());
+            lua_pushstring(L, res.c_str());
+            return 1;
+        }
+    } else if (n == "gxwindow") {
         // The schema's fullscreen row the other way round: 1 is windowed. The
         // Windowed box on the Resolution page is retired for that row, and
         // RestartGx reads this on Okay - so it has to be the window's live
@@ -3022,6 +3033,26 @@ static int lua_ReturnZero(lua_State* L)  { lua_pushnumber(L, 0.0); return 1; }
 /// anything the game knows. Same shape as selectedFriend and selectedIgnore.
 static int& selectedSkill() { static int v = 0; return v; }
 static int lua_ReturnNothing(lua_State*) { return 0; }
+static int lua_CPUZero(lua_State* L) { lua_pushnumber(L, 0); return 1; }
+static int lua_CPUZeroPair(lua_State* L) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 2; }
+
+/// PlayMusic(file) - play a music file in place of the zone's music, looping,
+/// until StopMusic(). The file is an archive path or one under an addon.
+static int lua_PlayMusic(lua_State* L) {
+    auto* svc = getLuaServices(L);
+    auto* ac = svc ? svc->audioCoordinator : nullptr;
+    auto* music = ac ? ac->getMusicManager() : nullptr;
+    const char* path = luaL_optstring(L, 1, "");
+    if (music && path && *path) music->playMusic(path, true);
+    return 0;
+}
+
+static int lua_StopMusic(lua_State* L) {
+    auto* svc = getLuaServices(L);
+    auto* ac = svc ? svc->audioCoordinator : nullptr;
+    if (auto* music = ac ? ac->getMusicManager() : nullptr) music->stopMusic();
+    return 0;
+}
 
 /// Which channel the channel-list panel has highlighted. Panel state with no
 /// counterpart in the game, kept here so the getter and setter agree.
@@ -5723,6 +5754,20 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"IsXPUserDisabled",         lua_IsXPUserDisabled},
                 {"GetAddOnMemoryUsage",      lua_GetAddOnMemoryUsage},
                 {"UpdateAddOnMemoryUsage",   lua_ReturnNothing},
+                // Script profiling, as the client answers it with the
+                // scriptProfile CVar at its default of 0: no figures are
+                // gathered, every reading is zero and the update and reset
+                // calls do nothing. ElvUI's status report and its System
+                // datatext read these; they raised for want of a function.
+                {"GetAddOnCPUUsage",         lua_CPUZero},
+                {"UpdateAddOnCPUUsage",      lua_ReturnNothing},
+                {"ResetCPUUsage",            lua_ReturnNothing},
+                {"GetScriptCPUUsage",        lua_CPUZero},
+                {"GetFunctionCPUUsage",      lua_CPUZeroPair},
+                {"GetFrameCPUUsage",         lua_CPUZeroPair},
+                {"GetEventCPUUsage",         lua_CPUZeroPair},
+                {"PlayMusic",                lua_PlayMusic},
+                {"StopMusic",                lua_StopMusic},
                 {"RunScript",                lua_RunScript},
                 {"IsMouseButtonDown",        lua_IsMouseButtonDown},
                 {"GetCVarDefault",           lua_GetCVarDefault},

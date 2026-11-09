@@ -12,6 +12,9 @@
 #include "ui/ui_helpers.hpp"
 #include "ui/interface_fonts.hpp"
 #include "addons/lua_api_registrations.hpp"
+#include "addons/addon_manager.hpp"
+#include "addons/lua_engine.hpp"
+#include "ui/widget_tree.hpp"
 #include "core/application.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
@@ -466,6 +469,139 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
     const int playerLevel = static_cast<int>(gameHandler.getPlayerLevel());
     const float shadow = 1.28f * s;  // 0.001 DDC
 
+    // ---- The stock plate frames (nameplate_frames_lua.hpp) ----
+    // Each plate drawn here is also a WorldFrame child carrying its unit's
+    // state, as in the real client, so nameplate addons find it. What this
+    // draws below is the frame's stock regions: each part is drawn only while
+    // its region is shown with its art, so an addon that hides a region or
+    // clears its texture - which is how they all take a plate over - stops
+    // that part being drawn, exactly as on the stock client.
+    struct PlateGates {
+        bool frame = true, threat = true, health = true, border = true, highlight = true,
+             level = true, skull = true, elite = true, cast = true, castBorder = true,
+             castShield = true, castIcon = true, name = true, raid = true;
+    };
+    std::unordered_map<uint64_t, PlateGates> gates;
+    {
+        struct PlateFrames {
+            lua_State* state = nullptr;
+            std::unordered_map<uint64_t, addons::LuaEngine::NameplateParts> parts;
+        };
+        static PlateFrames frames;
+        addons::LuaEngine* engine =
+            services_.addonManager ? services_.addonManager->getLuaEngine() : nullptr;
+        // A reload makes a new state, and every id the old one handed out
+        // names nothing now.
+        if (!engine || engine->getState() != frames.state) {
+            frames.parts.clear();
+            frames.state = engine ? engine->getState() : nullptr;
+        }
+        if (engine && frames.state) {
+            auto& tree = engine->widgets();
+            const float ui = tree.uiScale() > 0.0f ? tree.uiScale() : 1.0f;
+            // Units that no longer carry a plate give theirs back.
+            for (auto it = frames.parts.begin(); it != frames.parts.end();) {
+                if (!plated.count(it->first)) {
+                    engine->releaseNameplate(it->first);
+                    it = frames.parts.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            const auto rgbf = [](const stockui::Rgb& c, float out[3]) {
+                out[0] = c.r / 255.0f; out[1] = c.g / 255.0f; out[2] = c.b / 255.0f;
+            };
+            for (const auto& p : plates) {
+                auto found = frames.parts.find(p.guid);
+                if (found == frames.parts.end()) {
+                    addons::LuaEngine::NameplateParts parts;
+                    if (!engine->acquireNameplate(p.guid, parts)) continue;
+                    found = frames.parts.emplace(p.guid, parts).first;
+                }
+                game::Unit* unit = p.unit;
+                addons::LuaEngine::NameplateState st;
+                st.x = (p.px + plateW * 0.5f) / ui;
+                st.y = (screenH - p.py) / ui;
+                st.alpha = stockui::nameplateAlpha(targetGuid != 0, p.isTarget) / 255.0f;
+                st.health = static_cast<double>(unit->getHealth());
+                st.healthMax = static_cast<double>(std::max<uint32_t>(1, unit->getMaxHealth()));
+                const stockui::PlateBar kind = stockui::nameplateBar(p.reaction, p.isPlayer, classColours);
+                const uint8_t classId = p.isPlayer ? helpers::entityClassId(p.entity.get()) : 0;
+                if (kind == stockui::PlateBar::ClassColour && classId != 0) {
+                    const ImU32 c = helpers::classColorU32(classId, 255);
+                    st.barColor[0] = ((c >> IM_COL32_R_SHIFT) & 0xFF) / 255.0f;
+                    st.barColor[1] = ((c >> IM_COL32_G_SHIFT) & 0xFF) / 255.0f;
+                    st.barColor[2] = ((c >> IM_COL32_B_SHIFT) & 0xFF) / 255.0f;
+                } else {
+                    rgbf(stockui::nameplateBarRgb(kind == stockui::PlateBar::ClassColour
+                                                      ? stockui::PlateBar::Red : kind),
+                         st.barColor);
+                }
+                st.name = unit->getName();
+                st.highlight = highlightPlate == &p;
+                rgbf(stockui::nameplateNameRgb(damagedRecently(p.guid), st.highlight), st.nameColor);
+                const int creatureRank = p.isPlayer ? -1 : gameHandler.getCreatureRank(unit->getEntry());
+                const int level = static_cast<int>(unit->getLevel());
+                st.skull = creatureRank == 3 || level == 0 ||
+                           (p.reaction <= 2 && playerLevel > 0 && level >= playerLevel + 10);
+                st.level = std::to_string(level);
+                rgbf(stockui::nameplateLevelRgb(level, playerLevel), st.levelColor);
+                st.elite = creatureRank == 1 || creatureRank == 2 || creatureRank == 3;
+                if (p.hostile) {
+                    game::ThreatStanding ts;
+                    int status = 0;
+                    if (game::threatStandingOn(gameHandler.getThreatList(p.guid), playerGuid, ts)) {
+                        status = ts.onList ? ts.status : 0;
+                    } else if (game::unitTargetGuid(*p.entity) == playerGuid) {
+                        status = 3;
+                    }
+                    st.threat = stockui::nameplateThreatShown(status);
+                    rgbf(stockui::nameplateThreatRgb(status), st.threatColor);
+                }
+                const uint8_t mark = gameHandler.getEntityRaidMark(p.guid);
+                st.raidIcon = mark < game::GameHandler::kRaidMarkCount ? mark + 1 : 0;
+                if (const auto* cs = gameHandler.getUnitCastState(p.guid);
+                    p.isTarget && vKeyCastBar && cs && cs->casting && cs->timeTotal > 0.0f) {
+                    st.casting = true;
+                    st.castMax = cs->timeTotal;
+                    const double elapsed = cs->timeTotal - cs->timeRemaining;
+                    st.castValue = cs->isChannel ? cs->timeTotal - elapsed : elapsed;
+                    st.shielded = !cs->interruptible;
+                    if (cs->spellId) st.castIcon = gameHandler.getSpellIconPath(cs->spellId);
+                }
+                engine->updateNameplate(p.guid, st);
+
+                // What the frame now says should be drawn.
+                const auto& ids = found->second;
+                const auto on = [&](uint32_t id) {
+                    const ui::Widget* w = tree.get(id);
+                    if (!w || !w->shown || w->alpha <= 0.0f) return false;
+                    if (w->kind == ui::WidgetKind::Texture) return !w->texturePath.empty();
+                    if (w->kind == ui::WidgetKind::FontString) return w->width == 0.0f || w->width > 1.0f;
+                    if (w->objectType == "StatusBar") return !w->barTexture.empty();
+                    return true;
+                };
+                PlateGates g;
+                const ui::Widget* fw = tree.get(ids.frame);
+                g.frame = fw && fw->shown;
+                g.threat = on(ids.threat);
+                g.health = on(ids.health);
+                g.border = on(ids.border);
+                g.highlight = on(ids.highlight);
+                g.level = on(ids.level);
+                g.skull = on(ids.boss);
+                g.elite = on(ids.elite);
+                g.cast = on(ids.cast);
+                g.castBorder = on(ids.castBorder);
+                g.castShield = on(ids.castShield);
+                g.castIcon = on(ids.castIcon);
+                g.name = on(ids.name);
+                g.raid = on(ids.raid);
+                gates[p.guid] = g;
+            }
+        }
+    }
+
     for (const Plate* pp : order) {
         const Plate& p = *pp;
         game::Unit* unit = p.unit;
@@ -474,11 +610,14 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         const int alpha = stockui::nameplateAlpha(targetGuid != 0, p.isTarget);
         const ImU32 white = IM_COL32(255, 255, 255, alpha);
         const bool highlighted = highlightPlate == pp;
+        PlateGates gate;
+        if (auto g = gates.find(guid); g != gates.end()) gate = g->second;
+        if (!gate.frame) continue;
 
         // Threat glow: UI-TargetingFrame-Flash cut to the bar's outline
         // (0..0.555 across, 0.53..0.6 down), 0.11 x 0.029 DDC, TOP at the
         // plate's TOP +(-0.001, -0.0065), coloured by your threat status.
-        if (art.flash && p.hostile) {
+        if (gate.threat && art.flash && p.hostile) {
             game::ThreatStanding st;
             int status = 0;
             if (game::threatStandingOn(gameHandler.getThreatList(guid), playerGuid, st)) {
@@ -497,7 +636,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
 
         // Health: UI-TargetingFrame-BarFill tinted by the stock colour, cut at
         // the health fraction. BOTTOMLEFT +(0.031W, 0.125H), 0.804W x 0.281H.
-        {
+        if (gate.health) {
             const float healthPct = std::clamp(
                 static_cast<float>(unit->getHealth()) / static_cast<float>(unit->getMaxHealth()),
                 0.0f, 1.0f);
@@ -523,13 +662,13 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         }
 
         // The border, with its level box.
-        if (art.border) {
+        if (gate.border && art.border) {
             drawList->AddImage((ImTextureID)(uintptr_t)art.border, P(0, 0), P(128, 32),
                                ImVec2(0, 0), ImVec2(1, 1), white);
         }
 
         // The mouseover highlight: Nameplate-Glow over the whole plate, ADD.
-        if (highlighted && art.glow) {
+        if (highlighted && gate.highlight && art.glow) {
             drawList->AddImage((ImTextureID)(uintptr_t)art.glow, P(0, 0), P(128, 32),
                                ImVec2(0, 0), ImVec2(1, 1), white);
         }
@@ -542,13 +681,13 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         const bool skullLevel = creatureRank == 3 || level == 0 ||
                                 (p.reaction <= 2 && playerLevel > 0 && level >= playerLevel + 10);
         if (skullLevel) {
-            if (art.skull) {
+            if (gate.skull && art.skull) {
                 drawList->AddImage((ImTextureID)(uintptr_t)art.skull,
                                    ImVec2(levelC.x - 6.4f * s, levelC.y - 6.4f * s),
                                    ImVec2(levelC.x + 6.4f * s, levelC.y + 6.4f * s),
                                    ImVec2(0, 0), ImVec2(1, 1), white);
             }
-        } else {
+        } else if (gate.level) {
             char levelBuf[8];
             snprintf(levelBuf, sizeof(levelBuf), "%d", level);
             const float levelSize = 11.52f * s;
@@ -561,7 +700,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
 
         // The elite dragon (elite, rare elite and boss): the icon's 37 x 27
         // corner, 0.0294 x 0.0215 DDC, CENTER at the level's +(0.003, -0.001).
-        if ((creatureRank == 1 || creatureRank == 2 || creatureRank == 3) && art.elite) {
+        if (gate.elite && (creatureRank == 1 || creatureRank == 2 || creatureRank == 3) && art.elite) {
             const ImVec2 c(levelC.x + 3.84f * s, levelC.y + 1.28f * s);
             drawList->AddImage((ImTextureID)(uintptr_t)art.elite,
                                ImVec2(c.x - 18.816f * s, c.y - 13.76f * s),
@@ -572,7 +711,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         // Cast bar: the target's only, with showVKeyCastbar (0x720e50). The
         // plain border when it can be interrupted, the shielded one when it
         // cannot, the spell's icon in the box at the left. No text.
-        if (p.isTarget && vKeyCastBar) {
+        if (gate.cast && p.isTarget && vKeyCastBar) {
             const auto* cs = gameHandler.getUnitCastState(guid);
             if (cs && cs->casting && cs->timeTotal > 0.0f) {
                 const float elapsed = std::clamp((cs->timeTotal - cs->timeRemaining) / cs->timeTotal,
@@ -592,18 +731,18 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
                     drawList->AddRectFilled(c0, ImVec2(c0.x + (c1.x - c0.x) * castPct, c1.y), castColor);
                 }
                 if (shielded) {
-                    if (art.castShield) {
+                    if (gate.castShield && art.castShield) {
                         drawList->AddImage((ImTextureID)(uintptr_t)art.castShield, P(0, 32), P(128, 64),
                                            ImVec2(0, 0), ImVec2(1, 1), white);
                     }
-                } else if (art.border) {
+                } else if (gate.castBorder && art.border) {
                     drawList->AddImage((ImTextureID)(uintptr_t)art.border, P(0, 16), P(128, 48),
                                        ImVec2(1, 0), ImVec2(0, 1), white);
                 }
                 auto* castAm = services_.assetManager;
                 const VkDescriptorSet castIcon = (cs->spellId && castAm)
                     ? getSpellIcon(cs->spellId, castAm) : VK_NULL_HANDLE;
-                if (castIcon) {
+                if (gate.castIcon && castIcon) {
                     const float iconCy = shielded ? 48.0f : 48.0f - 9.088f;
                     drawList->AddImage((ImTextureID)(uintptr_t)castIcon,
                                        P(11.776f - 6.4f, iconCy - 6.4f), P(11.776f + 6.4f, iconCy + 6.4f),
@@ -616,7 +755,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
         // yellow while highlighted, red for 5 s after the unit is hurt.
         const std::string& unitName = unit->getName();
         if (p.isPlayer && unitName.empty()) gameHandler.queryPlayerName(guid);
-        if (!unitName.empty()) {
+        if (gate.name && !unitName.empty()) {
             const float nameSize = 12.8f * s;
             const ImVec2 nsz = plateFont->CalcTextSizeA(nameSize, FLT_MAX, 0.0f, unitName.c_str());
             const ImVec2 anchor = P(64.0f, 16.0f);
@@ -628,7 +767,7 @@ void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
 
         // Raid mark: 0.02 DDC square, RIGHT at the border's LEFT.
         const uint8_t raidMark = gameHandler.getEntityRaidMark(guid);
-        if (raidMark < game::GameHandler::kRaidMarkCount) {
+        if (gate.raid && raidMark < game::GameHandler::kRaidMarkCount) {
             if (VkDescriptorSet markTex = ui::getRaidTargetIcon(raidMark, services_.assetManager)) {
                 drawList->AddImage((ImTextureID)(uintptr_t)markTex, P(-25.6f, 3.2f), P(0.0f, 28.8f),
                                    ImVec2(0, 0), ImVec2(1, 1), white);

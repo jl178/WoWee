@@ -29,6 +29,23 @@ struct EmitResult {
     std::vector<std::string> scriptFiles;
     std::vector<std::string> includeFiles;
     std::vector<std::string> warnings;
+
+    /// The document in the order the client processes it: each <Script> and
+    /// <Include> runs where it stands, between the frames declared before and
+    /// after it. A Lua step is the code for the elements in between, complete
+    /// in itself. `lua`, `scriptFiles` and `includeFiles` above are the same
+    /// content grouped by kind.
+    ///
+    /// The order is the addon's to rely on: ElvUI's Load_Config.xml runs
+    /// Profile.lua and Global.lua and then <Include>s the filters, which fill
+    /// tables Global.lua creates. Running every include before any script
+    /// read those tables before they existed.
+    struct Step {
+        enum class Kind { Lua, Script, Include };
+        Kind kind;
+        std::string text;  ///< the Lua for a Lua step, the file name otherwise
+    };
+    std::vector<Step> steps;
 };
 
 /// Emit Lua for a parsed <Ui> document. `virtualPrefix` names the table that
