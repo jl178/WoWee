@@ -508,6 +508,113 @@ horizon colour (x0.35) and sun bounced off the ground from below
 face turns up or down, occluded as the ambient is, outdoors only. It costs
 nothing over the occlusion pass it rides in.
 
+## 6b. Bounce light ("Bounce light (the reference client)")
+
+The fill light (section 6) is the same colour everywhere. What Enhanced's
+probes add varies with place: under its canopies the shade is darker and a
+muted green, beside a sunlit wall or open ground it is warm, a forest floor
+the sky cannot see is dim. Those colours change over yards, not pixels, and
+depend on what is round a point, not on what is on screen beside it - so
+the stand-in is a world-space grid rather than a screen-space gather, which
+would rim every silhouette and change as things leave the view.
+
+**The grid** (`include/rendering/bounce_grid.hpp`, `BounceGrid` in
+`bounce_grid_gpu.hpp`): 256x256 cells of 2 yards round the camera, three
+RGBA16F layers, baked from what is already loaded:
+
+- the ground's colour: the map's minimap tile under the cell (the only
+  colour the client ships for land from above, as the far field reads it),
+  its hue and 0.8 of its chroma kept, its brightness held within 0.65-1.35
+  of the fill's own grass-and-dirt colour so a dark or bright picture cannot
+  swing the shade;
+- the canopy: each foliage model taller than 5 yards a disc of 0.65 of its
+  widest half-extent, densest at the middle (0.85, or 0.3 for a tree with no
+  leaf cards), crowns over one cell combining as each lets light through;
+  the leaves' colour (their cutout textures' mean, `VkTexture::averageColor`)
+  and the crown's foot (a third of the way up) and top. Seen with the grid
+  drawn over the picture (`WOWEE_BOUNCE_DEBUG=1`), the full extent covered
+  Goldshire's open square between the oaks;
+- walls: exterior WMO groups (MOGP 0x8) under 48 yards a side and over 3
+  tall - houses, towers, walls; a city block's or a street's group is mostly
+  air and is left out - with their foot and top.
+
+Heights are carried 8 yards past each crown and wall, so a filtered read
+across an edge fades the cover, not the heights. The camera's position
+decides the grid's corner, snapped to cells, so a rebuild puts every cell
+on the same ground: it is rebuilt when the camera is 48 yards from the
+middle or the loaded world has changed (checked every 2 s), gathered on the
+main thread (0.5-1.3 ms over 50-95 thousand M2 instances) and baked on a
+worker (9-19 ms), then copied outside any render pass before the ambient
+pass reads it.
+
+**The shading** (`ambient_occlusion.frag` built with `BOUNCE_GRID` as
+`ambient_bounce.frag.spv`; the stock build is byte-identical): at each
+pixel's world position the fill's terms take the grid's values -
+
+- the canopy over the point counts fully below the crowns' foot and not at
+  their top; under it the sky's fill falls by 0.7 of the cover, the ground's
+  bounce by 0.7 (the ground below is in the leaves' shade), and the ambient
+  itself is 0.8 as bright and tinted by the light under the leaves: the
+  sky's hue and the leaves' (35%) at unit brightness, so that green comes
+  from the sky's light through the leaves rather than from their yellow
+  texture;
+- the ground bounce is the sun times the cell's own ground colour;
+- a wall within 3 yards on one of four sides, spanning the pixel's height,
+  whose face toward the pixel turns to the sun, sends 0.25 of the sun in a
+  stone-and-timber colour to a face turned toward it.
+
+A face the sun lights keeps what the plain fill gave it (blended over 5-40%
+of its light being the sun's), so the row never brightens or darkens a lit
+surface; a pixel past that is not read at all. The outer tenth of the grid
+fades to the plain fill. Indoors and at night it is the plain fill (both
+already scale by the indoor factor and the sun's height). It runs the
+ambient pass with or without the fill row; off is stock (no grid, no
+pass for it).
+
+Against Jered's live captures (the darkest third of the world view as
+shade):
+
+| view | | Enhanced | row off | row on |
+|---|---|---|---|---|
+| Goldshire 9:22 into the sun | shade luminance | 0.216 | 0.223 | 0.211 |
+| | shade r : g : b / luminance | 1.06 1.02 0.73 | 1.04 1.08 0.47 | 1.04 1.09 0.45 |
+| Goldshire 9:22 sun behind | shade luminance | 0.243 | 0.236 | 0.214 |
+| | shade r : g : b / luminance | 1.05 1.03 0.71 | 1.09 1.06 0.44 | 1.05 1.09 0.41 |
+| Elwynn forest, off the road | shade luminance | - | 0.224 | 0.206 |
+| | shade r : g : b / luminance | - | 1.00 1.09 0.51 | 0.95 1.12 0.50 |
+| Duskwood, Darkshire's road | shade luminance | - | 0.178 | 0.176 |
+| the Barrens, noon | shade luminance | - | 0.368 | 0.360 |
+| Stormwind, Trade District | shade luminance | - | 0.180 | 0.172 |
+
+Indoors (the Lion's Pride) 0.5% of pixels change by more than 8/255, at
+night 2-4% (the wind's own noise between two shots). Stormwind's street
+darkens where it lies under the Trade District's tree (the grid drawn over
+it shows the crown's disc there); its buildings are groups of the city's
+one WMO, mostly over 48 yards, so the walls there are not in the grid.
+
+The shade under the trees moves toward Enhanced's: darker and less golden
+(red down against green). What it does not close is the blue in Enhanced's
+shade (its shade is 0.71-0.73 blue to luminance, Wowee's 0.42-0.47 with or
+without the row): 3.3.5's leaf and grass textures have almost no blue for
+any light to bring out, and Wowee's later passes (the HDR saturation, the
+grade) add chroma; that is a grading question, not a light one.
+
+Motion (Goldshire 10:00, ten frames 0.25 s apart, the row off then on):
+walking under the oaks and a still camera on trees in the wind with the
+character in front show no rim, patch or flicker; the mean frame-to-frame
+change is the same with the row off and on (walk 3.1-29.7 against
+3.7-29.5 /255; wind 2.4-3.3 against 2.3-3.2).
+
+Cost (Iris Xe, 1280x540, Goldshire 9:22 looking across the canopy, the row
+off and on in turn, ten 6 s windows each): the ambient
+pass 0.38 ms median off (the fill alone) and 0.69 ms on, +0.31 ms; the
+frame's GPU 10.82 -> 10.96 ms median. The first version read the grid at
+every pixel and through the four wall looks unconditionally (+0.38 ms);
+sunlit pixels no longer read it and the wall looks run only where a wall's
+carried heights say one stands near. The sheets are in the session
+scratchpad (`gi/sheet_c1.png`, `gi/sheet_c2.png`, `gi/seq_walk.png`,
+`gi/seq_wind.png`).
+
 ## 7. Ground clutter
 
 `GroundEffectTexture` is the 1.12 table: 1060 of the 1065 changed rows went
@@ -575,7 +682,8 @@ Opacity"), HD water and sky reflections with the "Water (the reference client)" 
 over them (its PBR water and SSR; enhanced-water.md); 1900-yard (Enhanced's horizonStart, with the far field past it)
 view distance, 500-yard shadows, ground clutter 150%, and FXAA instead of
 MSAA (Enhanced's anti-aliasing is CMAA2, a post filter, and the occlusion
-pass needs a one-sample depth). Round 2 added the fill light, the sun haze
+pass needs a one-sample depth), and the bounce light (section 6b) over the
+fill. Round 2 added the fill light, the sun haze
 (with stronger, golder screen-space shafts) and bloom at 0.6: what is
 brighter than 0.8 in nine taps of the glow's quarter-size scene, added on
 (`fxaa.frag` `bloomAt`). Enhanced ships its Bloom Intensity at the maximum;
@@ -672,9 +780,10 @@ Enhanced itself: `enhanced/shots/enhanced_01.png` (Northshire 14:15),
 
 What still separates the two pictures, largest first:
 
-1. Indirect light. The fill light lifts and tints the shade, but it is the
-   same everywhere: Enhanced's probes put green under trees and warm stone
-   by a lit wall, and darken a forest floor that the sky cannot see.
+1. Indirect light. The bounce light (section 6b) now darkens and cools
+   the shade under canopies and warms it by sunlit ground and walls, from a
+   grid baked round the camera; the blue that Enhanced's shade keeps, and its
+   crisper dappling through the canopy (its sun shadows), are not matched.
 2. Light toward the sun. The haze and stronger shafts now give the golden
    glow looking into an afternoon sun, but Enhanced's shafts through the
    canopy are crisper and longer (its fog is shadowed by the cascades
@@ -835,4 +944,5 @@ texture or shadow reads of its own.
 - Fully linear colour: the HDR row (9b) keeps 3.3.5's display-encoded
   textures and Light.dbc colours and lifts only the clamp; textures are not
   decoded to linear, and the tone curve is the identity below its knee.
-- Probe GI (section 6), the layered global fog constants (section 5).
+- Probe GI itself (section 6): the bounce light (6b) is a baked stand-in.
+  The layered global fog constants (section 5).

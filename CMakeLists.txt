@@ -564,6 +564,7 @@ function(compile_shaders TARGET_NAME)
         "terrain_horizon.frag.glsl|terrain_horizon_color.frag.spv|-DHORIZON_LIT -DHORIZON_COLOR"
         "terrain_horizon_far.frag.glsl|terrain_horizon_far_color.frag.spv|-DHORIZON_LIT -DHORIZON_COLOR"
         "character.vert.glsl|character_tess.vert.spv|-DCHAR_TESS"
+        "ambient_occlusion.frag.glsl|ambient_bounce.frag.spv|-DBOUNCE_GRID"
     )
     foreach(VARIANT ${SHADER_VARIANTS})
         string(REPLACE "|" ";" VARIANT_PARTS "${VARIANT}")
@@ -993,6 +994,7 @@ set(WOWEE_SOURCES
     src/rendering/soft_particle_pass.cpp
     src/rendering/contact_shadow_pass.cpp
     src/rendering/renderer_light_extras.cpp
+    src/rendering/bounce_grid.cpp
     src/rendering/screen_capture.cpp
     src/rendering/loot_sparkles.cpp
     src/rendering/grass_renderer.cpp

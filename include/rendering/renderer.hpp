@@ -82,6 +82,7 @@ class LootSparkles;
 class SunShafts;
 class SoftParticlePass;
 class ContactShadowPass;
+class BounceGrid;
 class ScreenCapture;
 
 class Renderer {
@@ -400,8 +401,19 @@ private:
     [[nodiscard]] bool depthLightPassPossible() const;
     /// `blend` is a ContactShadowPass::Blend, as an int so this header
     /// needs only the forward declaration.
+    /// `extraLayout`: set 2 of the pass (the bounce grid's), or none. A pass
+    /// made with another shader is let go (after the frames in flight) and
+    /// made again.
     bool decideDepthLightPass(bool want, DepthLightPassState& s, const char* fragSpv, const char* name,
-                              int blend);
+                              int blend, VkDescriptorSetLayout extraLayout = VK_NULL_HANDLE);
+    /// "Bounce light (the reference client)" (bounce_grid_gpu.hpp): its grid, made
+    /// on first use and let go eight frames after the row goes off; whether
+    /// this frame's ambient pass reads it.
+    std::unique_ptr<BounceGrid> bounceGrid_;
+    uint32_t bounceOffFrames_ = 0;
+    bool bounceFrame_ = false;
+    /// Main thread, in update: lands and starts the grid's bakes.
+    void updateBounceGrid(float dt);
     void decideContactShadows();
     void recordContactShadowPass(VkCommandBuffer cmd);
     /// Room light indoors (E12): each unit's own indoor light, read from the

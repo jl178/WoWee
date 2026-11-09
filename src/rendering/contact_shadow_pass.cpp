@@ -13,8 +13,9 @@ namespace {
 struct ContactPush {
     glm::mat4 invViewProj;
     glm::vec4 target;  // xy extent, z darkness
+    glm::vec4 extra;   // the shader's own (ambient_occlusion.frag: the bounce grid's corner)
 };
-static_assert(sizeof(ContactPush) == 80, "contact_shadow.frag's push block is 80 bytes");
+static_assert(sizeof(ContactPush) == 96, "the passes' push block is 96 bytes (80 read by most)");
 }  // namespace
 
 bool ContactShadowPass::ensure(VkContext* ctx, VkDescriptorSetLayout perFrameLayout, VkRenderPass pass) {
@@ -28,13 +29,13 @@ bool ContactShadowPass::ensure(VkContext* ctx, VkDescriptorSetLayout perFrameLay
         return false;
     }
     if (layout_ == VK_NULL_HANDLE) {
-        VkDescriptorSetLayout sets[2] = {perFrameLayout, depth_.depthLayout()};
+        VkDescriptorSetLayout sets[3] = {perFrameLayout, depth_.depthLayout(), extraLayout_};
         VkPushConstantRange pc{};
         pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         pc.offset = 0;
         pc.size = sizeof(ContactPush);
         VkPipelineLayoutCreateInfo lci{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        lci.setLayoutCount = 2;
+        lci.setLayoutCount = extraLayout_ != VK_NULL_HANDLE ? 3 : 2;
         lci.pSetLayouts = sets;
         lci.pushConstantRangeCount = 1;
         lci.pPushConstantRanges = &pc;
@@ -122,16 +123,19 @@ static const bool kDebug = core::envFlagEnabled("WOWEE_CONTACT_SHADOW_DEBUG", fa
 
 bool ContactShadowPass::record(VkCommandBuffer cmd, const SoftParticlePass::Target& target,
                                VkDescriptorSet perFrameSet, const glm::mat4& invViewProj, float darkness,
-                               int flags) {
+                               int flags, const glm::vec4& extra, VkDescriptorSet extraSet) {
     if (pipeline_ == VK_NULL_HANDLE || perFrameSet == VK_NULL_HANDLE || target.pass != builtFor_) return false;
+    if (extraLayout_ != VK_NULL_HANDLE && extraSet == VK_NULL_HANDLE) return false;
     return depth_.record(cmd, target, [&](VkCommandBuffer c, VkDescriptorSet depthSet) {
         vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
-        VkDescriptorSet sets[2] = {perFrameSet, depthSet};
-        vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 2, sets, 0, nullptr);
+        VkDescriptorSet sets[3] = {perFrameSet, depthSet, extraSet};
+        vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0,
+                                extraLayout_ != VK_NULL_HANDLE ? 3 : 2, sets, 0, nullptr);
         ContactPush push{};
         push.invViewProj = invViewProj;
         push.target = glm::vec4(static_cast<float>(target.extent.width), static_cast<float>(target.extent.height),
                                 darkness, static_cast<float>(flags + (kDebug ? 4 : 0)));
+        push.extra = extra;
         vkCmdPushConstants(c, layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
         vkCmdDraw(c, 3, 1, 0, 0);
     });

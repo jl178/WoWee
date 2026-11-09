@@ -34,6 +34,9 @@ namespace pipeline {
 }
 
 namespace rendering {
+namespace bounce_grid {
+struct Building;
+}
 
 class Camera;
 class Frustum;
@@ -311,6 +314,11 @@ public:
      * Get number of active instances
      */
     uint32_t getInstanceCount() const { return instances.size(); }
+    /// The exterior groups of the buildings in [lo, hi] (world x, y) small
+    /// enough to be a house or a wall, as boxes, for the bounce light's grid
+    /// (bounce_grid.hpp). Main thread. bounce_grid.cpp.
+    void collectBounceBuildings(const glm::vec2& lo, const glm::vec2& hi,
+                                std::vector<bounce_grid::Building>& out) const;
     size_t getLoadedModelCount() const { return loadedModels.size(); }
 
     /**

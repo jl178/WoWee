@@ -126,6 +126,9 @@ constexpr rendering::Enhancements enhancedEnhancements() {
     // Sunlight through the leaves toward a low sun (m2.frag; Enhanced's mesh
     // shader back light with a forward lobe), in the shadow already read.
     e.leafLight = true;
+    // Enhanced's probe GI, by place (bounce_grid.hpp): the shade under the
+    // trees green and dimmer, beside sunlit ground and walls warm.
+    e.bounceLight = true;
     // Enhanced's ground is covered where 3.3.5's shows bare texture between
     // tufts. Its clutter data is 1.12's; the cover comes from its settings
     // (groundEffectDist 200) and models. Wowee's grass field stands in for

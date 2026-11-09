@@ -281,6 +281,7 @@ public:
      * @param mapName Map name (e.g., "Azeroth", "Kalimdor")
      */
     void setMapName(const std::string& mapName);
+    [[nodiscard]] const std::string& getMapName() const { return mapName; }
     [[nodiscard]] bool isCustomZone() const { return isCustomZone_; }
     void setCustomZone(bool custom) { isCustomZone_ = custom; }
 

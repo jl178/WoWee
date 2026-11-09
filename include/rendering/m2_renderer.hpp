@@ -41,6 +41,9 @@ namespace pipeline {
 }
 
 namespace rendering {
+namespace bounce_grid {
+struct Canopy;
+}
 
 class Camera;
 class VkContext;
@@ -1168,6 +1171,11 @@ public:
     [[nodiscard]] bool isInitialized() const { return initialized_; }
     [[nodiscard]] uint32_t getModelCount() const { return static_cast<uint32_t>(models.size()); }
     [[nodiscard]] uint32_t getInstanceCount() const { return static_cast<uint32_t>(instances.size()); }
+    /// The crowns of the trees standing in [lo, hi] (world x, y), for the
+    /// bounce light's grid (bounce_grid.hpp): each foliage model taller than
+    /// a person, its leaf cards' mean colour. Main thread. bounce_grid.cpp.
+    void collectBounceCanopies(const glm::vec2& lo, const glm::vec2& hi,
+                               std::vector<bounce_grid::Canopy>& out) const;
     [[nodiscard]] uint32_t getTotalTriangleCount() const;
     [[nodiscard]] uint32_t getDrawCallCount() const { return lastDrawCallCount; }
 

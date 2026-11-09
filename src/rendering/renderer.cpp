@@ -1,4 +1,5 @@
 #include "rendering/renderer.hpp"
+#include "rendering/bounce_grid_gpu.hpp"
 #include "rendering/sun_direction.hpp"
 #include "rendering/enhanced_grade.hpp"
 #include "rendering/enhanced_palette.hpp"
@@ -1225,6 +1226,9 @@ void Renderer::shutdown() {
         sunShafts_.reset();
     }
     softParticlePass_.reset();
+    // The ambient pass reads the bounce grid's set: the pass goes first.
+    ambientOcclusion_.pass.reset();
+    bounceGrid_.reset();
     // The water continuation's views and framebuffers (the device is idle:
     // the water renderer's shutdown above waited for it).
     destroySceneWaterRetired(0);
@@ -3415,6 +3419,7 @@ void Renderer::update(float deltaTime) {
     updateFootfallDust(fxDt);
     updateCorpseSettle(fxDt);
     updateUnitIndoorLight(fxDt);
+    updateBounceGrid(fxDt > 0.0f ? fxDt : deltaTime);
 
     // Activity SFX + mount ambient sounds: delegated to AnimationController (§4.2)
     if (animationController_) animationController_->updateSfxState(deltaTime);

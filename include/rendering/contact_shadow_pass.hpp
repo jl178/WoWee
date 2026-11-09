@@ -30,9 +30,13 @@ public:
     /// factor, so it can brighten up to twice), OverTransmittance is
     /// src.rgb + dst * src.a (light added in front of what it dims).
     enum class Blend { Multiply, Multiply2x, OverTransmittance };
+    /// `extraLayout`, when given, is set 2 of the pipeline: one more set the
+    /// shader reads (the bounce light's grid), bound at record.
     explicit ContactShadowPass(const char* fragSpv = "assets/shaders/contact_shadow.frag.spv",
-                               const char* name = "Contact shadows", Blend blend = Blend::Multiply)
-        : fragSpv_(fragSpv), name_(name), blendMode_(blend) {}
+                               const char* name = "Contact shadows", Blend blend = Blend::Multiply,
+                               VkDescriptorSetLayout extraLayout = VK_NULL_HANDLE)
+        : fragSpv_(fragSpv), name_(name), blendMode_(blend), extraLayout_(extraLayout) {}
+    [[nodiscard]] const char* fragSpv() const { return fragSpv_; }
     ~ContactShadowPass() { shutdown(); }
 
     /// The depth set, the layout and the pipeline for `pass` (the overlay
@@ -45,13 +49,17 @@ public:
     /// full shadow takes away (Light.dbc's shadow band x the player's setting,
     /// times how far outdoors the player is). `flags` goes to the shader's
     /// target.w with 4 added under WOWEE_CONTACT_SHADOW_DEBUG.
+    /// `extra` goes to the shader's second push vec4; `extraSet` is bound as
+    /// set 2 when the pass was made with an extra layout (and must be then).
     bool record(VkCommandBuffer cmd, const SoftParticlePass::Target& target, VkDescriptorSet perFrameSet,
-                const glm::mat4& invViewProj, float darkness, int flags = 0);
+                const glm::mat4& invViewProj, float darkness, int flags = 0,
+                const glm::vec4& extra = glm::vec4(0.0f), VkDescriptorSet extraSet = VK_NULL_HANDLE);
 
 private:
     const char* fragSpv_;
     const char* name_;
     Blend blendMode_;
+    VkDescriptorSetLayout extraLayout_ = VK_NULL_HANDLE;
     VkContext* ctx_ = nullptr;
     SoftParticlePass depth_;
     VkPipelineLayout layout_ = VK_NULL_HANDLE;

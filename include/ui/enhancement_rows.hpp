@@ -775,6 +775,18 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "a branch in m2.frag for the foliage cutout batches (enh_bits::kLeafLight); "
                  "no extra texture or shadow reads",
      .asBool = &Enhancements::leafLight},
+    {.key = "bouncelight", .label = "Bounce light (the reference client)", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
+     .tooltip = "Shade takes the colour of what is around it, as in the reference client:\n"
+                "green and dimmer under the trees, warm beside sunlit ground and\n"
+                "walls, darker on a forest floor the sky cannot see. Sunlit\n"
+                "faces keep the sun. Only outdoors and by day.",
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "bounce_light",
+     .controls = "BounceGrid (built on first use): a 256x256x3 grid over the ground round "
+                 "the camera, baked on a worker from the trees, buildings and minimap when "
+                 "the camera moves 48 yd; the ambient pass's BOUNCE_GRID build reads it "
+                 "(about 7 filtered taps a pixel)",
+     .asBool = &Enhancements::bounceLight},
     {.key = "enhancedwater", .label = "Water (the reference client)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "Lakes, rivers, the sea and the canals as the reference client draws\n"

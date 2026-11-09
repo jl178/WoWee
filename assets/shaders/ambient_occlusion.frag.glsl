@@ -24,6 +24,13 @@
 // is occluded - the ambient colour against the sun colour times N.L times
 // the shadow map - blended 2 * dst * src (written at half, so the fill
 // light below can brighten as well as darken).
+//
+// Built a second time with BOUNCE_GRID (ambient_bounce.frag.spv) for the
+// "Bounce light (the reference client)" row: the fill's sky and ground terms then take
+// their colour from a grid baked over the ground around the camera
+// (rendering/bounce_grid.hpp) - the ground's own colour, the canopy over the
+// pixel and its leaves, the walls beside it - in place of one colour
+// everywhere. Without the define this file builds exactly as before.
 
 layout(set = 0, binding = 0) uniform PerFrame {
     mat4 view;
@@ -60,7 +67,40 @@ layout(set = 1, binding = 0) uniform sampler2D uSceneDepth;
 layout(push_constant) uniform Push {
     mat4 invViewProj;  // clip -> world, this frame's
     vec4 target;       // xy the render extent, z unused (1), w debug
+#ifdef BOUNCE_GRID
+    vec4 extra;        // xy the grid's corner (world), z 1 once it holds a bake
+#endif
 } pc;
+
+#ifdef BOUNCE_GRID
+// The bounce grid (bounce_grid.hpp): 256 cells of 2 yards each way.
+//   layer 0: ground rgb, canopy cover over the cell
+//   layer 1: leaf rgb, wall presence
+//   layer 2: canopy foot z, canopy top z, wall foot z, wall top z
+layout(set = 2, binding = 0) uniform sampler2DArray uBounceGrid;
+const float kGridSpan = 512.0;         // bounce_grid::kSpan
+// The grid's outer band fades to the plain fill, so its edge (the camera
+// is at most kRecentreYards from the middle) never shows as a line.
+const float kGridEdge = 0.1;
+// Under a full canopy: the sky's fill is mostly gone (the leaves take it),
+// the ground below is in their shade (its bounce weaker), and the ambient
+// itself - the light from all round - is dimmer and is the sky's light
+// passed through the leaves: half the sky's hue, half the leaves'. Against
+// Jered's live Enhanced captures that is what its canopy shade is: darker
+// than 3.3.5's, and a cool olive-green where 3.3.5's is golden (the leaf
+// textures are yellow-green; the light under them is not).
+const float kCanopySky = 0.7;
+const float kLeafFill = 0.15;
+const float kCanopyGroundShade = 0.7;
+const float kCanopyAmbient = 0.8;
+const float kCanopyTint = 1.0;
+// A wall beside the pixel, its face toward the pixel in the sun, sends back
+// that sun in a warm stone-and-timber colour (most of 3.3.5's walls), to a
+// face turned toward it. Looked for kWallReach yards out on four sides.
+const float kWallReach = 3.0;
+const float kWallFill = 0.25;
+const vec3 kWallAlbedo = vec3(0.5, 0.42, 0.32);
+#endif
 
 layout(location = 0) out vec4 outColor;
 
@@ -186,6 +226,11 @@ void main() {
     int flags = int(pc.target.w + 0.5);
     bool aoOn = (flags & 1) != 0;
     bool fillOn = (flags & 2) != 0;
+#ifdef BOUNCE_GRID
+    // The bounce light runs the fill with or without its row.
+    bool bounceOn = (flags & 8) != 0 && pc.extra.z > 0.5;
+    fillOn = fillOn || (flags & 8) != 0;
+#endif
     bool working = aoOn && d < 1.0 && dist > 0.0 && dist < kFadeTo && nl2 >= 1e-12 && radiusPx >= 1.0;
 
     float sum = 0.0;
@@ -268,6 +313,14 @@ void main() {
     vec3 amb = ambientColor.rgb;
     vec3 dif = lightColor.rgb * (ndotl * sunLit * (1.0 - indoor));
     vec3 ambNew = amb * occlusion;
+#ifdef BOUNCE_GRID
+    vec3 ambPlain = ambNew;
+    // How far the sun lights this face: from 0.4 of its light up it keeps
+    // the plain fill (below), and the grid is not read at all.
+    float sunShare = clamp(lum(dif) / max(lum(amb + dif), 1e-3), 0.0, 1.0);
+    float keepPlain = smoothstep(0.05, 0.4, sunShare);
+    bool readGrid = bounceOn && keepPlain < 1.0;
+#endif
     if (fillOn) {
         // Fill light (a stand-in for Enhanced's probe GI, section 6 of
         // docs/re/enhanced-lighting.md): the sky's light from above, in the
@@ -279,12 +332,102 @@ void main() {
         float up = mix(0.5, clamp(n.z * 0.5 + 0.5, 0.0, 1.0), smoothSurface);
         vec3 sky = fogColor.rgb * kFillSky;
         vec3 bounce = lightColor.rgb * kGroundAlbedo * (kFillBounce * sunUp);
+#ifdef BOUNCE_GRID
+        // The plain fill, kept: sunlit faces keep it (below).
+        ambPlain = ambNew + (sky * up + bounce * (1.0 - up)) * (pc.target.z * occlusion * (1.0 - indoor) * sunUp);
+        vec3 side = vec3(0.0);
+        // WOWEE_BOUNCE_DEBUG (flag 16): the grid over the picture - canopy
+        // red, walls blue, the ground's hue elsewhere.
+        vec3 dbg = vec3(1.0);
+        if (readGrid) {
+            // What is round this point, from the grid at its world position
+            // (bounce_grid.hpp): nothing here depends on the neighbouring
+            // pixels, so there is no rim at a silhouette and nothing to
+            // flicker as the view or the leaves move.
+            vec2 uv = (pos.xy - pc.extra.xy) / kGridSpan;
+            vec2 e = min(uv, 1.0 - uv);
+            float inGrid = smoothstep(0.0, kGridEdge, min(e.x, e.y));
+            if (inGrid > 0.0) {
+                vec4 g0 = textureLod(uBounceGrid, vec3(uv, 0.0), 0.0);
+                vec4 g1 = textureLod(uBounceGrid, vec3(uv, 1.0), 0.0);
+                vec4 g2 = textureLod(uBounceGrid, vec3(uv, 2.0), 0.0);
+                // The canopy over this point: all of it below the crowns'
+                // foot, none at their top (a sunlit treetop is open sky).
+                float under = 1.0 - smoothstep(g2.x, max(g2.y, g2.x + 0.5), pos.z);
+                float cover = clamp(g0.a, 0.0, 1.0) * under * inGrid;
+                vec3 ground = mix(kGroundAlbedo, g0.rgb, inGrid);
+                vec3 leaf = g1.rgb;
+                // The light under the leaves: the sky's hue and the
+                // leaves', each at unit brightness, met halfway.
+                vec3 skyHue = fogColor.rgb / max(lum(fogColor.rgb), 1e-3);
+                vec3 leafHue = leaf / max(lum(leaf), 1e-3);
+                vec3 underHue = mix(skyHue, leafHue, 0.35);
+                underHue /= max(lum(underHue), 1e-3);
+                sky = sky * (1.0 - kCanopySky * cover) +
+                      lightColor.rgb * underHue * (lum(leaf) * kLeafFill * cover * sunUp);
+                float groundLit = 1.0 - kCanopyGroundShade * clamp(g0.a, 0.0, 1.0) * inGrid;
+                bounce = lightColor.rgb * ground * (kFillBounce * sunUp * groundLit);
+                vec3 canopyAmb = mix(vec3(1.0), underHue, kCanopyTint) * kCanopyAmbient;
+                ambNew *= mix(vec3(1.0), canopyAmb, cover * (1.0 - indoor) * mix(0.5, 1.0, sunUp));
+                // Walls: four looks kWallReach yards out. Each counts by
+                // how much wall stands there at this height, how far this
+                // face turns toward it, and how far the wall's face toward
+                // this point turns to the sun.
+                vec2 toSun = -lightDir.xy;
+                float toSunLen = length(toSun);
+                toSun = toSunLen > 1e-4 ? toSun / toSunLen : vec2(0.0);
+                vec2 nh = n.xy * smoothSurface;
+                float wall = 0.0;
+                const vec2 dirs[4] = vec2[](vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0));
+                // The wall heights are carried 8 yards past each wall
+                // (bounce_grid.hpp): none spanning this height here, none
+                // within reach.
+                bool wallNear = g2.w > pos.z - 0.5 && g2.z < pos.z + 1.5;
+                for (int k = 0; k < 4 && wallNear; ++k) {
+                    float facing = max(dot(nh, dirs[k]), 0.0);
+                    float lit = max(dot(-dirs[k], toSun), 0.0);
+                    if (facing * lit <= 0.0) continue;
+                    vec2 uvk = uv + dirs[k] * (kWallReach / kGridSpan);
+                    float present = textureLod(uBounceGrid, vec3(uvk, 1.0), 0.0).a;
+                    vec2 wz = textureLod(uBounceGrid, vec3(uvk, 2.0), 0.0).zw;
+                    float spans = smoothstep(wz.x - 1.5, wz.x - 0.5, pos.z) * smoothstep(pos.z - 0.5, pos.z + 1.5, wz.y);
+                    wall += present * spans * facing * lit;
+                }
+                side = lightColor.rgb * kWallAlbedo * (kWallFill * sunUp * min(wall, 1.0) * inGrid);
+                vec3 groundHue = ground / max(lum(ground), 1e-3);
+                dbg = mix(vec3(1.0), groundHue, 0.7 * inGrid);
+                dbg = mix(dbg, vec3(1.6, 0.3, 0.3), cover);
+                dbg = mix(dbg, vec3(0.3, 0.4, 1.8), clamp(g1.a, 0.0, 1.0) * inGrid * 0.8);
+                dbg = mix(dbg, vec3(1.8, 1.4, 0.5), min(wall, 1.0));
+            }
+        }
+#endif
+#ifdef BOUNCE_GRID
+        ambNew += (sky * up + bounce * (1.0 - up) + side) * (pc.target.z * occlusion * (1.0 - indoor) * sunUp);
+#else
         ambNew += (sky * up + bounce * (1.0 - up)) * (pc.target.z * occlusion * (1.0 - indoor) * sunUp);
+#endif
+#ifdef BOUNCE_GRID
+        if ((flags & 16) != 0) {
+            outColor = vec4(dbg * 0.5, 1.0);
+            return;
+        }
+#endif
     }
     vec3 before = amb + dif;
     // At most half as bright again: the fill lifts shade, it does not light
     // a face that is already lit.
     vec3 f = clamp((ambNew + dif) / max(before, vec3(1e-3)), 0.0, kFillMaxLift);
+#ifdef BOUNCE_GRID
+    if (bounceOn) {
+        // The bounce light changes shade only. A face the sun reaches keeps
+        // what the plain fill gave it - not brighter, and not darker for a
+        // canopy's disc that overhangs a sunlit street - fading over the
+        // first part of the sun's share of its light.
+        vec3 fPlain = clamp((ambPlain + dif) / max(before, vec3(1e-3)), 0.0, kFillMaxLift);
+        f = mix(f, fPlain, keepPlain);
+    }
+#endif
     if (all(lessThan(abs(f - 1.0), vec3(0.002)))) discard;
     outColor = vec4(f * 0.5, 1.0);
 }

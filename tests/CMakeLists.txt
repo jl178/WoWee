@@ -3337,3 +3337,11 @@ wowee_add_packet_test(test_message_chat_packet)
 # steps: a placement begun is resumed, never taken for a duplicate
 # (wmo_liquid_stream). Header-only.
 wowee_add_test(test_wmo_liquid_stream SOURCES test_wmo_liquid_stream.cpp)
+
+# ── test_bounce_light ───────────────────────────────────────
+# Bounce light (the reference client, bounce_grid.hpp): the grid's bake - ground hue,
+# canopy cover and heights, walls - its halves, the shader's copy of its
+# constants, and the Enhanced row.
+wowee_add_test(test_bounce_light
+    SOURCES test_bounce_light.cpp)
+target_compile_definitions(test_bounce_light PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

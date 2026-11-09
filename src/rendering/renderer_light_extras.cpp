@@ -3,8 +3,11 @@
 // indoor_probes.hpp for what each does.
 #include "rendering/renderer.hpp"
 
+#include "rendering/bounce_grid_gpu.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/character_renderer.hpp"
+#include "rendering/m2_renderer.hpp"
+#include "rendering/terrain_manager.hpp"
 #include "rendering/contact_shadow_pass.hpp"
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/vk_context.hpp"
@@ -13,6 +16,9 @@
 #include "core/logger.hpp"
 
 #include <glm/gtc/matrix_inverse.hpp>
+
+#include <cstdlib>
+#include <cstring>
 
 namespace wowee {
 namespace rendering {
@@ -54,14 +60,20 @@ SoftParticlePass::Target depthLightPassTarget(VkContext* vkCtx, PostProcessPipel
 }  // namespace
 
 bool Renderer::decideDepthLightPass(bool want, DepthLightPassState& s, const char* fragSpv, const char* name,
-                                    int blend) {
+                                    int blend, VkDescriptorSetLayout extraLayout) {
     s.frame = false;
     s.done = false;
     want = want && depthLightPassPossible();
     if (want) {
+        if (s.pass && std::strcmp(s.pass->fragSpv(), fragSpv) != 0) {
+            // Another shader (the ambient pass with or without the bounce
+            // grid): the frames in flight may still draw with the one made.
+            std::shared_ptr<ContactShadowPass> prev(std::move(s.pass));
+            vkCtx->deferAfterAllFrameFences([prev]() mutable { prev.reset(); });
+        }
         if (!s.pass) {
             s.pass = std::make_unique<ContactShadowPass>(fragSpv, name,
-                                                         static_cast<ContactShadowPass::Blend>(blend));
+                                                         static_cast<ContactShadowPass::Blend>(blend), extraLayout);
         }
         want = s.pass->ensure(vkCtx, perFrameSetLayout, vkCtx->getSceneOverlayRenderPass());
     }
@@ -81,11 +93,28 @@ void Renderer::decideContactShadows() {
     decideDepthLightPass(enh_.contactShadows && shadowsEnabled && indoorFactor_ < 0.99f, contactShadows_,
                          "assets/shaders/contact_shadow.frag.spv", "Contact shadows",
                          static_cast<int>(ContactShadowPass::Blend::Multiply));
-    // Ambient occlusion and the fill light share a pass: both change only
-    // the ambient share of the light, indoors and out.
-    decideDepthLightPass(enh_.ambientOcclusion || enh_.fillLight, ambientOcclusion_,
-                         "assets/shaders/ambient_occlusion.frag.spv", "Ambient occlusion",
-                         static_cast<int>(ContactShadowPass::Blend::Multiply2x));
+    // Ambient occlusion, the fill light and the bounce light share a pass:
+    // all change only the ambient share of the light, indoors and out. With
+    // the bounce light it is the BOUNCE_GRID build, reading the grid.
+    bool bounce = enh_.bounceLight && depthLightPassPossible();
+    if (bounce) {
+        if (!bounceGrid_) bounceGrid_ = std::make_unique<BounceGrid>();
+        bounce = bounceGrid_->ensure(vkCtx);
+        bounceOffFrames_ = 0;
+    } else if (bounceGrid_ && ++bounceOffFrames_ > 8) {
+        // Eight frames on, no frame in flight reads it; the pass that did
+        // was remade without it when the row went off.
+        std::shared_ptr<BounceGrid> prev(std::move(bounceGrid_));
+        vkCtx->deferAfterAllFrameFences([prev]() mutable { prev.reset(); });
+        bounceOffFrames_ = 0;
+    }
+    bounceFrame_ = decideDepthLightPass(enh_.ambientOcclusion || enh_.fillLight || bounce, ambientOcclusion_,
+                                        bounce ? "assets/shaders/ambient_bounce.frag.spv"
+                                               : "assets/shaders/ambient_occlusion.frag.spv",
+                                        "Ambient occlusion",
+                                        static_cast<int>(ContactShadowPass::Blend::Multiply2x),
+                                        bounce ? bounceGrid_->setLayout() : VK_NULL_HANDLE) &&
+                   bounce;
     // The Enhanced haze lays light over everything the opaque pass drew.
     decideDepthLightPass(enh_.sunHaze && indoorFactor_ < 0.99f, sunHaze_,
                          "assets/shaders/enhanced_haze.frag.spv", "Sun haze",
@@ -101,9 +130,22 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
     // ratio of lit to unlit then reads as it stands.
     if (ambientOcclusion_.frame && !ambientOcclusion_.done && ambientOcclusion_.pass) {
         ambientOcclusion_.done = true;
-        const int flags = (enh_.ambientOcclusion ? 1 : 0) | (enh_.fillLight ? 2 : 0);
+        int flags = (enh_.ambientOcclusion ? 1 : 0) | (enh_.fillLight ? 2 : 0);
         const float wx = weather ? glm::clamp(weather->getIntensity(), 0.0f, 1.0f) : 0.0f;
-        if (ambientOcclusion_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.7f * wx, flags)) {
+        glm::vec4 extra(0.0f);
+        VkDescriptorSet gridSet = VK_NULL_HANDLE;
+        if (bounceFrame_ && bounceGrid_) {
+            // The bounce light: flag 8; the grid's corner and whether it
+            // holds a bake yet (until it does, the plain fill).
+            bounceGrid_->recordUpload(cmd, vkCtx->getCurrentFrame());
+            // WOWEE_BOUNCE_DEBUG=1 draws the grid over the picture (flag 16).
+            static const bool kBounceDebug = std::getenv("WOWEE_BOUNCE_DEBUG") != nullptr;
+            flags |= 8 | (kBounceDebug ? 16 : 0);
+            extra = glm::vec4(bounceGrid_->origin(), bounceGrid_->ready() ? 1.0f : 0.0f, 0.0f);
+            gridSet = bounceGrid_->set();
+        }
+        if (ambientOcclusion_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.7f * wx, flags, extra,
+                                           gridSet)) {
             vkCtx->gpuMark(cmd, "ambient occlusion");
         }
     }
@@ -128,6 +170,12 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
             vkCtx->gpuMark(cmd, "sun haze");
         }
     }
+}
+
+void Renderer::updateBounceGrid(float dt) {
+    if (!bounceGrid_ || !enh_.bounceLight || !camera) return;
+    bounceGrid_->update(camera->getPosition(), dt, m2Renderer.get(), wmoRenderer.get(), cachedAssetManager,
+                        terrainManager ? terrainManager->getMapName() : std::string());
 }
 
 void Renderer::updateUnitIndoorLight(float fxDt) {

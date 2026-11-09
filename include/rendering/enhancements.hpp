@@ -146,6 +146,15 @@ struct Enhancements {
     /// docs/re/enhanced-lighting.md section 9c). Off is stock: a leaf's back
     /// is lit by the ambient alone.
     bool  leafLight = false;
+    /// The shade takes the colour of what is around it, as the reference client's
+    /// probe GI gives it: green and dimmer under a canopy, warm beside
+    /// sunlit ground and walls, from a grid baked over the ground around the
+    /// camera (bounce_grid.hpp, the ambient pass's BOUNCE_GRID build;
+    /// docs/re/enhanced-lighting.md section 6b). It colours the fill light's
+    /// sky and ground terms by place and runs the ambient pass even with the
+    /// fill row off. Off is stock: no grid, the fill (if on) the same colour
+    /// everywhere.
+    bool  bounceLight = false;
 
     // ---- Water and weather -------------------------------------------------
     bool  shorelineFoam = false;
