@@ -483,32 +483,6 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "feet of units within 30 yd) and the leg solve in "
                  "calculateBoneMatrices; off reads nothing and poses every bone stock",
      .asBool = &Enhancements::footPlacement},
-    {.key = "poseblend", .label = "Smoother animation changes", .kind = SettingKind::Bool,
-     .minValue = 0, .maxValue = 0, .step = 0, .category = "Combat", .section = "Feel (the reference client)",
-     .tooltip = "When a character changes what it is doing in the middle of a\n"
-                "change - a swing cut short by a flinch, a cast by a run - it\n"
-                "eases from where its body is into the new move, as in WoW\n"
-                "Enhanced. Off is the original, which can jump part of the way.",
-     // docs/re/enhanced-combat.md: a copy of the pose per interrupted fade.
-     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "pose_blend",
-     .controls = "the snapshot branch of CharacterRenderer::beginSequenceBlend (a fade "
-                 "begun during a fade copies localPose); off keeps 0x826C40's swap",
-     .after = "focuscastkey",
-     .asBool = &Enhancements::poseBlend},
-    {.key = "hdcharacters", .label = "HD characters", .kind = SettingKind::Bool,
-     .minValue = 0, .maxValue = 0, .step = 0, .category = "Combat", .section = "Feel (the reference client)",
-     .tooltip = "Players are drawn with the reference client's HD models, whose fuller\n"
-                "skeletons and denser keyframes are most of why it moves so\n"
-                "smoothly. Needs the models converted from a Enhanced install\n"
-                "(tools/hd_characters); a race without them stays as it was.\n"
-                "Off is the original models.",
-     // docs/re/enhanced-combat.md section 1; tools/hd_characters/convert.py.
-     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "hd_characters",
-     .controls = "pipeline::hdCharacterModelPath (the HD\\ models from the HD characters "
-                 "folder) for the player, other players and the portrait; off draws the "
-                 "3.3.5 models",
-     .after = "focuscastkey",  // below poseblend, which is laid in there first
-     .asBool = &Enhancements::hdCharacters},
     {.key = "smoothzoom", .label = "Smooth camera zoom", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
      .tooltip = "The mouse wheel's zoom glides to its new distance and settles,\n"
@@ -782,6 +756,51 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .asBool = &Enhancements::farField},
 
     // ------------------------------------------------------------ Experimental
+    {.key = "poseblend", .label = "Smoother animation changes", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "Combat feel",
+     .tooltip = "When a character changes what it is doing in the middle of a\n"
+                "change - a swing cut short by a flinch, a cast by a run - it\n"
+                "eases from where its body is into the new move, as in WoW\n"
+                "Enhanced. Off is the original, which can jump part of the way.",
+     // docs/re/enhanced-combat.md: a copy of the pose per interrupted fade.
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "pose_blend",
+     .controls = "the snapshot branch of CharacterRenderer::beginSequenceBlend (a fade "
+                 "begun during a fade copies localPose); off keeps 0x826C40's swap",
+     .asBool = &Enhancements::poseBlend},
+    {.key = "hdcharacters", .label = "HD characters", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
+     .tooltip = "Players are drawn with the reference client's HD models, whose fuller\n"
+                "skeletons and denser keyframes are most of why it moves so\n"
+                "smoothly. Needs the models converted from a Enhanced install\n"
+                "(tools/hd_characters); a race without them stays as it was.\n"
+                "Off is the original models.",
+     // docs/re/enhanced-combat.md section 1; tools/hd_characters/convert.py.
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "hd_characters",
+     .controls = "pipeline::hdCharacterModelPath (the HD\\ models from the HD characters "
+                 "folder) for the player, other players and the portrait; off draws the "
+                 "3.3.5 models",
+     .asBool = &Enhancements::hdCharacters},
+    {.key = "spellqueue", .label = "Spell queue window (ms)", .kind = SettingKind::Int,
+     .minValue = 0, .maxValue = 400, .step = 50, .category = kEnhPageEnhanced, .section = "",
+     .tooltip = "Press your next spell up to this long before the global\n"
+                "cooldown, its own cooldown or your cast ends, and it goes out\n"
+                "the moment it can, as in the reference client (400). 0 is the original\n"
+                "3.3.5: a press before then is refused.",
+     .choices = "", .stockValue = 0, .recommendedValue = 400, .saveKey = "spell_queue_window",
+     .controls = "SpellHandler's queue: one kept press, sent from updateTimers when its "
+                 "cooldown and the GCD are over, or at the cast's end; 0 reads the "
+                 "SpellQueueWindow CVar (default 0, no queue)",
+     .asInt = &Enhancements::spellQueueWindow},
+    {.key = "swingtimer", .label = "Swing timer", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
+     .tooltip = "A bar over the action bars that fills from each of your melee\n"
+                "swings to the next, one per weapon hand, dimmed when your\n"
+                "target is out of reach. the reference client's swing timer; the\n"
+                "original game has none.",
+     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "swing_timer",
+     .controls = "GameScreen::renderSwingTimer: two ImGui bars in combat, from "
+                 "CombatHandler's swing times and UNIT_FIELD_BASEATTACKTIME",
+     .asBool = &Enhancements::swingTimer},
     {.key = "grassenabled", .label = "Grass (experimental)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = "Grass", .section = "Ground cover (experimental)",
      .tooltip = "Grow grass from the terrain's own ground-effect data, bending in\n"
@@ -844,29 +863,6 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "use_original_soundtrack",
      .controls = "the Wowee tracks in ZoneManager's music rotation", .after = "musicvolume",
      .asBool = &Enhancements::woweeMusic},
-    {.key = "spellqueue", .label = "Spell queue window (ms)", .kind = SettingKind::Int,
-     .minValue = 0, .maxValue = 400, .step = 50, .category = "Combat", .section = "",
-     .tooltip = "Press your next spell up to this long before the global\n"
-                "cooldown, its own cooldown or your cast ends, and it goes out\n"
-                "the moment it can, as in the reference client (400). 0 is the original\n"
-                "3.3.5: a press before then is refused.",
-     .choices = "", .stockValue = 0, .recommendedValue = 400, .saveKey = "spell_queue_window",
-     .controls = "SpellHandler's queue: one kept press, sent from updateTimers when its "
-                 "cooldown and the GCD are over, or at the cast's end; 0 reads the "
-                 "SpellQueueWindow CVar (default 0, no queue)",
-     .after = "focuscastkey",
-     .asInt = &Enhancements::spellQueueWindow},
-    {.key = "swingtimer", .label = "Swing timer", .kind = SettingKind::Bool,
-     .minValue = 0, .maxValue = 0, .step = 0, .category = "Combat", .section = "",
-     .tooltip = "A bar over the action bars that fills from each of your melee\n"
-                "swings to the next, one per weapon hand, dimmed when your\n"
-                "target is out of reach. the reference client's swing timer; the\n"
-                "original game has none.",
-     .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "swing_timer",
-     .controls = "GameScreen::renderSwingTimer: two ImGui bars in combat, from "
-                 "CombatHandler's swing times and UNIT_FIELD_BASEATTACKTIME",
-     .after = "targetcastbar",
-     .asBool = &Enhancements::swingTimer},
     {.key = "crispinterface", .label = "Sharp interface text", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = "HUD", .section = "Display",
      .tooltip = "Draw the interface's letters at the size they appear on\n"
