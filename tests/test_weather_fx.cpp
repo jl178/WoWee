@@ -65,7 +65,11 @@ TEST_CASE("the preview forces real weather rows and is off at stock", "[weather_
     CHECK(weatherKind(wfx::previewWeather(7).state) == WeatherKind::SNOW);
     CHECK(weatherKind(wfx::previewWeather(8).state) == WeatherKind::SANDSTORM);
     CHECK(weatherKind(wfx::previewWeather(9).state) == WeatherKind::SANDSTORM);
-    for (int i = 1; i < wfx::kPreviewCount; ++i) {
+    // Always clear: on, with no weather at all.
+    CHECK(wfx::previewWeather(wfx::kPreviewClear).active);
+    CHECK(weatherKind(wfx::previewWeather(wfx::kPreviewClear).state) == WeatherKind::NONE);
+    CHECK(wfx::previewWeather(wfx::kPreviewClear).grade == 0.0f);
+    for (int i = 1; i < wfx::kPreviewClear; ++i) {
         INFO("preview " << i);
         const auto f = wfx::previewWeather(i);
         CHECK(f.active);

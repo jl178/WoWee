@@ -713,6 +713,13 @@ private:
     [[nodiscard]] weather_fx::Forced weatherPreview() const;
     /// The server's weather state and grade, or the preview's in its place.
     void effectiveWeather(uint32_t& state, float& grade) const;
+    /// The grade alone (the sky's storm darkening): 0 with "Always clear".
+    [[nodiscard]] float effectiveWeatherGrade() const {
+        uint32_t state = 0;
+        float grade = 0.0f;
+        effectiveWeather(state, grade);
+        return grade;
+    }
     /// The Weather.dbc row for a weather state (read once), null when the
     /// file or the row is missing.
     const stock_weather::WeatherRow* weatherRowFor(uint32_t state);

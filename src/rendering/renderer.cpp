@@ -4413,7 +4413,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                 rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
                     timeOfDay,
                     gameHandler ? gameHandler->getGameTime() : -1.0f,
-                    gameHandler ? gameHandler->getWeatherIntensity() : 0.0f,
+                    effectiveWeatherGrade(),
                     lightingManager ? &lightingManager->getLightingParams() : nullptr,
                     useOriginalSkybox);
                 skyParams.sunOcclusion = sunOcclusion_;
@@ -4608,7 +4608,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             rendering::SkyParams skyParams = rendering::skyParamsFromLighting(
                 timeOfDay,
                 gameHandler ? gameHandler->getGameTime() : -1.0f,
-                gameHandler ? gameHandler->getWeatherIntensity() : 0.0f,
+                effectiveWeatherGrade(),
                 lightingManager ? &lightingManager->getLightingParams() : nullptr,
                 useOriginalSkybox);
             skyParams.sunOcclusion = sunOcclusion_;

@@ -670,12 +670,12 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "of its level while the room drops it",
      .asBool = &Enhancements::rainIndoors},
     {.key = "weatherpreview", .label = "Preview weather (this client only)", .kind = SettingKind::Enum,
-     .minValue = 0, .maxValue = 9, .step = 1, .category = kEnhPageWeather, .section = "Preview",
+     .minValue = 0, .maxValue = 10, .step = 1, .category = kEnhPageWeather, .section = "Preview",
      .tooltip = "Shows a weather here, on this client only, to see the options\n"
                 "above without waiting for it. The server and everyone else\n"
                 "keep the real weather. Set it back to Off when done.",
      .choices = "Off (the server's weather)|Light rain|Rain|Heavy rain|Thunderstorm|"
-                "Light snow|Snow|Heavy snow|Light sandstorm|Sandstorm",
+                "Light snow|Snow|Heavy snow|Light sandstorm|Sandstorm|Always clear (sunny)",
      .stockValue = 0, .recommendedValue = 0, .saveKey = "weather_preview",
      .controls = "Renderer::effectiveWeather: the preview's Weather.dbc row and grade "
                  "in place of SMSG_WEATHER's for the picture, the storm light and the "

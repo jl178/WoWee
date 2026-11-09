@@ -62,10 +62,13 @@ struct Forced {
     float grade = 0.0f;
 };
 
-inline constexpr int kPreviewCount = 10;
+inline constexpr int kPreviewCount = 11;
+/// The last choice: always clear - the server's rain or snow is not drawn,
+/// heard or lit on this client.
+inline constexpr int kPreviewClear = 10;
 inline constexpr const char* kPreviewChoices =
     "Off (the server's weather)|Light rain|Rain|Heavy rain|Thunderstorm|"
-    "Light snow|Snow|Heavy snow|Light sandstorm|Sandstorm";
+    "Light snow|Snow|Heavy snow|Light sandstorm|Sandstorm|Always clear (sunny)";
 
 /// The preview choice's weather. 0 (and anything out of range) is off.
 inline Forced previewWeather(int choice) {
@@ -75,6 +78,7 @@ inline Forced previewWeather(int choice) {
     static constexpr Row kRows[kPreviewCount] = {
         {0, 0.0f}, {3, 0.45f}, {4, 0.7f}, {5, 1.0f}, {86, 1.0f},
         {6, 0.45f}, {7, 0.7f}, {8, 1.0f}, {41, 0.5f}, {22, 1.0f},
+        {0, 0.0f},  // kPreviewClear
     };
     Forced f;
     if (choice <= 0 || choice >= kPreviewCount) return f;
