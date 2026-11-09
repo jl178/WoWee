@@ -62,9 +62,9 @@ const float kSkyScatter = 0.35;      // of the fog colour, light from the sky
 const float kSunScatter = 0.8;       // of the sun colour, at even scattering
 const float kG = 0.7;
 
-float phaseHG(float c, float g) {
+float phaseHG(float cosTheta, float g) {
     float g2 = g * g;
-    return (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * g * c, 1e-4), 1.5);
+    return (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * g * cosTheta, 1e-4), 1.5);
 }
 
 void main() {
