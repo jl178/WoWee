@@ -103,6 +103,113 @@ Enhanced-only columns (names unknown; no public definitions exist):
   `_031` is 0.001 on 370 rows; `_037` 0.7/0.8; `_036` 1/8/16/32.
   `SsaoSettingsID` is 116 on 260 of 882 rows (section 4).
 
+## 2b. Per-zone keyframes: Enhanced's own light, re-keyed to 3.3.5
+
+The trend above is now only the fallback. With the "Daylight (the reference client)"
+row on, every 3.3.5 light on maps 0 and 1 that has a Enhanced counterpart is
+sampled from Enhanced's own keyframes; the rest keep the trend.
+
+**Columns.** Classic Era 1.15's LightData against 3.3.5's LightIntBand and
+LightFloatBand for the same LightParams ids (1.12's rows; `colmap.py`): 99%
+of keys equal, which fixes the order. Colour channels 0-17 are Direct,
+Ambient, SkyTop, SkyMiddle, SkyBand1, SkyBand2, SkySmog, SkyFog,
+ShadowOpacity, Sun, CloudSun, **CloudLayer1Ambient** (channel 11),
+**CloudEmissive** (12), CloudLayer2Ambient (13), OceanClose, OceanFar,
+RiverClose, RiverFar - the DB2 names 11 and 12 the other way round from the
+order Wowee's enum gives them. Float bands 0-3 are FogEnd, FogScaler,
+SunFogAngle (always 1: celestial glow through) and CloudDensity; 4 and 5
+are not in the DB2 (0.95 and 1 throughout). Units are 3.3.5's: Light 1's
+noon FogEnd is 18000 in Era, 3.3.5 and Enhanced alike, so Enhanced's fog is
+read exactly as 3.3.5's is (and on the same 1/36 scale; the "18000 yards"
+of section 5 is 500 yards in 3.3.5's reading). Times are half-minutes.
+
+**Which light.** Light ids are shared: 186 of 3.3.5's 209 lights on the two
+continents are at the same place and size in Enhanced. But Enhanced moved or
+shrank some (Mulgore's 201 from 1131 to 105 yards, Ashenvale's 192 to 22)
+because it also lights by **ZoneLight polygons** (`ZoneLight`,
+`ZoneLightPoint`, 17 on maps 0 and 1: Elwynn, Mulgore, Ashenvale, Durotar
+north, Orgrimmar, Wetlands, Burning Steppes, Blasted Lands, Stormwind
+Harbor, Hyjal...): inside one, its light is the canvas instead of the map
+default. So the match is by ground: each 3.3.5 light is sampled over its
+area (32x32, weighted by its own falloff), Enhanced's lights are painted at
+each point as the stock client paints them (canvas, then farthest first),
+and the Enhanced light with the largest share wins. Map defaults take map
+defaults; a 1.12 light that Enhanced gave to the default or a zone polygon
+takes that; a light 3.3.5 added (TBC/WotLK: 54, 59, 60, 70, 1763...) or one
+no Enhanced light holds half of keeps the trend. Result: 198 of 209 lights,
+both slots clear and storm, 112 Enhanced profiles, 1287 keys. Moved: 20, 50
+and 78 to Burning Steppes' 7 (its polygon), 202 to Mulgore's 201, 201 and
+239 to the Kalimdor default, 34 to 31. Unmatched: 54, 59, 60, 70, 71, 192,
+204, 248, 255, 269, 1763.
+
+**What is copied.** The colour and fog bands of the clear and storm slots,
+up to 16 keys (Enhanced has 12). A column a Enhanced profile leaves at zero on
+every key is one Enhanced does not use (water colours on 115 of 126 outdoor
+profiles, the shadow grey, the second cloud layer); 3.3.5's band stays. A
+zero FogEnd on one key means no fog end there (Enhanced sets it on 277 of
+1455 keys) and is left out of that band. LightParams fields (skybox, glow,
+water alphas) stay 3.3.5's: Enhanced's Glow is 0 on 120 of 126 (its bloom is
+separate) and its skyboxes 712/715 do not exist in 3.3.5. Underwater and
+death slots stay stock.
+
+**Not used.** Enhanced's extra columns (above) and retail's
+`HorizonAmbientColor`/`GroundAmbientColor` (837 keys, near the ambient: a
+sky/ground hemisphere ambient). From the data alone: 057 is close to the
+DirectColor (mean RGB distance 47), 055 to SkyBand1 (72); the intensities
+051/052/058 need a linear pipeline to mean anything (section 9b). The
+ZoneLight polygons themselves are not shipped: where 3.3.5 has only its map
+default (most of Elwynn, Wetlands), Enhanced's zone light is not applied -
+Elwynn's 16849 (LightParams 7747) differs from the default's 7748 only in
+the dawn sun.
+
+**The ambient is bounded (an approximation).** A few Enhanced profiles carry
+ambients far outside the rest - Mulgore's LightParams 7567 is `#bae6ff` by
+day, `#cb84ff` at 19:30 and `#1d9eff` at night - which on 3.3.5's clamped
+8-bit lighting read as a strong violet or cyan cast. Enhanced must scale
+them in its linear pipeline, but no column explains how: its 058 is
+0.5-0.8 on those keys and 1-2 on Light 1's darker ambient, yet over all
+outdoor keys no column makes ambient brightness more consistent. So the
+generator bounds each key's ambient by what Enhanced's zones use at that
+hour: every half hour, the 90th percentile of the ambient's luminance and
+of its chroma (distance from its grey) over all the shipped profiles; a key
+above either is scaled down, then pulled toward its grey, keeping its hue.
+210 of 1287 keys move (median 22/255 on the largest channel); 7567's become
+`#697d89` by day, `#9167af` at 19:30 and `#3a7bac` at midnight. When
+Enhanced's scaling is understood this should be replaced by it.
+
+**Where the data lives.** The converted table is Blizzard's data, so it is
+not in the source tree (the repository is public). `tools/enhanced_light_gen.py`
+(3.3.5 DBCs + Enhanced CSVs) writes it to the client data's override folder,
+`<data>/override/wowee/enhanced_lights.bin` (125 KB; layout in
+`include/rendering/enhanced_lights.hpp`), and `LightingManager` reads it
+through the AssetManager as `wowee\enhanced_lights.bin`, as an override pack
+file. Without it the log says so once and the row uses the averaged trend
+everywhere; a file that fails its checks is treated the same way. The test
+reads a made-up two-key table, not Enhanced's.
+
+**Code.** `LightingManager::loadEnhancedProfiles` builds, at load, one profile
+per linked light and slot over the slot's stock profile; `profileForSlot` returns it while the row is on, on maps 0 and 1,
+not under water (a storm slot that falls back to the clear set falls back to
+Enhanced's). The trend now applies per light before the blend, only to lights
+sampled from 3.3.5; it is linear, so on a map without Enhanced links the
+result equals the old after-blend trend. Off is stock exactly: the profiles
+are not looked up.
+
+**Seen in the lab** (Enhanced preset, the row off and on, 6:30 to 20:30, in
+Goldshire, Westfall, Darkshire, the Crossroads and Bloodhoof; the
+`sky:` log line counts the lights on Enhanced data as `enhanced=`):
+Goldshire's noon sun is whiter and its sky brighter, as section 2's table
+says; Darkshire keeps its blue night-in-daytime; the Barrens' haze toward
+a morning sun is paler. Mulgore changed most. Before the ambient bound it
+was washed pale by day, violet at dusk and cyan at night. With the bound,
+Bloodhoof and Thunder Bluff at noon are close to 3.3.5 with a cooler
+shade, and at 23:00 they are a clean blue night. At 19:30 both are still
+warmer and pinker than 3.3.5: Enhanced's orange sun (`#ff6d00`) is over a
+violet ambient that sits at the 90th percentile of what the other zones
+use at that hour. A 75th-percentile bound would have moved 533 of the
+1287 keys, so the bound stays at the 90th. Only two Enhanced captures exist
+(Northshire, Goldshire); none of Mulgore was available to check against.
+
 ## 3. Colour grading
 
 `ffxcolorgrading.bls` (FDID 2990792) samples the finished picture, clamps it
@@ -444,7 +551,8 @@ What still separates the two pictures, largest first:
    orange clipping an 8-bit target gives.
 3. Ground cover. Enhanced's clutter (same placement data, its own models,
    groundEffectDist 200) is denser and taller than Wowee's at 150%.
-4. Per-zone light keyframes: only the average trend is ported.
+4. Per-zone light keyframes: ported for 198 of 209 lights (section 2b);
+   ZoneLight polygons where 3.3.5 has no light of its own are not.
 5. Draw distance: Enhanced draws terrain to 7000 yd with fog ending at 18000;
    Wowee stops at 2400 and its fog ends at the far clip.
 
@@ -478,9 +586,9 @@ measured). It is the change that would close most of gap 2 below.
 
 ## 10. Not done, and why
 
-- Enhanced's per-zone light keyframes (section 2): hand-authored, so only
-  their average trend is ported; shipping Enhanced's tables would be
-  shipping its data.
+- Enhanced's ZoneLight polygons (section 2b), and its keyframes for the 11
+  3.3.5 lights with no Enhanced match. The keyframe table itself is generated
+  locally (section 2b), never committed.
 - Linear lighting with HDR intensities (F052) and a tone curve: Wowee's
   scene target is 8-bit UNORM and its lit shaders clamp ambient + diffuse at
   1 as stock does; going linear is a pipeline change, not a toggle.

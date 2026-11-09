@@ -1,6 +1,7 @@
 #include "core/local_time.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "rendering/enhanced_palette.hpp"
+#include "rendering/enhanced_lights.hpp"
 #include "rendering/light_coords.hpp"
 #include "rendering/light_band_block.hpp"
 #include "rendering/stock_day_night.hpp"
@@ -102,6 +103,7 @@ bool LightingManager::initialize(pipeline::AssetManager* assetManager) {
     loadLiquidTypeDbc(assetManager);
     loadLightBandDbcs(assetManager);
     loadDayNightCycle(assetManager);
+    loadEnhancedProfiles(assetManager);
 
     initialized_ = true;
     LOG_INFO("LightingManager initialized: ", lightVolumesByMap_.size(), " maps with lighting");
@@ -232,6 +234,85 @@ bool LightingManager::loadLightParamsDbc(pipeline::AssetManager* assetManager) {
     }
 
     return true;
+}
+
+void LightingManager::loadEnhancedProfiles(pipeline::AssetManager* assetManager) {
+    namespace fl = enhanced_lights;
+    enhancedProfiles_.clear();
+    fl::Table table;
+    const std::vector<uint8_t> data = assetManager->readFileOptional(fl::kFileName);
+    if (data.empty()) {
+        LOG_INFO("Enhanced light keyframes: no <data>/override/wowee/enhanced_lights.bin "
+                 "(tools/enhanced_light_gen.py writes it); the Enhanced daylight uses "
+                 "the averaged trend everywhere");
+        return;
+    }
+    if (!fl::parse(data, table)) {
+        LOG_WARNING("Enhanced light keyframes: wowee/enhanced_lights.bin is not a valid "
+                    "table; the Enhanced daylight uses the averaged trend everywhere");
+        return;
+    }
+    for (const fl::Link& link : table.links) {
+        auto vit = lightsById_.find(link.lightId);
+        if (vit == lightsById_.end() || link.slot >= LightVolume::SLOT_COUNT) continue;
+        // Over the slot's own profile: its skybox, glow, water alphas and
+        // every band Enhanced does not author stay 3.3.5's.
+        LightParamsProfile profile;
+        const uint32_t stockId =
+            paramsIdForSlot(vit->second, static_cast<LightVolume::ParamsSlot>(link.slot));
+        if (auto pit = lightParamsProfiles_.find(stockId); pit != lightParamsProfiles_.end()) {
+            profile = pit->second;
+        }
+        const fl::Profile& src = table.profiles[link.profile];
+        const fl::Key* keys = &table.keys[src.firstKey];
+        const uint8_t n = static_cast<uint8_t>(std::min(src.keyCount, fl::kMaxKeys));
+        for (uint32_t c = 0; c < fl::kColorChannels; ++c) {
+            if (!(src.colorMask & (1u << c))) continue;
+            ColorBand& band = profile.colorBands[c];
+            band.numKeyframes = n;
+            for (uint8_t k = 0; k < n; ++k) {
+                band.times[k] = static_cast<uint16_t>(keys[k].time);
+                band.packed[k] = keys[k].color[c];
+                band.colors[k] = dbcColorToVec3(keys[k].color[c]);
+            }
+        }
+        for (uint32_t f = 0; f < fl::kFloatChannels; ++f) {
+            if (!(src.floatMask & (1u << f))) continue;
+            FloatBand& band = profile.floatBands[f];
+            band.numKeyframes = 0;
+            for (uint8_t k = 0; k < n; ++k) {
+                // A key without a fog end (0) is left out of that band.
+                if (f == LightParamsProfile::FOG_END && keys[k].value[f] == 0.0f) continue;
+                band.times[band.numKeyframes] = static_cast<uint16_t>(keys[k].time);
+                band.values[band.numKeyframes] = keys[k].value[f];
+                ++band.numKeyframes;
+            }
+        }
+        enhancedProfiles_[link.lightId * 8u + link.slot] = profile;
+    }
+    LOG_INFO("Enhanced light keyframes: ", enhancedProfiles_.size(), " light slots from wowee/enhanced_lights.bin");
+}
+
+const LightParamsProfile* LightingManager::profileForSlot(const LightVolume* volume,
+                                                          LightVolume::ParamsSlot slot,
+                                                          bool* fromEnhanced) const {
+    if (fromEnhanced) *fromEnhanced = false;
+    if (!volume) return nullptr;
+    if (enhancedActive_) {
+        auto fit = enhancedProfiles_.find(volume->lightId * 8u + slot);
+        if (fit != enhancedProfiles_.end()) {
+            if (fromEnhanced) *fromEnhanced = true;
+            return &fit->second;
+        }
+        // A storm slot that falls back to the clear set falls back to
+        // Enhanced's clear set, so rain does not bring 3.3.5's light back.
+        if (slot == LightVolume::SLOT_STORM &&
+            paramsIdForSlot(volume, slot) == paramsIdForSlot(volume, LightVolume::SLOT_CLEAR)) {
+            return profileForSlot(volume, LightVolume::SLOT_CLEAR, fromEnhanced);
+        }
+    }
+    auto it = lightParamsProfiles_.find(paramsIdForSlot(volume, slot));
+    return it == lightParamsProfiles_.end() ? nullptr : &it->second;
 }
 
 void LightingManager::setWmoSkybox(std::string path) {
@@ -486,6 +567,26 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         if (lit != liquidLights_.end()) liquid = &lit->second;
     }
 
+    // Enhanced daylight (not stock): on the two continents, not under water,
+    // each light Enhanced re-authored is sampled from Enhanced's own keyframes
+    // (enhanced_lights.hpp, profileForSlot); every other light takes the
+    // averaged trend (enhanced_palette.hpp) by day, before the lights are
+    // blended. The sky's fog band takes the fog colour's trend; the fog
+    // colour keeps Light.dbc's.
+    enhancedActive_ = enhancedDaylight_ && !isUnderwater && enhanced_palette::appliesToMap(mapId);
+    size_t enhancedVolumes = 0;
+    auto enhancedTrend = [&](LightingParams& p) {
+        if (!enhancedActive_) return;
+        namespace fp = enhanced_palette;
+        const float w = glm::clamp(dayIntensity, 0.0f, 1.0f);
+        p.diffuseColor = fp::apply(p.diffuseColor, fp::kDirect, w);
+        p.ambientColor = fp::apply(p.ambientColor, fp::kAmbient, w);
+        p.skyTopColor = fp::apply(p.skyTopColor, fp::kSkyTop, w);
+        p.skyMiddleColor = fp::apply(p.skyMiddleColor, fp::kSkyMiddle, w);
+        p.skyFogColor = fp::apply(p.skyFogColor, fp::kSkyFog, w);
+        p.sunColor = fp::apply(p.sunColor, fp::kSun, w);
+    };
+
     LightingParams newParams;
     bool sampled = false;
     if (liquid && liquid->lightId != 0 && !playerDead_) {
@@ -510,6 +611,7 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
             auto it = lightParamsProfiles_.find(id);
             if (it != lightParamsProfiles_.end()) {
                 newParams = sampleLightParams(&it->second, timeHalfMinutes);
+                enhancedTrend(newParams);
                 addSky(it->second.lightSkyboxId, 1.0f);
                 sampled = true;
             }
@@ -518,8 +620,15 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
             for (size_t i = 0; i < activeVolumes_.size(); ++i) {
                 const auto& wv = activeVolumes_[i];
                 LightingParams params;
-                if (!sampleVolume(wv.volume, timeHalfMinutes, storm, isUnderwater, params)) {
+                bool fromEnhanced = false;
+                if (!sampleVolume(wv.volume, timeHalfMinutes, storm, isUnderwater, params,
+                                  &fromEnhanced)) {
                     continue;
+                }
+                if (fromEnhanced) {
+                    ++enhancedVolumes;
+                } else {
+                    enhancedTrend(params);
                 }
                 const uint32_t clearId = paramsIdForSlot(
                     wv.volume, isUnderwater ? LightVolume::SLOT_CLEAR_UNDERWATER
@@ -553,6 +662,8 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         }
         newParams.fogScaler = newParams.fogEnd > 0.0f ? newParams.fogStart / newParams.fogEnd : 0.0f;
         newParams.fogExponent = 1.0f;
+        newParams.skyFogColor = newParams.fogColor;
+        enhancedTrend(newParams);
     }
 
     // Light.dbc carries no direction: DayNight sets it from the hour alone,
@@ -595,9 +706,6 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         newParams.fogExponent = fog.exponent;
     }
 
-    // The sky dome's fog band is the authored colour, before any haze blend.
-    newParams.skyFogColor = newParams.fogColor;
-
     // Two Wowee options over the stock fog, both off by default (blend 0,
     // strength 1) and neither applied under water, where the fog is the
     // water itself:
@@ -620,19 +728,6 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         newParams.fogEnd = std::min(newParams.fogEnd * scale, std::max(viewDistance_, 1.0f));
     }
 
-    // Enhanced daylight (not stock; enhanced_palette.hpp): the reference client's
-    // re-authored lights against 1.12's, as a trend, by day on the two
-    // continents. The sky's fog band takes the fog colour's change too.
-    if (enhancedDaylight_ && !authoredFogOnly && enhanced_palette::appliesToMap(mapId)) {
-        namespace fp = enhanced_palette;
-        const float w = glm::clamp(dayIntensity, 0.0f, 1.0f);
-        newParams.diffuseColor = fp::apply(newParams.diffuseColor, fp::kDirect, w);
-        newParams.ambientColor = fp::apply(newParams.ambientColor, fp::kAmbient, w);
-        newParams.skyTopColor = fp::apply(newParams.skyTopColor, fp::kSkyTop, w);
-        newParams.skyMiddleColor = fp::apply(newParams.skyMiddleColor, fp::kSkyMiddle, w);
-        newParams.skyFogColor = fp::apply(newParams.skyFogColor, fp::kSkyFog, w);
-        newParams.sunColor = fp::apply(newParams.sunColor, fp::kSun, w);
-    }
 
     // No headroom scaling of ambient + diffuse: the stock shaders clamp
     // ambient + diffuse * N.L at one per channel (terrain.bls and the M2 and
@@ -662,7 +757,7 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
             diagCallsSinceLog_ = 0;
             LOG_INFO("sky: zone=", zoneId, " hour=", visualTimeOfDayHours_,
                      " skyLuma=", skyLuma, " volumes=", firstVolume, "/", secondVolume,
-                     " inRange=", activeVolumes_.size(),
+                     " inRange=", activeVolumes_.size(), " enhanced=", enhancedVolumes,
                      " skybox=", topSkybox.empty() ? "-" : topSkybox);
             diagZoneId_ = zoneId;
             diagSkyboxPath_ = topSkybox;
@@ -802,30 +897,31 @@ uint32_t LightingManager::paramsIdForSlot(const LightVolume* volume,
 
 bool LightingManager::sampleVolume(const LightVolume* volume, uint16_t timeHalfMinutes,
                                    float stormIntensity, bool isUnderwater,
-                                   LightingParams& out) const {
+                                   LightingParams& out, bool* fromEnhanced) const {
+    if (fromEnhanced) *fromEnhanced = false;
     if (!volume) return false;
-    auto sample = [&](uint32_t id, LightingParams& p) {
-        auto it = lightParamsProfiles_.find(id);
-        if (it == lightParamsProfiles_.end()) return false;
-        p = sampleLightParams(&it->second, timeHalfMinutes);
+    auto sample = [&](const LightParamsProfile* profile, LightingParams& p) {
+        if (!profile) return false;
+        p = sampleLightParams(profile, timeHalfMinutes);
         return true;
     };
 
     if (playerDead_) {
-        return sample(paramsIdForSlot(volume, LightVolume::SLOT_DEATH), out);
+        return sample(profileForSlot(volume, LightVolume::SLOT_DEATH), out);
     }
 
-    const uint32_t clearId = paramsIdForSlot(
-        volume, isUnderwater ? LightVolume::SLOT_CLEAR_UNDERWATER : LightVolume::SLOT_CLEAR);
-    if (!sample(clearId, out)) return false;
+    const LightParamsProfile* clear = profileForSlot(
+        volume, isUnderwater ? LightVolume::SLOT_CLEAR_UNDERWATER : LightVolume::SLOT_CLEAR,
+        fromEnhanced);
+    if (!sample(clear, out)) return false;
 
     // Toward the storm set by the weather's intensity: light rain greys the
     // light a little, a downpour all the way.
-    const uint32_t stormId = paramsIdForSlot(
+    const LightParamsProfile* stormProfile = profileForSlot(
         volume, isUnderwater ? LightVolume::SLOT_STORM_UNDERWATER : LightVolume::SLOT_STORM);
-    if (stormIntensity > 0.001f && stormId != clearId) {
+    if (stormIntensity > 0.001f && stormProfile != clear) {
         LightingParams storm;
-        if (sample(stormId, storm)) {
+        if (sample(stormProfile, storm)) {
             forEachBlended(out, storm, [stormIntensity](auto& x, const auto& y) {
                 x = glm::mix(x, y, stormIntensity);
             });
@@ -922,6 +1018,9 @@ LightingParams LightingManager::sampleLightParams(const LightParamsProfile* prof
     params.ambientColor = band(LightParamsProfile::AMBIENT_COLOR);
     params.diffuseColor = band(LightParamsProfile::DIFFUSE_COLOR);
     params.fogColor = band(LightParamsProfile::FOG_COLOR);
+    // The sky dome's fog band is the authored fog colour, before any haze
+    // blend; blended between lights alongside it.
+    params.skyFogColor = params.fogColor;
     params.skyTopColor = band(LightParamsProfile::SKY_TOP_COLOR);
     params.skyMiddleColor = band(LightParamsProfile::SKY_MIDDLE_COLOR);
     params.skyBand1Color = band(LightParamsProfile::SKY_BAND1_COLOR);

@@ -717,13 +717,15 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .asBool = &Enhancements::colorGrade},
     {.key = "enhanceddaylight", .label = "Daylight (the reference client)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
-     .tooltip = "Daylight in Azeroth and Kalimdor shifted the way the reference client\n"
-                "repainted it: a whiter sun, brighter fill light in the shade,\n"
-                "a brighter sky and haze. Night, dungeons and Outland are\n"
-                "unchanged.",
+     .tooltip = "Azeroth and Kalimdor lit with the reference client's own light for each\n"
+                "zone: twelve keys a day with a slow dawn and a long golden\n"
+                "evening, a whiter sun, a brighter sky. Where Enhanced has no\n"
+                "match, the day is shifted by its average. Dungeons and\n"
+                "Outland are unchanged.",
      .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "enhanced_daylight",
-     .controls = "LightingManager: the day's light colours scaled by the measured "
-                 "Enhanced trend (enhanced_palette.hpp) after the band blend",
+     .controls = "LightingManager: Enhanced's keyframes for the lights "
+                 "enhanced_lights.hpp matches, the measured trend "
+                 "(enhanced_palette.hpp) for the rest, before the band blend",
      .asBool = &Enhancements::enhancedDaylight},
     {.key = "sunhaze", .label = "Sun haze (the reference client)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",

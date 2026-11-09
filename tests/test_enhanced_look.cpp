@@ -4,9 +4,11 @@
 #include <catch_amalgamated.hpp>
 
 #include "rendering/enhanced_grade.hpp"
+#include "rendering/enhanced_lights.hpp"
 #include "rendering/enhanced_palette.hpp"
 #include "ui/graphics_presets.hpp"
 
+#include <cstring>
 #include <fstream>
 #include <regex>
 #include <sstream>
@@ -124,4 +126,67 @@ TEST_CASE("Enhanced preset: Ultra plus the Enhanced rows, on one-sample depth", 
         CHECK(kGraphicsPresets[i].enh.bloom == 0.0f);
         CHECK_FALSE(kGraphicsPresets[i].enh.longView);
     }
+}
+
+
+namespace {
+
+// A tiny made-up table in enhanced_lights.bin's layout: two keys, one profile
+// authoring the direct colour and the fog end, one link.
+std::vector<uint8_t> enhancedLightsFixture() {
+    std::vector<uint32_t> w = {0x314c4657u /* "WFL1" */, 2, 1, 1};
+    auto key = [&](uint32_t time, uint32_t direct, float fogEnd) {
+        w.push_back(time);
+        for (uint32_t c = 0; c < enhanced_lights::kColorChannels; ++c) w.push_back(c == 0 ? direct : 0);
+        const float values[enhanced_lights::kFloatChannels] = {fogEnd, 0.25f, 1.0f, 0.5f};
+        for (float v : values) {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &v, 4);
+            w.push_back(bits);
+        }
+    };
+    key(360, 0x102030u, 0.0f);
+    key(1440, 0xa0b0c0u, 18000.0f);
+    for (uint32_t v : {42u, 0u, 2u, 0x1u, 0x1u}) w.push_back(v);  // profile
+    for (uint32_t v : {7u, 0u, 0u}) w.push_back(v);                 // link
+    std::vector<uint8_t> bytes(w.size() * 4);
+    std::memcpy(bytes.data(), w.data(), bytes.size());
+    return bytes;
+}
+
+}  // namespace
+
+TEST_CASE("Enhanced lights: the table file round-trips and refuses bad input", "[enhanced]") {
+    namespace fl = enhanced_lights;
+    const std::vector<uint8_t> good = enhancedLightsFixture();
+    fl::Table t;
+    REQUIRE(fl::parse(good, t));
+    REQUIRE(t.keys.size() == 2);
+    REQUIRE(t.profiles.size() == 1);
+    REQUIRE(t.links.size() == 1);
+    CHECK(t.keys[1].time == 1440);
+    CHECK(t.keys[1].color[0] == 0xa0b0c0u);
+    CHECK(t.keys[0].value[0] == 0.0f);   // a key without a fog end
+    CHECK(t.keys[1].value[0] == 18000.0f);
+    CHECK(t.profiles[0].enhancedParamsId == 42);
+    CHECK(t.profiles[0].keyCount == 2);
+    CHECK(t.links[0].lightId == 7);
+
+    auto broken = [&](size_t word, uint32_t value) {
+        std::vector<uint8_t> b = good;
+        std::memcpy(b.data() + word * 4, &value, 4);
+        return b;
+    };
+    const size_t keyWords = 1 + fl::kColorChannels + fl::kFloatChannels;
+    const size_t profileAt = 4 + 2 * keyWords;
+    const size_t linkAt = profileAt + 5;
+    CHECK_FALSE(fl::parse(broken(0, 0x58585858u), t));          // magic
+    CHECK(t.links.empty());
+    CHECK_FALSE(fl::parse(broken(1, 3), t));                    // size
+    CHECK_FALSE(fl::parse(broken(4 + keyWords, 100), t));       // keys out of order
+    CHECK_FALSE(fl::parse(broken(4, 2880), t));                 // past midnight
+    CHECK_FALSE(fl::parse(broken(profileAt + 2, 3), t));        // past the keys
+    CHECK_FALSE(fl::parse(broken(linkAt + 2, 1), t));           // past the profiles
+    CHECK_FALSE(fl::parse(broken(linkAt + 1, 1), t));           // not clear or storm
+    CHECK_FALSE(fl::parse(std::vector<uint8_t>(good.begin(), good.end() - 4), t));
 }

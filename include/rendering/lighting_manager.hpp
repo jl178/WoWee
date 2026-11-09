@@ -326,8 +326,12 @@ public:
     /// default; 1 is the sky itself. A Wowee option. See
     /// LightingManager::update.
     void setFogSkyBlend(float blend) { fogSkyBlend_ = blend; }
-    /// the reference client's daylight trend over 1.12's lights (enhanced_palette.hpp).
+    /// the reference client's daylight on maps 0 and 1: its own keyframes for every
+    /// light enhanced_lights.hpp matches, the averaged trend
+    /// (enhanced_palette.hpp) for the rest.
     void setEnhancedDaylight(bool on) { enhancedDaylight_ = on; }
+    /// How many of 3.3.5's lights have Enhanced keyframes (0 before initialize).
+    [[nodiscard]] size_t enhancedLightCount() const { return enhancedProfiles_.size(); }
     /// Long view: the fog may end past the far clip (see update()).
     void setLongView(bool on) { longView_ = on; }
     /// Enhanced's fog end over its far clip: 18000 / 7000.
@@ -433,7 +437,20 @@ private:
      * False if the volume names no profile that exists.
      */
     bool sampleVolume(const LightVolume* volume, uint16_t timeHalfMinutes,
-                      float stormIntensity, bool isUnderwater, LightingParams& out) const;
+                      float stormIntensity, bool isUnderwater, LightingParams& out,
+                      bool* fromEnhanced = nullptr) const;
+
+    /// The profile a volume's slot is sampled from: Enhanced's keyframes for
+    /// it while the Enhanced daylight is on over map 0 or 1 and one exists,
+    /// else the slot's own LightParams (paramsIdForSlot). Null if neither.
+    const LightParamsProfile* profileForSlot(const LightVolume* volume,
+                                             LightVolume::ParamsSlot slot,
+                                             bool* fromEnhanced = nullptr) const;
+
+    /// enhanced_lights.hpp's table, read from the client data's override
+    /// folder, as profiles built over the stock ones (channels Enhanced leaves
+    /// empty keep 3.3.5's bands). No file: none, and the trend everywhere.
+    void loadEnhancedProfiles(pipeline::AssetManager* assetManager);
 
     /** world/dnc.db: the day and night intensity keys, by time of day. */
     bool loadDayNightCycle(pipeline::AssetManager* assetManager);
@@ -497,6 +514,10 @@ private:
     bool playerDead_ = false;
     float fogSkyBlend_ = 0.0f;
     bool enhancedDaylight_ = false;
+    /// enhancedDaylight_ and the map being drawn is one Enhanced re-authored.
+    bool enhancedActive_ = false;
+    /// Enhanced's keyframes by 3.3.5 light id * 8 + slot (loadEnhancedProfiles).
+    std::map<uint32_t, LightParamsProfile> enhancedProfiles_;
     bool longView_ = false;
     float fogStrength_ = 1.0f;
     /// stock_light::usesFarClipFog for the map being drawn; read by
