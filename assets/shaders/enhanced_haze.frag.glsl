@@ -41,7 +41,7 @@ layout(set = 1, binding = 0) uniform sampler2D uSceneDepth;
 
 layout(push_constant) uniform Push {
     mat4 invViewProj;  // clip -> world, this frame's
-    vec4 target;       // xy the render extent, z strength (0..2; weather thins it), w flags (4 debug)
+    vec4 target;       // xy the render extent, z strength (0..2; weather thins it), w flags (4 debug, 8 HDR scene)
 } pc;
 
 layout(location = 0) out vec4 outColor;
@@ -98,7 +98,9 @@ void main() {
     vec3 light = fogColor.rgb * kSkyScatter + lightColor.rgb * (phase * kSunScatter * sunUp);
     // Capped near white: past it the haze only blows a bright sky and the
     // land under it out (the Barrens toward an evening sun, round 4).
-    light = min(light, vec3(1.3));
+    // With the HDR scene the tone map rolls it off instead, and the glow
+    // toward a low sun can be brighter than white (enhanced_tonemap::kHazeCap).
+    light = min(light, vec3((int(pc.target.w + 0.5) & 8) != 0 ? 3.0 : 1.3));
     // Indoors the outdoor air stays outside.
     float outdoors = 1.0 - clamp(shadowParams.w, 0.0, 1.0);
     float a = mix(1.0, T, outdoors);

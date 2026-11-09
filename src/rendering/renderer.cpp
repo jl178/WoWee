@@ -2,6 +2,7 @@
 #include "rendering/sun_direction.hpp"
 #include "rendering/enhanced_grade.hpp"
 #include "pipeline/hd_characters.hpp"
+#include "rendering/enhanced_tonemap.hpp"
 
 #include <cstddef>
 #include <cstring>
@@ -4399,6 +4400,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                     lightingManager ? &lightingManager->getLightingParams() : nullptr,
                     useOriginalSkybox);
                 skyParams.sunOcclusion = sunOcclusion_;
+                skyParams.sunGain = vkCtx->isHdrScene() ? enhanced_tonemap::tuning().sunGain : 1.0f;
                 // The stock order (0x7f09b0): stars, sun and moons, the
                 // additive dome and the clouds, then the LightSkybox models.
                 // The dome is opaque here and drawn first; the stars and the
@@ -4593,6 +4595,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                 lightingManager ? &lightingManager->getLightingParams() : nullptr,
                 useOriginalSkybox);
             skyParams.sunOcclusion = sunOcclusion_;
+            skyParams.sunGain = vkCtx->isHdrScene() ? enhanced_tonemap::tuning().sunGain : 1.0f;
             // The stock order (0x7f09b0): stars, sun and moons, the additive
             // dome and the clouds, then the LightSkybox models (see the
             // parallel path).

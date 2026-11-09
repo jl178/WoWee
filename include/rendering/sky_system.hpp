@@ -65,6 +65,10 @@ struct SkyParams {
     // ceiling between the two changed nothing and the flare hung over the
     // terrain that was covering it.
     float sunOcclusion = 0.0f;
+    /// The sun's disc and glare at this many times their colour: 1 stock;
+    /// more with the HDR scene, where the light above 1 is kept for the tone
+    /// map and the bloom instead of clipping (enhanced_tonemap::kSunGain).
+    float sunGain = 1.0f;
 
     // Time
     float timeOfDay = 12.0f;    // 0-24 hours

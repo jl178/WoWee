@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include "rendering/highlight_rolloff.hpp"
+#include "rendering/enhanced_tonemap.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/vk_pipeline.hpp"
@@ -1856,7 +1857,7 @@ bool PostProcessPipeline::initFXAAResources() {
     VkPushConstantRange pc{};
     pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     pc.offset = 0;
-    pc.size = 80;  // five vec4
+    pc.size = 96;  // six vec4
     VkPipelineLayoutCreateInfo plCI{};
     plCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     plCI.setLayoutCount = 1;
@@ -2024,7 +2025,7 @@ void PostProcessPipeline::renderFXAAPass() {
     const auto nowMs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
     const bool wave = underwaterWave_ && glowWanted();
-    float pc[20] = {
+    float pc[24] = {
         1.0f / static_cast<float>(ext.width),
         1.0f / static_cast<float>(ext.height),
         sharpness,
@@ -2045,7 +2046,10 @@ void PostProcessPipeline::renderFXAAPass() {
         static_cast<float>(nowMs % 2805u) / 2805.0f,
         static_cast<float>(nowMs % 3600000u) * 0.001f,
         gradeKalimdor_ ? 1.0f : 0.0f, glowWanted() ? bloom_ : 0.0f,
-        hdrScene() ? 1.0f : 0.0f
+        hdrScene() ? 1.0f : 0.0f,
+        // The HDR scene's tone curve and how much light above 1 the bloom
+        // spreads (enhanced_tonemap.hpp).
+        enhanced_tonemap::tuning().knee, enhanced_tonemap::tuning().hdrBloom, 0.0f, 0.0f
     };
     vkCmdPushConstants(currentCmd_, fxaa_.pipelineLayout,
                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), pc);

@@ -250,9 +250,10 @@ void Celestial::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const S
         const float alpha = bodyAlpha * glm::mix(kSunGlare.alphaMin, kSunGlare.alphaMax, align) *
                             sunGlareVis_;
         if (sunDir.z > -0.2f) {
+            const glm::vec3 sunTint = tint * glm::max(params.sunGain, 0.0f);
             drawSprite(cmd, SUN_CENTER, sunDir, spriteHalfAngle(sunSize(dayFraction)),
-                       glm::vec4(tint, bodyAlpha), false, true);
-            drawSprite(cmd, SUN_GLARE, sunDir, spriteHalfAngle(size), glm::vec4(tint, alpha),
+                       glm::vec4(sunTint, bodyAlpha), false, true);
+            drawSprite(cmd, SUN_GLARE, sunDir, spriteHalfAngle(size), glm::vec4(sunTint, alpha),
                        false, false);
         }
     }

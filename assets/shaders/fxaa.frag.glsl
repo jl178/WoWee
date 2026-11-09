@@ -43,6 +43,10 @@ layout(push_constant) uniform PC {
     float gradeCurve;   // 0 the Eastern Kingdoms curve, 1 Kalimdor's
     float bloom;        // Enhanced bloom (not stock): strength, 0 = off
     float hdr;          // 1 when uScene is the RGBA16F HDR scene (hdrScene row)
+    float toneKnee;     // HDR: where the tone curve leaves the identity
+    float hdrBloom;     // HDR: how much light above 1 the bloom spreads
+    float pad6;
+    float pad7;
 } pc;
 
 // The scene boxed down to a quarter (mip 1 of a half-size image), the stock
@@ -50,29 +54,48 @@ layout(push_constant) uniform PC {
 layout(set = 0, binding = 1) uniform sampler2D uGlow;
 
 // The scene as the rest of this pass reads it. The 8-bit scene arrives
-// already clamped to 0..1 by its target; the HDR scene (RGBA16F, the
-// "HDR lighting" row) can hold anything the shaders wrote, light above 1
-// included, and is brought onto the same 0..1 picture here, at every tap, so
-// FXAA's edge search, the stock glow and the grade see what they always saw.
-// A negative or NaN value, which a float target keeps and an UNORM one
+// already clamped to 0..1 by its target. The HDR scene (RGBA16F, the "HDR
+// lighting" row) holds whatever the shaders wrote, light above 1 included,
+// and is tone mapped onto 0..1 here, at every tap, so FXAA's edge search,
+// the stock glow and the grade work on the displayed picture as they always
+// have. A negative or NaN value, which a float target keeps and an UNORM one
 // clamps away, would spread through the blur taps; both are dropped.
+//
+// The curve (enhanced_tonemap.hpp holds the same numbers for the tests):
+// identity up to the knee, so everything the 8-bit scene could show below
+// it is shown as before; above it, Reinhard on the excess, x / (1 + x)
+// scaled to the headroom left - slope 1 at the knee, 1 approached and never
+// reached, so a highlight keeps its hue and gradient instead of clipping.
+// Per channel: the brightest channel saturates first and a hot highlight
+// bleaches toward white, as film and Enhanced's sun do.
 vec3 hdrToDisplay(vec3 c) {
     c = max(c, vec3(0.0));             // also NaN -> 0 (max returns the non-NaN)
-    return min(c, vec3(1.0));
+    float k = pc.toneKnee;
+    vec3 u = max(c - k, 0.0) / (1.0 - k);
+    vec3 shoulder = k + (1.0 - k) * u / (1.0 + u);
+    return mix(c, shoulder, greaterThan(c, vec3(k)));
+}
+// Its inverse on 0..1 (1 itself is out of reach and held just under it).
+vec3 displayToHdr(vec3 d) {
+    float k = pc.toneKnee;
+    d = clamp(d, 0.0, 0.9990);
+    vec3 f = max(d - k, 0.0) / (1.0 - k);
+    vec3 lin = k + (1.0 - k) * f / (1.0 - f);
+    return mix(d, lin, greaterThan(d, vec3(k)));
 }
 vec3 sceneAt(vec2 uv) {
     vec3 c = texture(uScene, uv).rgb;
     return pc.hdr > 0.5 ? hdrToDisplay(c) : c;
 }
-// The quarter-size scene, as the glow and the nether blur read it, and as
-// the bloom reads it: in the scene's own light, above 1 kept.
+// The quarter-size scene, as the glow and the nether blur read it
+// (displayed), and as the bloom reads it (in the scene's own light).
 vec3 glowAt(vec2 uv) {
     vec3 c = textureLod(uGlow, uv, 1.0).rgb;
     return pc.hdr > 0.5 ? hdrToDisplay(c) : c;
 }
 vec3 glowLinearAt(vec2 uv) {
     vec3 c = textureLod(uGlow, uv, 1.0).rgb;
-    return pc.hdr > 0.5 ? hdrToDisplay(c) : c;
+    return pc.hdr > 0.5 ? max(c, vec3(0.0)) : c;
 }
 
 // The reference's default tuning. Subpix 0.75 is what it calls the default
@@ -235,28 +258,52 @@ vec3 enhancedGrade(vec3 c) {
 // lifts only the highlights - sunlit leaves, the sky round the sun, the
 // shafts - into a soft halo.
 const float kBloomKnee = 0.8;
-vec3 bloomAt(vec2 uv) {
-    if (pc.glowSource < 0.5) return vec3(0.0);
+// The two at once, from one set of taps: x the 8-bit bloom over the
+// displayed picture, as the Enhanced preset has always drawn it; y, with the
+// HDR scene only, the light above 1 in the same tent, in the scene's light -
+// the sky round the sun, a sunlit leaf - which the 8-bit scene had clipped.
+void bloomAt(vec2 uv, out vec3 ldr, out vec3 hdr) {
+    ldr = vec3(0.0);
+    hdr = vec3(0.0);
+    if (pc.glowSource < 0.5) return;
     vec2 texel = 1.0 / vec2(textureSize(uGlow, 1));
-    vec3 sum = vec3(0.0);
     float wsum = 0.0;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             float w = (2.0 - abs(float(x))) * (2.0 - abs(float(y)));
             vec3 s = glowLinearAt(uv + vec2(x, y) * 4.0 * texel);
-            sum += max(s - kBloomKnee, 0.0) * w;
+            vec3 d = pc.hdr > 0.5 ? hdrToDisplay(s) : s;
+            ldr += max(d - kBloomKnee, 0.0) * w;
+            hdr += max(s - 1.0, 0.0) * w;
             wsum += w;
         }
     }
-    return sum / wsum / (1.0 - kBloomKnee);
+    ldr = ldr / wsum / (1.0 - kBloomKnee);
+    hdr = hdr / wsum;
 }
 
 vec3 stockScreenEffect(vec3 c, vec2 uv) {
     vec3 r = stockScreenEffectComposite(c, uv);
-    // Capped: a backlit, haze-lit face beside the sun already sits near
-    // white, and the halo on top of it was what blew it out.
-    if (pc.bloom > 0.0) r += min(bloomAt(uv) * pc.bloom, vec3(0.25));
-    if (pc.rollWhite > 0.0) r = highlightRollOff(r);
+    vec3 ldr = vec3(0.0), hdr = vec3(0.0);
+    if (pc.bloom > 0.0) {
+        bloomAt(uv, ldr, hdr);
+        // Capped: a backlit, haze-lit face beside the sun already sits near
+        // white, and the halo on top of it was what blew it out.
+        r += min(ldr * pc.bloom, vec3(0.25));
+    }
+    if (pc.hdr > 0.5) {
+        // The HDR scene: what the glow and the bloom added on the displayed
+        // picture goes on in the scene's light instead, with the light above
+        // 1 the bloom spreads (a halo that grows with how bright its source
+        // is), and the sum is tone mapped once - so a lit face under the
+        // glow eases toward white on the shoulder instead of clipping there.
+        vec3 lin = displayToHdr(c) + (r - c) + hdr * (pc.bloom * pc.hdrBloom);
+        r = hdrToDisplay(lin);
+    } else if (pc.rollWhite > 0.0) {
+        // Soft highlights belong to the 8-bit scene; the tone curve does it
+        // for the HDR one.
+        r = highlightRollOff(r);
+    }
     if (pc.gradeWeight > 0.0) r = enhancedGrade(r);
     return r;
 }

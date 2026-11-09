@@ -122,7 +122,9 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
         // and sheets: the golden air is a clear day's, so it thins with the
         // weather rather than adding a grey layer to it.
         const float wx = weather ? glm::clamp(weather->getIntensity(), 0.0f, 1.0f) : 0.0f;
-        if (sunHaze_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.8f * wx)) {
+        // Flag 8: the HDR scene, where the haze's light may pass 1.3.
+        const int hazeFlags = vkCtx->isHdrScene() ? 8 : 0;
+        if (sunHaze_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.8f * wx, hazeFlags)) {
             vkCtx->gpuMark(cmd, "sun haze");
         }
     }

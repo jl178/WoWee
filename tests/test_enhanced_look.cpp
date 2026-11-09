@@ -6,9 +6,11 @@
 #include "rendering/enhanced_grade.hpp"
 #include "rendering/enhanced_lights.hpp"
 #include "rendering/enhanced_palette.hpp"
+#include "rendering/enhanced_tonemap.hpp"
 #include "ui/graphics_presets.hpp"
 
 #include <cstring>
+#include <cmath>
 #include <fstream>
 #include <regex>
 #include <sstream>
@@ -194,4 +196,38 @@ TEST_CASE("Enhanced lights: the table file round-trips and refuses bad input", "
     CHECK_FALSE(fl::parse(broken(linkAt + 2, 1), t));           // past the profiles
     CHECK_FALSE(fl::parse(broken(linkAt + 1, 1), t));           // not clear or storm
     CHECK_FALSE(fl::parse(std::vector<uint8_t>(good.begin(), good.end() - 4), t));
+}
+
+TEST_CASE("HDR tone curve: the 8-bit picture below the knee, no clip above", "[enhanced]") {
+    namespace tm = enhanced_tonemap;
+    // Below the knee, exactly what the 8-bit scene showed.
+    for (float x = 0.0f; x <= tm::kKnee; x += 0.05f) CHECK(tm::toDisplay(x) == Catch::Approx(x));
+    // Above it, rising, under 1, and continuous with slope 1 at the knee.
+    float prev = tm::toDisplay(tm::kKnee);
+    for (float x = tm::kKnee + 0.01f; x < 64.0f; x *= 1.1f) {
+        const float d = tm::toDisplay(x);
+        CHECK(d > prev);
+        CHECK(d < 1.0f);
+        prev = d;
+    }
+    const float e = 1e-3f;
+    CHECK((tm::toDisplay(tm::kKnee + e) - tm::toDisplay(tm::kKnee)) / e == Catch::Approx(1.0f).margin(0.01f));
+    // White in the 8-bit scene keeps most of its brightness.
+    CHECK(tm::toDisplay(1.0f) > 0.88f);
+    // Negatives and NaN show as black, as an UNORM target clamps them.
+    CHECK(tm::toDisplay(-1.0f) == 0.0f);
+    CHECK(tm::toDisplay(std::nanf("")) == 0.0f);
+    // The inverse undoes it (the bloom adds in scene light and maps back).
+    for (float x : {0.1f, 0.5f, 0.8f, 0.9f, 1.0f, 1.7f, 4.0f}) {
+        CHECK(tm::toScene(tm::toDisplay(x)) == Catch::Approx(x).epsilon(0.01));
+    }
+}
+
+TEST_CASE("HDR lighting row: on its page, off in every preset until verified", "[enhanced]") {
+    using namespace wowee::ui;
+    const EnhancementRow* row = findEnhancementRow("hdrscene");
+    REQUIRE(row != nullptr);
+    CHECK(std::string(row->category) == kEnhPageEnhanced);
+    CHECK(row->stockValue == 0.0f);
+    CHECK(Enhancements{}.hdrScene == false);
 }
