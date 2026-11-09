@@ -1561,10 +1561,13 @@ else()
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         target_compile_options(wowee PRIVATE -Wno-odr)
         target_link_options(wowee PRIVATE -Wno-odr)
-        # GCC 16 at -O3 without LTO reports -Wrestrict inside libstdc++'s own
-        # vector copy (stl_uninitialized.h) with impossible ranges near 2^63
-        # - a known false positive that LTO hid by deferring the analysis.
-        target_compile_options(wowee PRIVATE -Wno-restrict)
+        # GCC 16 at -O3 without LTO reports the flow-sensitive checks inside
+        # libstdc++'s own code (stl_uninitialized.h, stl_construct.h) with
+        # impossible sizes - known false positives that LTO hid by deferring
+        # the analysis. Kept as warnings, not errors, so they still show.
+        target_compile_options(wowee PRIVATE
+            -Wno-error=restrict -Wno-error=stringop-overflow
+            -Wno-error=stringop-overread -Wno-error=array-bounds)
     endif()
 endif()
 
