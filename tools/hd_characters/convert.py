@@ -35,6 +35,7 @@ given --wowee-data, the skin and hair colour nearest the 3.3.5 one. Lines:
   tex C R T PATH           choice C gives target T; when R is not 0, only
                            together with choice R
   geo C ID                 choice C shows geoset ID; choice 0 is always shown
+  bone C PATH              choice C (a face) moves bones by the .bone file
 
 usage: convert.py --out DIR [--cache DIR] [--db2 DIR] [--listfile CSV]
                   [--share URL] [models...]     (default: all twenty)
@@ -54,7 +55,8 @@ BUILD = '1.60.1.70862'
 DB2_TABLES = ['ChrModel', 'ChrRaceXChrModel', 'CreatureDisplayInfo', 'CreatureModelData',
               'ChrCustomizationOption', 'ChrCustomizationChoice', 'ChrCustomizationElement',
               'ChrCustomizationGeoset', 'ChrCustomizationMaterial', 'ChrCustomizationReq',
-              'ChrModelTextureLayer', 'TextureFileData', 'ChrCustomizationConversion']
+              'ChrModelTextureLayer', 'TextureFileData', 'ChrCustomizationConversion',
+              'ChrCustomizationBoneSet']
 
 # 3.3.5 race id -> model folder (Undead art lives under Scourge).
 RACES = {1: 'Human', 2: 'Orc', 3: 'Dwarf', 4: 'NightElf', 5: 'Scourge', 6: 'Tauren',
@@ -296,6 +298,12 @@ def default_geosets(skin, look):
     have = skin_geosets(skin)
     out = []
     for grp in sorted({g // 100 for g in have} - DECIDED_GROUPS):
+        # Group 32 is the face. Its first variant is a stub of some sixty
+        # triangles; the face is 3202 (the human's face shapes add 3203-3204,
+        # chosen through Face Shape). Races without that option need 3202.
+        if grp == 32 and 3202 in have:
+            out.append('geo 0 3202')
+            continue
         if grp * 100 + 1 in have:
             out.append('geo 0 %d' % (grp * 100 + 1))
     return out
@@ -326,6 +334,7 @@ class Converter:
         for e in db['ChrCustomizationElement']:
             self.elements[e['ChrCustomizationChoiceID']].append(e)
         self.geo = {g['ID']: g for g in db['ChrCustomizationGeoset']}
+        self.boneset = {b['ID']: b for b in db['ChrCustomizationBoneSet']}
         self.mat = {m['ID']: m for m in db['ChrCustomizationMaterial']}
         self.tfd = defaultdict(list)
         for r in db['TextureFileData']:
@@ -355,6 +364,20 @@ class Converter:
         if fdid not in self.written_tex:
             d = self.read(fdid)
             check_blp(d, rel)
+            self.put(rel, d)
+            self.written_tex.add(fdid)
+        return 'HD\\' + rel.replace('/', '\\')
+
+    def bone_file(self, fdid):
+        """A face's bone adjustments (.bone: BIDA bone ids, BOMT matrices),
+        copied as they are."""
+        rel = self.path_of(fdid)
+        if not rel.endswith('.bone'):
+            rel = 'hd_unnamed/%d.bone' % fdid
+        if fdid not in self.written_tex:
+            d = self.read(fdid)
+            if d[:4] != b'\x01\x00\x00\x00':
+                raise ValueError('%s: .bone version %r' % (rel, d[:4]))
             self.put(rel, d)
             self.written_tex.add(fdid)
         return 'HD\\' + rel.replace('/', '\\')
@@ -449,25 +472,33 @@ class Converter:
         conv = [r for r in db['ChrCustomizationConversion']
                 if r['ChrRacesID'] == str(race) and r['Sex'] == str(sex)
                 and r['ChrCustomizationChoiceID'] in option_of]
-        if conv:
-            for r in conv:
-                c = r['ChrCustomizationChoiceID']
-                dep = '' if r['DependentOptionID'] == '0' else ' %s %s' % (r['DependentOptionID'], r['DependentData'])
-                out.append('choice %s %s %s %s%s' % (r['OptionID'], r['Data'], c, option_of[c], dep))
-                used.add(c)
-            print('  appearance: ChrCustomizationConversion, %d rows' % len(conv))
-        else:
-            for legacy, (on, names) in enumerate(CLASSIC_OPTIONS, start=1):
-                found = [o for n in names for o in opts if o['Name_lang'] == n]
-                if not found:
+        touched = {}  # legacy option -> Enhanced options its conversion rows reach
+        for r in conv:
+            c = r['ChrCustomizationChoiceID']
+            dep = '' if r['DependentOptionID'] == '0' else ' %s %s' % (r['DependentOptionID'], r['DependentData'])
+            out.append('choice %s %s %s %s%s' % (r['OptionID'], r['Data'], c, option_of[c], dep))
+            used.add(c)
+            touched.setdefault(int(r['OptionID']), set()).add(option_of[c])
+        # Where the table does not reach the option a 3.3.5 byte is named
+        # for - blood elves and draenei, which Enhanced does not ship playable,
+        # or an orc's facial hair, which it converts to Grime alone - that
+        # option's choices by OrderIndex (or nearest colour).
+        fallback = []
+        for legacy, (on, names) in enumerate(CLASSIC_OPTIONS, start=1):
+            found = [o for n in names for o in opts if o['Name_lang'] == n]
+            if not found:
+                if legacy not in touched:
                     raise ValueError('ChrModel %s has no %s option' % (cmid, on))
-                ch = sorted(self.choices[found[0]['ID']], key=lambda c: int(c['OrderIndex']))
-                order = self.colour_order(race, sex, legacy, ch)
-                for idx, c in order:
-                    out.append('choice %d %d %s %s' % (legacy, idx, c['ID'], found[0]['ID']))
-                    used.add(c['ID'])
-            print('  appearance: by OrderIndex%s (no conversion rows)' %
-                  (', colours matched' if self.args.wowee_data else ''))
+                continue
+            if found[0]['ID'] in touched.get(legacy, set()):
+                continue
+            ch = sorted(self.choices[found[0]['ID']], key=lambda c: int(c['OrderIndex']))
+            for idx, c in self.colour_order(race, sex, legacy, ch):
+                out.append('choice %d %d %s %s' % (legacy, idx, c['ID'], found[0]['ID']))
+                used.add(c['ID'])
+            fallback.append(on)
+        print('  appearance: %d ChrCustomizationConversion rows%s' %
+              (len(conv), '; by OrderIndex: ' + ', '.join(fallback) if fallback else ''))
 
         # The first choice of every other option, as a new Enhanced character
         # has it. Options behind a requirement (an NPC-only eye style) stay off.
@@ -485,6 +516,12 @@ class Converter:
                 g = self.geo.get(e['ChrCustomizationGeosetID'])
                 if g:
                     out.append('geo %s %d' % (cid, int(g['GeosetType']) * 100 + int(g['GeosetID'])))
+                b = self.boneset.get(e['ChrCustomizationBoneSetID'])
+                if b and b['BoneFileDataID'] != '0':
+                    try:
+                        out.append('bone %s %s' % (cid, self.bone_file(int(b['BoneFileDataID']))))
+                    except KeyError as err:  # a file the build does not carry
+                        print('  skipped: %s' % err)
                 mt = self.mat.get(e['ChrCustomizationMaterialID'])
                 fds = self.tfd.get(mt['MaterialResourcesID'], []) if mt else []
                 if not fds:
@@ -500,7 +537,10 @@ class Converter:
                     continue
                 if rel != '0' and rel not in used:
                     continue
-                out.append('tex %s %s %s %s' % (cid, rel, tgt, self.texture(fds[0])))
+                try:
+                    out.append('tex %s %s %s %s' % (cid, rel, tgt, self.texture(fds[0])))
+                except KeyError as err:  # a file the build does not carry
+                    print('  skipped: %s' % err)
         return out, eye
 
     def colour_order(self, race, sex, legacy, choices):

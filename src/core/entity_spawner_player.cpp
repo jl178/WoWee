@@ -417,6 +417,19 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
         selectedHairScalp,
         hdLook ? &hdFacial : itFacial != facialHairGeosetMap_.end() ? &itFacial->second : nullptr, raceId);
     activeGeosets.insert(hdExtra.begin(), hdExtra.end());
+    if (hdLook) {
+        // The face's shape: its .bone adjustments.
+        pipeline::CharacterAppearance who;
+        who.skinId = look.skinId;
+        who.faceId = look.faceId;
+        who.hairStyleId = look.hairStyleId;
+        who.hairColorId = look.hairColorId;
+        who.facialHairId = facialFeatures;
+        std::vector<std::pair<uint16_t, glm::mat4>> bones;
+        for (const auto& a : pipeline::loadHdCharacterBones(*assetManager_, *hdLook, who))
+            bones.emplace_back(a.bone, a.matrix);
+        charRenderer->setBoneAdjustments(instanceId, bones);
+    }
     // This one is drawn before equipment is known and wants the no-cloak panel;
     // the shared set leaves group 15 alone so the equipment pass can decide.
     activeGeosets.insert(kGeosetNoCape);

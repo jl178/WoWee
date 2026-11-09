@@ -21,6 +21,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include <glm/glm.hpp>
+
 #include "pipeline/char_sections.hpp"
 
 namespace wowee {
@@ -71,12 +73,17 @@ struct HdCharacterLook {
         uint32_t choice = 0;     ///< 0: always, unless a picked choice names its group
         uint16_t id = 0;
     };
+    struct BoneFile {
+        uint32_t choice = 0;     ///< a face
+        std::string path;        ///< its .bone: the face's shape, as bone adjustments
+    };
     std::vector<int> bodyOrder;  ///< body layers by target, the first is the base
     int hairTarget = 10;
     std::vector<Choice> choices;
     std::vector<Default> defaults;
     std::vector<Texture> textures;
     std::vector<Geoset> geosets;
+    std::vector<BoneFile> boneFiles;
 };
 
 /// The choices a character's five appearance bytes pick, with the defaults
@@ -84,6 +91,21 @@ struct HdCharacterLook {
 /// know falls back to that option's index 0.
 std::vector<uint32_t> selectHdCharacterChoices(const HdCharacterLook& look,
                                                const CharacterAppearance& who);
+
+/// One bone's adjustment from a face's .bone file: a matrix in the bone's own
+/// rest frame (about its pivot), applied under its animation.
+struct HdBoneAdjustment {
+    uint16_t bone = 0;
+    glm::mat4 matrix{1.0f};
+};
+
+/// Parse a .bone file (version 1: BIDA bone ids, BOMT one 4x4 per id).
+std::vector<HdBoneAdjustment> parseHdBoneFile(const std::vector<uint8_t>& data);
+
+/// The picked face's bone adjustments, read through the asset manager; empty
+/// when the face has none.
+std::vector<HdBoneAdjustment> loadHdCharacterBones(AssetManager& assets, const HdCharacterLook& look,
+                                                   const CharacterAppearance& who);
 
 /// Parse a .hdlook file's text. Unknown lines are skipped.
 HdCharacterLook parseHdCharacterLook(const std::string& text);

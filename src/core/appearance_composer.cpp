@@ -173,6 +173,7 @@ PlayerTextureInfo AppearanceComposer::resolvePlayerTextures(pipeline::M2Model& m
     // table differs.
     playerHdLook_ = pipeline::isHdCharacterModelPath(model.name)
         ? pipeline::loadHdCharacterLook(*assetManager_, model.name) : nullptr;
+    playerHdBones_.clear();
     auto charSectionsDbc = playerHdLook_ ? nullptr : assetManager_->loadDBC("CharSections.dbc");
     if (playerHdLook_) {
         pipeline::CharacterAppearance who;
@@ -184,6 +185,9 @@ PlayerTextureInfo AppearanceComposer::resolvePlayerTextures(pipeline::M2Model& m
         who.hairColorId = charHairColorId;
         who.facialHairId = facialHairId;
         const auto sections = pipeline::resolveHdCharacterTextures(*playerHdLook_, who);
+        playerHdBones_.clear();
+        for (const auto& a : pipeline::loadHdCharacterBones(*assetManager_, *playerHdLook_, who))
+            playerHdBones_.emplace_back(a.bone, a.matrix);
         if (!sections.bodySkin.empty()) result.bodySkinPath = sections.bodySkin;
         result.hairTexturePath = sections.hair;
         result.underwearPaths = sections.underwear;

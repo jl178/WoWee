@@ -7302,6 +7302,8 @@ void Application::spawnPlayerCharacter() {
 	            ? appearanceComposer_->buildDefaultPlayerGeosets(raceId, sexId, hairStyleId, facialId)
 	            : std::unordered_set<uint16_t>{};
 	        charRenderer->setActiveGeosets(instanceId, activeGeosets);
+	        // An HD face's shape (pipeline/hd_characters.hpp); none on 3.3.5.
+	        if (appearanceComposer_) charRenderer->setBoneAdjustments(instanceId, appearanceComposer_->playerHdBones());
 	        // The race display's size (tauren 1.35/1.25, gnome 1.15), as stock
 	        // draws every player (0x71C110); this was created at 1.0.
 	        if (entitySpawner_ && raceId != 0)

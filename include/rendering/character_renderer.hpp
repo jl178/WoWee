@@ -242,6 +242,11 @@ public:
     void setInstanceDiffuseTint(uint32_t instanceId, const glm::vec3& tint);
     /// The uniform scale an instance draws at (its display's size).
     void setInstanceScale(uint32_t instanceId, float scale);
+    /// Per-bone adjustments in each bone's rest frame, about its pivot, under
+    /// its animation: an HD character's face shape (pipeline/hd_characters.hpp,
+    /// the face's .bone file). Empty clears them.
+    void setBoneAdjustments(uint32_t instanceId,
+                            const std::vector<std::pair<uint16_t, glm::mat4>>& adjustments);
     /// Seat a rider on a mount the stock way (0x73D5D0): the rider is a child
     /// of the mount's attachment 0, its whole transform (position and
     /// orientation) from that point, at the rider's own size. 0 unseats.
@@ -649,6 +654,8 @@ private:
         // the bones actually were); blendFromPose is the snapshot being faded out.
         std::vector<BoneLocalPose> localPose;
         std::vector<BoneLocalPose> blendFromPose;
+        // setBoneAdjustments, already bracketed by the pivot: bone -> matrix.
+        std::vector<std::pair<uint16_t, glm::mat4>> boneAdjust;
         float blendElapsedMs = 0.0f;
         float blendDurationMs = 0.0f;  // 0 = not blending
         // The outgoing sequence keeps playing on its own clock while it fades

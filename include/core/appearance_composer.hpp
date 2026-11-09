@@ -94,6 +94,10 @@ public:
                                                            uint8_t hairStyleId, uint8_t facialId);
 
 
+    /// The HD player model's face shape (its .bone adjustments), from the last
+    /// resolvePlayerTextures; empty for a 3.3.5 model.
+    const std::vector<std::pair<uint16_t, glm::mat4>>& playerHdBones() const { return playerHdBones_; }
+
     // Equipment weapon loading (reads inventory, attaches weapon M2 models)
     void loadEquippedWeapons();
 
@@ -164,6 +168,7 @@ private:
     uint32_t skinTextureSlotIndex_ = 0;
     // The player model's HD appearance table; null for a 3.3.5 model.
     std::shared_ptr<const pipeline::HdCharacterLook> playerHdLook_;
+    std::vector<std::pair<uint16_t, glm::mat4>> playerHdBones_;
     uint32_t cloakTextureSlotIndex_ = 0;
 
     bool weaponsSheathed_ = false;

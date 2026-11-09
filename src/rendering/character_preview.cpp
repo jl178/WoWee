@@ -875,6 +875,19 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
 
     std::unordered_set<uint16_t> activeGeosets = buildBaseGeosets();
     charRenderer_->setActiveGeosets(instanceId_, activeGeosets);
+    if (hdLook_) {
+        // An HD face's shape: its .bone adjustments.
+        pipeline::CharacterAppearance who;
+        who.skinId = static_cast<uint8_t>(skin);
+        who.faceId = static_cast<uint8_t>(face);
+        who.hairStyleId = static_cast<uint8_t>(hairStyle);
+        who.hairColorId = static_cast<uint8_t>(hairColor);
+        who.facialHairId = facialHair;
+        std::vector<std::pair<uint16_t, glm::mat4>> bones;
+        for (const auto& a : pipeline::loadHdCharacterBones(*assetManager_, *hdLook_, who))
+            bones.emplace_back(a.bone, a.matrix);
+        charRenderer_->setBoneAdjustments(instanceId_, bones);
+    }
 
     // Play idle animation (Stand = animation ID 0)
     charRenderer_->playAnimation(instanceId_, rendering::anim::STAND, true);

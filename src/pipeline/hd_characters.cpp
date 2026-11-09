@@ -65,5 +65,18 @@ std::shared_ptr<const HdCharacterLook> loadHdCharacterLook(AssetManager& assets,
     return look;
 }
 
+std::vector<HdBoneAdjustment> loadHdCharacterBones(AssetManager& assets, const HdCharacterLook& look,
+                                                   const CharacterAppearance& who) {
+    std::vector<HdBoneAdjustment> out;
+    if (look.boneFiles.empty()) return out;
+    const auto picked = selectHdCharacterChoices(look, who);
+    for (const auto& b : look.boneFiles) {
+        if (std::find(picked.begin(), picked.end(), b.choice) == picked.end()) continue;
+        auto adj = parseHdBoneFile(assets.readFile(b.path));
+        out.insert(out.end(), adj.begin(), adj.end());
+    }
+    return out;
+}
+
 }  // namespace pipeline
 }  // namespace wowee
