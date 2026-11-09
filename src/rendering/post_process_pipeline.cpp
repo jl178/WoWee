@@ -22,6 +22,8 @@ namespace rendering {
 PostProcessPipeline::PostProcessPipeline() = default;
 PostProcessPipeline::~PostProcessPipeline() { shutdown(); }
 
+bool PostProcessPipeline::hdrScene() const { return vkCtx_ && vkCtx_->isHdrScene(); }
+
 void PostProcessPipeline::initialize(VkContext* ctx) {
     vkCtx_ = ctx;
 }
@@ -1660,7 +1662,9 @@ bool PostProcessPipeline::initFXAAResources() {
     LOG_INFO("FXAA: initializing at ", ext.width, "x", ext.height,
              " (MSAA=", static_cast<int>(msaa), "x)");
 
-    VkFormat colorFmt = vkCtx_->getSwapchainFormat();
+    // The scene's format: the swapchain's, or RGBA16F with the HDR scene, and
+    // the glow's boxed-down copy with it so the bloom sees light above 1.
+    VkFormat colorFmt = vkCtx_->getSceneColorFormat();
     VkFormat depthFmt = vkCtx_->getDepthFormat();
 
     // sceneColor: 1x resolved color target - FXAA reads from here
@@ -1758,7 +1762,9 @@ bool PostProcessPipeline::initFXAAResources() {
     // The same image as a colour target of its own, for RCAS to sharpen into
     // when the temporal upscaler and FXAA are both on. Through the overlay
     // clear pass, which is single-sampled and colour-only in this format.
-    if (vkCtx_->getOverlayClearRenderPass() != VK_NULL_HANDLE) {
+    // Not with the HDR scene, which is never on with the upscaler and whose
+    // image is not in the overlay pass's format.
+    if (vkCtx_->getOverlayClearRenderPass() != VK_NULL_HANDLE && !vkCtx_->isHdrScene()) {
         VkFramebufferCreateInfo sharpenFb{};
         sharpenFb.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         sharpenFb.renderPass = vkCtx_->getOverlayClearRenderPass();
@@ -2038,7 +2044,8 @@ void PostProcessPipeline::renderFXAAPass() {
         static_cast<float>(nowMs % 3174u) / 3174.0f,
         static_cast<float>(nowMs % 2805u) / 2805.0f,
         static_cast<float>(nowMs % 3600000u) * 0.001f,
-        gradeKalimdor_ ? 1.0f : 0.0f, glowWanted() ? bloom_ : 0.0f, 0.0f
+        gradeKalimdor_ ? 1.0f : 0.0f, glowWanted() ? bloom_ : 0.0f,
+        hdrScene() ? 1.0f : 0.0f
     };
     vkCmdPushConstants(currentCmd_, fxaa_.pipelineLayout,
                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), pc);

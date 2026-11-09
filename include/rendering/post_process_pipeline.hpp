@@ -233,8 +233,11 @@ private:
         return glowEnabled_ && !(fsr_.enabled && !fsr2_.enabled);
     }
 
+    [[nodiscard]] bool hdrScene() const;  // vkCtx_->isHdrScene()
     [[nodiscard]] bool needsFXAAPass() const {
-        return fxaa_.enabled || drawnIntoxication() > 0.001f || ghost_ > 0.001f || glowWanted() ||
+        // The HDR scene has no swapchain framebuffers: this pass is its only
+        // way to the screen (and where its tone map runs).
+        return fxaa_.enabled || hdrScene() || drawnIntoxication() > 0.001f || ghost_ > 0.001f || glowWanted() ||
                nether_ > 0.0f || (gradeEnabled_ && !(fsr_.enabled && !fsr2_.enabled));
     }
 

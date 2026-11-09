@@ -190,7 +190,7 @@ bool WaterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLay
     createReflectionResources();
 
     createSceneHistoryResources(refractionCaptureExtent(),
-                                vkCtx->getSwapchainFormat(),
+                                vkCtx->getSceneColorFormat(),
                                 vkCtx->getDepthFormat());
 
     // --- Shaders ---
@@ -253,7 +253,7 @@ void WaterRenderer::recreatePipelines() {
     destroyReflectionResources();
     createReflectionResources();
     createSceneHistoryResources(refractionCaptureExtent(),
-                                vkCtx->getSwapchainFormat(),
+                                vkCtx->getSceneColorFormat(),
                                 vkCtx->getDepthFormat());
 
     // Destroy old pipeline (keep layout)
@@ -2170,7 +2170,7 @@ void WaterRenderer::createReflectionResources() {
     VkImageCreateInfo colorImgCI{};
     colorImgCI.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     colorImgCI.imageType = VK_IMAGE_TYPE_2D;
-    colorImgCI.format = vkCtx->getSwapchainFormat();
+    colorImgCI.format = vkCtx->getSceneColorFormat();
     colorImgCI.extent = {.width = REFLECTION_WIDTH, .height = REFLECTION_HEIGHT, .depth = 1};
     colorImgCI.mipLevels = 1;
     colorImgCI.arrayLayers = 1;
@@ -2192,7 +2192,7 @@ void WaterRenderer::createReflectionResources() {
     colorViewCI.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     colorViewCI.image = reflectionColorImage;
     colorViewCI.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    colorViewCI.format = vkCtx->getSwapchainFormat();
+    colorViewCI.format = vkCtx->getSceneColorFormat();
     colorViewCI.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
     if (vkCreateImageView(device, &colorViewCI, nullptr, &reflectionColorView) != VK_SUCCESS) {
         LOG_ERROR("WaterRenderer: failed to create reflection color view");
@@ -2245,7 +2245,7 @@ void WaterRenderer::createReflectionResources() {
 
     // --- Reflection render pass ---
     VkAttachmentDescription colorAttach{};
-    colorAttach.format = vkCtx->getSwapchainFormat();
+    colorAttach.format = vkCtx->getSceneColorFormat();
     colorAttach.samples = VK_SAMPLE_COUNT_1_BIT;
     colorAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     colorAttach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;

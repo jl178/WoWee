@@ -38,7 +38,7 @@ namespace {
 SoftParticlePass::Target depthLightPassTarget(VkContext* vkCtx, PostProcessPipeline* postProcessPipeline_,
                                               uint32_t currentImageIndex) {
     SoftParticlePass::Target t;
-    t.pass = vkCtx->getOverlayRenderPass();
+    t.pass = vkCtx->getSceneOverlayRenderPass();
     if (postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE) {
         t.colorView = postProcessPipeline_->getSceneColorImageView();
         t.extent = postProcessPipeline_->getSceneRenderExtent();
@@ -63,7 +63,7 @@ bool Renderer::decideDepthLightPass(bool want, DepthLightPassState& s, const cha
             s.pass = std::make_unique<ContactShadowPass>(fragSpv, name,
                                                          static_cast<ContactShadowPass::Blend>(blend));
         }
-        want = s.pass->ensure(vkCtx, perFrameSetLayout, vkCtx->getOverlayRenderPass());
+        want = s.pass->ensure(vkCtx, perFrameSetLayout, vkCtx->getSceneOverlayRenderPass());
     }
     s.frame = want;
     if (want) {

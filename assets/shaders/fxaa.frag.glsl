@@ -42,12 +42,38 @@ layout(push_constant) uniform PC {
     float effectTime;   // seconds, for the nether blur's moving taps
     float gradeCurve;   // 0 the Eastern Kingdoms curve, 1 Kalimdor's
     float bloom;        // Enhanced bloom (not stock): strength, 0 = off
-    float pad5;
+    float hdr;          // 1 when uScene is the RGBA16F HDR scene (hdrScene row)
 } pc;
 
 // The scene boxed down to a quarter (mip 1 of a half-size image), the stock
 // FFXBox4 target the glow and the ghost world blur from.
 layout(set = 0, binding = 1) uniform sampler2D uGlow;
+
+// The scene as the rest of this pass reads it. The 8-bit scene arrives
+// already clamped to 0..1 by its target; the HDR scene (RGBA16F, the
+// "HDR lighting" row) can hold anything the shaders wrote, light above 1
+// included, and is brought onto the same 0..1 picture here, at every tap, so
+// FXAA's edge search, the stock glow and the grade see what they always saw.
+// A negative or NaN value, which a float target keeps and an UNORM one
+// clamps away, would spread through the blur taps; both are dropped.
+vec3 hdrToDisplay(vec3 c) {
+    c = max(c, vec3(0.0));             // also NaN -> 0 (max returns the non-NaN)
+    return min(c, vec3(1.0));
+}
+vec3 sceneAt(vec2 uv) {
+    vec3 c = texture(uScene, uv).rgb;
+    return pc.hdr > 0.5 ? hdrToDisplay(c) : c;
+}
+// The quarter-size scene, as the glow and the nether blur read it, and as
+// the bloom reads it: in the scene's own light, above 1 kept.
+vec3 glowAt(vec2 uv) {
+    vec3 c = textureLod(uGlow, uv, 1.0).rgb;
+    return pc.hdr > 0.5 ? hdrToDisplay(c) : c;
+}
+vec3 glowLinearAt(vec2 uv) {
+    vec3 c = textureLod(uGlow, uv, 1.0).rgb;
+    return pc.hdr > 0.5 ? hdrToDisplay(c) : c;
+}
 
 // The reference's default tuning. Subpix 0.75 is what it calls the default
 // amount of filtering; 0.50 is the value it names as sharper, if this still
@@ -71,7 +97,7 @@ float luma(vec3 c) {
 // weighted 1/8, 3/8, 3/8, 1/8. Taken as the 4x4 product in one pass, which
 // is the same filter. Without a quarter-size scene, the pixel itself.
 vec3 stockBlur(vec2 uv) {
-    if (pc.glowSource < 0.5) return texture(uScene, uv).rgb;
+    if (pc.glowSource < 0.5) return sceneAt(uv);
     const float offs[4] = float[](-2.5, -0.5, 0.5, 2.5);
     const float wts[4]  = float[](0.125, 0.375, 0.375, 0.125);
     vec2 texel = 1.0 / vec2(textureSize(uGlow, 1));
@@ -79,7 +105,7 @@ vec3 stockBlur(vec2 uv) {
     for (int y = 0; y < 4; ++y) {
         for (int x = 0; x < 4; ++x) {
             sum += wts[x] * wts[y] *
-                   textureLod(uGlow, uv + vec2(offs[x], offs[y]) * texel, 1.0).rgb;
+                   glowAt(uv + vec2(offs[x], offs[y]) * texel);
         }
     }
     return sum;
@@ -111,12 +137,12 @@ vec2 waveAt(vec2 uv) {
 // scene averaged. Stock moves the taps in its vertex program from random
 // tables; here they turn about the pixel, 1.5 quarter texels out.
 vec3 netherBlur(vec2 uv) {
-    if (pc.glowSource < 0.5) return texture(uScene, uv).rgb;
+    if (pc.glowSource < 0.5) return sceneAt(uv);
     vec2 texel = 1.0 / vec2(textureSize(uGlow, 1));
     vec3 sum = vec3(0.0);
     for (int i = 0; i < 4; ++i) {
         float a = pc.effectTime * (0.7 + 0.3 * float(i)) + 1.5707963 * float(i);
-        sum += textureLod(uGlow, uv + vec2(cos(a), sin(a)) * 1.5 * texel, 1.0).rgb;
+        sum += glowAt(uv + vec2(cos(a), sin(a)) * 1.5 * texel);
     }
     return sum * 0.25;
 }
@@ -145,7 +171,7 @@ vec3 stockScreenEffectComposite(vec3 c, vec2 uv) {
         // ffxglowwave: the scene read 0..3 pixels off and the blur 0..0.75
         // quarter texels off along the wave (c0, c1 of 0x8c2350).
         vec2 w = waveAt(uv);
-        c = texture(uScene, uv + w * 3.0 * pc.rcpFrame).rgb;
+        c = sceneAt(uv + w * 3.0 * pc.rcpFrame);
         if (pc.glowSource > 0.5) blurUV = uv + w * 0.75 / vec2(textureSize(uGlow, 1));
     }
     vec3 blur = stockBlur(blurUV);
@@ -217,7 +243,7 @@ vec3 bloomAt(vec2 uv) {
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             float w = (2.0 - abs(float(x))) * (2.0 - abs(float(y)));
-            vec3 s = textureLod(uGlow, uv + vec2(x, y) * 4.0 * texel, 1.0).rgb;
+            vec3 s = glowLinearAt(uv + vec2(x, y) * 4.0 * texel);
             sum += max(s - kBloomKnee, 0.0) * w;
             wsum += w;
         }
@@ -243,18 +269,18 @@ void main() {
     vec2 rcp    = pc.rcpFrame;
 
     // --- Centre, with the drunk blur folded in before anything reads it ---
-    vec3 rgbM = texture(uScene, uv).rgb;
+    vec3 rgbM = sceneAt(uv);
     if (drunk > 0.0) {
         vec2 radius = rcp * mix(1.0, 5.0, drunk);
         vec3 blur = rgbM;
-        blur += texture(uScene, uv + vec2( radius.x, 0.0)).rgb;
-        blur += texture(uScene, uv + vec2(-radius.x, 0.0)).rgb;
-        blur += texture(uScene, uv + vec2(0.0,  radius.y)).rgb;
-        blur += texture(uScene, uv + vec2(0.0, -radius.y)).rgb;
-        blur += texture(uScene, uv + radius).rgb;
-        blur += texture(uScene, uv - radius).rgb;
-        blur += texture(uScene, uv + vec2(radius.x, -radius.y)).rgb;
-        blur += texture(uScene, uv + vec2(-radius.x, radius.y)).rgb;
+        blur += sceneAt(uv + vec2( radius.x, 0.0));
+        blur += sceneAt(uv + vec2(-radius.x, 0.0));
+        blur += sceneAt(uv + vec2(0.0,  radius.y));
+        blur += sceneAt(uv + vec2(0.0, -radius.y));
+        blur += sceneAt(uv + radius);
+        blur += sceneAt(uv - radius);
+        blur += sceneAt(uv + vec2(radius.x, -radius.y));
+        blur += sceneAt(uv + vec2(-radius.x, radius.y));
         rgbM = mix(rgbM, blur / 9.0, 0.75 * drunk);
     }
 
@@ -266,10 +292,10 @@ void main() {
 
     // --- Cardinal neighbours: is there an edge here at all ---
     float lumaM = luma(rgbM);
-    float lumaN = luma(texture(uScene, uv + vec2( 0.0, -1.0) * rcp).rgb);
-    float lumaS = luma(texture(uScene, uv + vec2( 0.0,  1.0) * rcp).rgb);
-    float lumaE = luma(texture(uScene, uv + vec2( 1.0,  0.0) * rcp).rgb);
-    float lumaW = luma(texture(uScene, uv + vec2(-1.0,  0.0) * rcp).rgb);
+    float lumaN = luma(sceneAt(uv + vec2( 0.0, -1.0) * rcp));
+    float lumaS = luma(sceneAt(uv + vec2( 0.0,  1.0) * rcp));
+    float lumaE = luma(sceneAt(uv + vec2( 1.0,  0.0) * rcp));
+    float lumaW = luma(sceneAt(uv + vec2(-1.0,  0.0) * rcp));
 
     float rangeMax = max(lumaM, max(max(lumaN, lumaS), max(lumaE, lumaW)));
     float rangeMin = min(lumaM, min(min(lumaN, lumaS), min(lumaE, lumaW)));
@@ -280,10 +306,10 @@ void main() {
         return;
     }
 
-    float lumaNW = luma(texture(uScene, uv + vec2(-1.0, -1.0) * rcp).rgb);
-    float lumaNE = luma(texture(uScene, uv + vec2( 1.0, -1.0) * rcp).rgb);
-    float lumaSW = luma(texture(uScene, uv + vec2(-1.0,  1.0) * rcp).rgb);
-    float lumaSE = luma(texture(uScene, uv + vec2( 1.0,  1.0) * rcp).rgb);
+    float lumaNW = luma(sceneAt(uv + vec2(-1.0, -1.0) * rcp));
+    float lumaNE = luma(sceneAt(uv + vec2( 1.0, -1.0) * rcp));
+    float lumaSW = luma(sceneAt(uv + vec2(-1.0,  1.0) * rcp));
+    float lumaSE = luma(sceneAt(uv + vec2( 1.0,  1.0) * rcp));
 
     float lumaNS   = lumaN + lumaS;
     float lumaWE   = lumaW + lumaE;
@@ -333,15 +359,15 @@ void main() {
 
     vec2  posN = posB - offNP * kSearchStep[0];
     vec2  posP = posB + offNP * kSearchStep[0];
-    float lumaEndN = luma(texture(uScene, posN).rgb) - lumaMid;
-    float lumaEndP = luma(texture(uScene, posP).rgb) - lumaMid;
+    float lumaEndN = luma(sceneAt(posN)) - lumaMid;
+    float lumaEndP = luma(sceneAt(posP)) - lumaMid;
     bool  doneN = abs(lumaEndN) >= gradientScaled;
     bool  doneP = abs(lumaEndP) >= gradientScaled;
     if (!doneN) posN -= offNP * kSearchStep[1];
     if (!doneP) posP += offNP * kSearchStep[1];
     for (int i = 2; i < FXAA_SEARCH_STEPS && !(doneN && doneP); ++i) {
-        if (!doneN) lumaEndN = luma(texture(uScene, posN).rgb) - lumaMid;
-        if (!doneP) lumaEndP = luma(texture(uScene, posP).rgb) - lumaMid;
+        if (!doneN) lumaEndN = luma(sceneAt(posN)) - lumaMid;
+        if (!doneP) lumaEndP = luma(sceneAt(posP)) - lumaMid;
         doneN = doneN || abs(lumaEndN) >= gradientScaled;
         doneP = doneP || abs(lumaEndP) >= gradientScaled;
         if (!doneN) posN -= offNP * kSearchStep[i];
@@ -368,17 +394,17 @@ void main() {
     if ( horzSpan) finalUV.y += pixelOffsetFinal * lengthSign;
     if (!horzSpan) finalUV.x += pixelOffsetFinal * lengthSign;
 
-    vec3 fxaaResult = texture(uScene, finalUV).rgb;
+    vec3 fxaaResult = sceneAt(finalUV);
     fxaaResult = mix(fxaaResult, rgbM, 0.75 * drunk);
 
     // Post-FXAA contrast-adaptive sharpening (unsharp mask), only when FSR2
     // hands over its sharpness: it restores what the upscale softened.
     if (pc.sharpness > 0.0) {
         vec2 r = pc.rcpFrame;
-        vec3 blur = (texture(uScene, uv + vec2(-r.x, 0)).rgb
-                   + texture(uScene, uv + vec2( r.x, 0)).rgb
-                   + texture(uScene, uv + vec2(0, -r.y)).rgb
-                   + texture(uScene, uv + vec2(0,  r.y)).rgb) * 0.25;
+        vec3 blur = (sceneAt(uv + vec2(-r.x, 0))
+                   + sceneAt(uv + vec2( r.x, 0))
+                   + sceneAt(uv + vec2(0, -r.y))
+                   + sceneAt(uv + vec2(0,  r.y))) * 0.25;
         // scale sharpness from [0,2] to a modest [0, 0.3] boost factor
         float s = pc.sharpness * 0.15;
         fxaaResult = clamp(fxaaResult + s * (fxaaResult - blur), 0.0, 1.0);

@@ -132,6 +132,13 @@ struct Enhancements {
     /// long view, the fog ends at 18/7 of that reach, as Enhanced's. Off is
     /// stock: the fog-coloured WDL silhouette.
     bool  farField = false;
+    /// The scene drawn in 16-bit float (RGBA16F) instead of the screen's 8
+    /// bits, as the reference client's linear lighting is, so light brighter than
+    /// white is kept to the final composite instead of clipping there
+    /// (Renderer::decideHdrScene, docs/re/enhanced-lighting.md section 9b).
+    /// Needs the post-process pass and no upscaler. Off is the stock 8-bit
+    /// scene.
+    bool  hdrScene = false;
 
     // ---- Water and weather -------------------------------------------------
     bool  shorelineFoam = false;

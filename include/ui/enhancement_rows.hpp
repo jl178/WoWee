@@ -754,6 +754,17 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "reach for big outdoor groups; with the long view, the fog's end at "
                  "18/7 of the far reach",
      .asBool = &Enhancements::farField},
+    {.key = "hdrscene", .label = "HDR lighting (the reference client)", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
+     .tooltip = "The world drawn with more than the screen's range of light, as\n"
+                "the reference client's is, so the sun, the sky round it and bright\n"
+                "highlights are kept instead of clipping to flat colour. Not\n"
+                "with FSR upscaling.",
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "hdr_scene",
+     .controls = "Renderer::decideHdrScene: the scene target, its passes and every scene "
+                 "pipeline remade in RGBA16F (the anti-aliasing rebuild); ~2x the scene "
+                 "colour memory and bandwidth",
+     .asBool = &Enhancements::hdrScene},
 
     // ------------------------------------------------------------ Experimental
     {.key = "poseblend", .label = "Smoother animation changes", .kind = SettingKind::Bool,

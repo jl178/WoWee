@@ -748,6 +748,12 @@ private:
     uint32_t loadSkyboxModel(const std::string& path, bool stars = false);
     VkSampleCountFlagBits pendingMsaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
     bool msaaChangePending_ = false;
+    // The HDR scene (Enhancements::hdrScene, decideHdrScene): what the next
+    // rebuild sets, and whether it was given up for the session.
+    void decideHdrScene();
+    bool hdrScenePending_ = false;
+    bool hdrSceneFailed_ = false;
+    bool hdrSceneSupportChecked_ = false;
     void renderShadowPass();
     /// Whether renderShadowPass draws the unit map this frame, and with it
     /// the units' casters - the one test both it and the worker start use.

@@ -1821,7 +1821,7 @@ bool VkContext::createMsaaColorImage() {
     VkImageCreateInfo imgInfo{};
     imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgInfo.imageType = VK_IMAGE_TYPE_2D;
-    imgInfo.format = swapchainFormat;
+    imgInfo.format = getSceneColorFormat();
     imgInfo.extent = {.width = swapchainExtent.width, .height = swapchainExtent.height, .depth = 1};
     imgInfo.mipLevels = 1;
     imgInfo.arrayLayers = 1;
@@ -1852,7 +1852,7 @@ bool VkContext::createMsaaColorImage() {
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image = msaaColorImage_;
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = swapchainFormat;
+    viewInfo.format = getSceneColorFormat();
     viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     viewInfo.subresourceRange.levelCount = 1;
     viewInfo.subresourceRange.layerCount = 1;
@@ -1932,6 +1932,19 @@ VkSampleCountFlagBits VkContext::getMaxUsableSampleCount() const {
     return VK_SAMPLE_COUNT_1_BIT;
 }
 
+bool VkContext::isHdrSceneSupported() const {
+    if (physicalDevice == VK_NULL_HANDLE) return false;
+    VkFormatProperties props{};
+    vkGetPhysicalDeviceFormatProperties(physicalDevice, VK_FORMAT_R16G16B16A16_SFLOAT, &props);
+    const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                                      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT |
+                                      VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                      VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                                      VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
+                                      VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    return (props.optimalTilingFeatures & need) == need;
+}
+
 void VkContext::setMsaaSamples(VkSampleCountFlagBits samples) {
     // Clamp to max supported
     VkSampleCountFlagBits maxSamples = getMaxUsableSampleCount();
@@ -1986,7 +1999,7 @@ bool VkContext::createSwapchainRenderTargets(const char* verb) {
         VkAttachmentDescription attachments[4] = {};
 
         // Attachment 0: MSAA color target
-        attachments[0].format = swapchainFormat;
+        attachments[0].format = getSceneColorFormat();
         attachments[0].samples = msaaSamples_;
         attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -2006,7 +2019,7 @@ bool VkContext::createSwapchainRenderTargets(const char* verb) {
         attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
         // Attachment 2: Resolve target (swapchain image)
-        attachments[2].format = swapchainFormat;
+        attachments[2].format = getSceneColorFormat();
         attachments[2].samples = VK_SAMPLE_COUNT_1_BIT;
         attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -2130,8 +2143,10 @@ bool VkContext::createSwapchainRenderTargets(const char* verb) {
         }
 
         // Framebuffers: [msaaColorView, depthView, swapchainView, depthResolveView?]
-        swapchainFramebuffers.resize(swapchainImageViews.size());
-        for (size_t i = 0; i < swapchainImageViews.size(); i++) {
+        // None with the HDR scene: the swapchain is not in the scene's format,
+        // and the scene goes to the post-process target instead.
+        swapchainFramebuffers.resize(hdrScene_ ? 0 : swapchainImageViews.size());
+        for (size_t i = 0; i < swapchainFramebuffers.size(); i++) {
             VkImageView fbAttachments[4] = {msaaColorView_, depthImageView, swapchainImageViews[i], depthResolveImageView};
 
             VkFramebufferCreateInfo fbInfo{};
@@ -2153,7 +2168,7 @@ bool VkContext::createSwapchainRenderTargets(const char* verb) {
         VkAttachmentDescription attachments[2] = {};
 
         // Color attachment (swapchain image)
-        attachments[0].format = swapchainFormat;
+        attachments[0].format = getSceneColorFormat();
         attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
         attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -2200,9 +2215,9 @@ bool VkContext::createSwapchainRenderTargets(const char* verb) {
             return false;
         }
 
-        // Framebuffers: [swapchainView, depthView]
-        swapchainFramebuffers.resize(swapchainImageViews.size());
-        for (size_t i = 0; i < swapchainImageViews.size(); i++) {
+        // Framebuffers: [swapchainView, depthView]; none with the HDR scene.
+        swapchainFramebuffers.resize(hdrScene_ ? 0 : swapchainImageViews.size());
+        for (size_t i = 0; i < swapchainFramebuffers.size(); i++) {
             VkImageView fbAttachments[2] = {swapchainImageViews[i], depthImageView};
 
             VkFramebufferCreateInfo fbInfo{};
@@ -2319,6 +2334,20 @@ bool VkContext::createOverlayRenderPass() {
         overlayClearRenderPass = VK_NULL_HANDLE;
     }
 
+    // The loading overlay pass again in the scene's format, for the passes
+    // that draw over the finished HDR scene image.
+    if (hdrScene_) {
+        color.format = getSceneColorFormat();
+        color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        color.initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        if (vkCreateRenderPass(device, &rpInfo, nullptr, &sceneOverlayRenderPass_) != VK_SUCCESS) {
+            LOG_ERROR("Failed to create the HDR scene overlay pass");
+            sceneOverlayRenderPass_ = VK_NULL_HANDLE;
+            destroyOverlayRenderPass();
+            return false;
+        }
+    }
+
     overlayFramebuffers.resize(swapchainImageViews.size());
     for (size_t i = 0; i < swapchainImageViews.size(); i++) {
         VkFramebufferCreateInfo fbInfo{};
@@ -2351,7 +2380,7 @@ bool VkContext::createSceneContinueRenderPass() {
     }
 
     VkAttachmentDescription attachments[2]{};
-    attachments[0].format = swapchainFormat;
+    attachments[0].format = getSceneColorFormat();
     attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
     attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -2417,6 +2446,10 @@ void VkContext::destroyOverlayRenderPass() {
     if (overlayClearRenderPass) {
         vkDestroyRenderPass(device, overlayClearRenderPass, nullptr);
         overlayClearRenderPass = VK_NULL_HANDLE;
+    }
+    if (sceneOverlayRenderPass_) {
+        vkDestroyRenderPass(device, sceneOverlayRenderPass_, nullptr);
+        sceneOverlayRenderPass_ = VK_NULL_HANDLE;
     }
     if (sceneContinueRenderPass) {
         vkDestroyRenderPass(device, sceneContinueRenderPass, nullptr);

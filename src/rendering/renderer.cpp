@@ -1722,6 +1722,30 @@ void Renderer::setMsaaSamples(VkSampleCountFlagBits samples) {
     msaaChangePending_ = true;
 }
 
+// The "HDR lighting (the reference client)" row: the scene in RGBA16F. Only with the
+// post-process pass as the way to the screen and neither upscaler (their
+// scene targets are made in the swapchain's format), and given up for the
+// session if its target could not be made. A change is queued on the MSAA
+// rebuild, which already remakes every pass and pipeline the format is in.
+void Renderer::decideHdrScene() {
+    if (!vkCtx) return;
+    bool want = enh_.hdrScene && !hdrSceneFailed_ && postProcessPipeline_ &&
+                !postProcessPipeline_->isFSREnabled() && !postProcessPipeline_->isFSR2Enabled();
+    if (want && !hdrSceneSupportChecked_) {
+        hdrSceneSupportChecked_ = true;
+        if (!vkCtx->isHdrSceneSupported()) {
+            LOG_WARNING("HDR scene: RGBA16F cannot be drawn and blitted here - HDR lighting off");
+            hdrSceneFailed_ = true;
+        }
+    }
+    want = want && !hdrSceneFailed_;
+    hdrScenePending_ = want;
+    if (want != vkCtx->isHdrScene() && !msaaChangePending_) {
+        pendingMsaaSamples_ = vkCtx->getMsaaSamples();
+        msaaChangePending_ = true;
+    }
+}
+
 void Renderer::applyMsaaChange() {
     VkSampleCountFlagBits samples = pendingMsaaSamples_;
     msaaChangePending_ = false;
@@ -1734,17 +1758,28 @@ void Renderer::applyMsaaChange() {
     }
 
     VkSampleCountFlagBits current = vkCtx->getMsaaSamples();
-    if (samples == current) return;
+    // The HDR scene's format change takes the same rebuild (decideHdrScene).
+    const bool hdrChange = hdrScenePending_ != vkCtx->isHdrScene();
+    if (samples == current && !hdrChange) return;
 
     // Single GPU wait - all subsequent operations are CPU-side object creation
     vkDeviceWaitIdle(vkCtx->getDevice());
 
     // Set new MSAA and recreate swapchain (render pass, depth, MSAA image, framebuffers)
     vkCtx->setMsaaSamples(samples);
+    vkCtx->setHdrScene(hdrScenePending_);
     if (!vkCtx->recreateSwapchain(window->getDrawableWidth(), window->getDrawableHeight())) {
         LOG_ERROR("MSAA change failed - reverting to 1x");
         vkCtx->setMsaaSamples(VK_SAMPLE_COUNT_1_BIT);
+        vkCtx->setHdrScene(false);
+        hdrScenePending_ = false;
+        hdrSceneFailed_ = true;
         (void)vkCtx->recreateSwapchain(window->getDrawableWidth(), window->getDrawableHeight());
+    }
+    if (hdrChange) {
+        LOG_INFO("HDR scene: ", vkCtx->isHdrScene() ? "on (RGBA16F)" : "off");
+        // Built once against the late pass, whose format has just changed.
+        if (m2Renderer) m2Renderer->releaseSoftParticlePipelines();
     }
 
     // Recreate all sub-renderer pipelines (they embed sample count from render pass)
@@ -1879,6 +1914,9 @@ void Renderer::beginFrame() {
 
     worldDrawnThisFrame_ = false;
 
+    // The HDR scene follows its row, and rides the MSAA rebuild below.
+    decideHdrScene();
+
     // Apply deferred MSAA change between frames (before any rendering state is used)
     if (msaaChangePending_) {
         applyMsaaChange();
@@ -1906,6 +1944,18 @@ void Renderer::beginFrame() {
 
     // Post-process resource management (§4.3 - delegates to PostProcessPipeline)
     if (postProcessPipeline_) postProcessPipeline_->manageResources();
+    // The HDR scene draws only into the post-process target; without one it
+    // goes back to the swapchain's format before anything is recorded.
+    if (vkCtx->isHdrScene() &&
+        (!postProcessPipeline_ || postProcessPipeline_->getSceneFramebuffer() == VK_NULL_HANDLE)) {
+        LOG_ERROR("HDR scene: no off-screen scene target - HDR lighting off");
+        hdrSceneFailed_ = true;
+        decideHdrScene();
+        pendingMsaaSamples_ = vkCtx->getMsaaSamples();
+        applyMsaaChange();
+        vkCtx->resetFrameSyncState();
+        if (postProcessPipeline_) postProcessPipeline_->manageResources();
+    }
 
     // Whether this frame's blended particles wait for the late pass, which
     // also decides where the minimap goes (syncSwimEffectsTargetPass).
@@ -2031,6 +2081,8 @@ void Renderer::beginFrame() {
         rpInfo.framebuffer = ppFB;
         renderExtent = postProcessPipeline_->getSceneRenderExtent();
     } else {
+        // The HDR scene never gets here: beginFrame turns it off when the
+        // off-screen target it needs could not be made (applyMsaaChange).
         rpInfo.framebuffer = vkCtx->getSwapchainFramebuffers()[currentImageIndex];
         renderExtent = vkCtx->getSwapchainExtent();
     }
@@ -4842,7 +4894,8 @@ void Renderer::syncSwimEffectsTargetPass() {
                         vkCtx->getOverlayRenderPass() != VK_NULL_HANDLE;
     if (minimap) {
         if (minimapDrawsLate_) {
-            minimap->setTargetPass(vkCtx->getOverlayRenderPass(), VK_SAMPLE_COUNT_1_BIT);
+            // Into the late pass over the scene image, in the scene's format.
+            minimap->setTargetPass(vkCtx->getSceneOverlayRenderPass(), VK_SAMPLE_COUNT_1_BIT);
         } else {
             minimap->setTargetPass(minimapDrawsWithWater_ ? pass : VK_NULL_HANDLE,
                                    samples);
@@ -4952,7 +5005,7 @@ void Renderer::decideSoftParticles() {
     if (want) {
         if (!softParticlePass_) softParticlePass_ = std::make_unique<SoftParticlePass>();
         want = softParticlePass_->initialize(vkCtx) &&
-               m2Renderer->ensureSoftParticlePipelines(vkCtx->getOverlayRenderPass(),
+               m2Renderer->ensureSoftParticlePipelines(vkCtx->getSceneOverlayRenderPass(),
                                                        softParticlePass_->depthLayout());
     }
     softParticlesFrame_ = want;
@@ -4984,7 +5037,7 @@ void Renderer::recordSoftParticlePass(VkCommandBuffer cmd) {
     softParticlesLateDone_ = true;
 
     SoftParticlePass::Target t;
-    t.pass = vkCtx->getOverlayRenderPass();
+    t.pass = vkCtx->getSceneOverlayRenderPass();
     if (postProcessPipeline_ && postProcessPipeline_->getSceneFramebuffer() != VK_NULL_HANDLE) {
         t.colorView = postProcessPipeline_->getSceneColorImageView();
         t.extent = postProcessPipeline_->getSceneRenderExtent();
@@ -5682,9 +5735,13 @@ void Renderer::setupWater1xPass() {
         return;
     }
 
-    waterRenderer->createWater1xPass(vkCtx->getSwapchainFormat(), vkCtx->getDepthFormat());
+    waterRenderer->createWater1xPass(vkCtx->getSceneColorFormat(), vkCtx->getDepthFormat());
+    // The swapchain's own 1x framebuffers serve an on-screen MSAA scene, which
+    // the HDR scene never is (it is always off-screen, in another format).
+    static const std::vector<VkImageView> kNoViews;
     waterRenderer->createWater1xFramebuffers(
-        vkCtx->getSwapchainImageViews(), depthView, vkCtx->getSwapchainExtent());
+        vkCtx->isHdrScene() ? kNoViews : vkCtx->getSwapchainImageViews(), depthView,
+        vkCtx->getSwapchainExtent());
 
     // The spray follows the water into its pass, and this is the first point at
     // which that pass exists - the swim effects were built long before it, back

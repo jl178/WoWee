@@ -238,6 +238,26 @@ public:
 
     [[nodiscard]] VkSwapchainKHR getSwapchain() const { return swapchain; }
     [[nodiscard]] VkFormat getSwapchainFormat() const { return swapchainFormat; }
+    /// The format the scene is drawn in: the swapchain's, or RGBA16F while the
+    /// HDR scene is on (the "HDR lighting (the reference client)" row), so light above
+    /// 1 survives to the tone map in the final composite. Every pass the scene
+    /// pipelines draw in, and every image a scene pass writes or is copied
+    /// into, is made in this format. Changed only between frames, with the
+    /// same rebuild as a sample count change (Renderer::applyMsaaChange).
+    [[nodiscard]] VkFormat getSceneColorFormat() const {
+        return hdrScene_ ? VK_FORMAT_R16G16B16A16_SFLOAT : swapchainFormat;
+    }
+    [[nodiscard]] bool isHdrScene() const { return hdrScene_; }
+    /// Takes effect at the next recreateSwapchain. The scene must then go to
+    /// an off-screen target (the post-process pass): with it on there are no
+    /// swapchain scene framebuffers.
+    void setHdrScene(bool on) {
+        if (on == hdrScene_) return;
+        hdrScene_ = on;
+        swapchainDirty = true;
+    }
+    /// Whether RGBA16F can be drawn, blended, filtered and blitted here.
+    [[nodiscard]] bool isHdrSceneSupported() const;
     [[nodiscard]] VkExtent2D getSwapchainExtent() const { return swapchainExtent; }
     [[nodiscard]] const std::vector<VkImageView>& getSwapchainImageViews() const { return swapchainImageViews; }
     [[nodiscard]] const std::vector<VkImage>& getSwapchainImages() const { return swapchainImages; }
@@ -256,6 +276,13 @@ public:
     // behind it. Shares getOverlayFramebuffers().
     [[nodiscard]] VkRenderPass getOverlayClearRenderPass() const { return overlayClearRenderPass; }
     [[nodiscard]] const std::vector<VkFramebuffer>& getOverlayFramebuffers() const { return overlayFramebuffers; }
+    /// The overlay pass in the scene's colour format, for the full-screen
+    /// passes that draw over the finished scene image (ambient occlusion, the
+    /// haze, contact shadows, the late particles). The overlay pass itself
+    /// when the scene is in the swapchain's format.
+    [[nodiscard]] VkRenderPass getSceneOverlayRenderPass() const {
+        return sceneOverlayRenderPass_ != VK_NULL_HANDLE ? sceneOverlayRenderPass_ : overlayRenderPass;
+    }
     // Compatible with getImGuiRenderPass(), but loads the scene instead of
     // clearing it, so drawing can continue into the same framebuffer after the
     // pass has been closed for a copy. Null under MSAA.
@@ -621,6 +648,8 @@ private:
     VkRenderPass overlayClearRenderPass = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> overlayFramebuffers;
     VkRenderPass sceneContinueRenderPass = VK_NULL_HANDLE;
+    VkRenderPass sceneOverlayRenderPass_ = VK_NULL_HANDLE;  // only with hdrScene_
+    bool hdrScene_ = false;
     bool createOverlayRenderPass();
     bool createSceneContinueRenderPass();
     void destroyOverlayRenderPass();
