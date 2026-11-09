@@ -162,7 +162,68 @@ void AssetManager::shutdown() {
     initialized = false;
 }
 
+void AssetManager::setAddonDirectories(
+        const std::vector<std::pair<std::string, std::string>>& nameToDir) {
+    std::unordered_map<std::string, std::string> dirs;
+    for (const auto& [name, dir] : nameToDir) {
+        std::string key = name;
+        std::transform(key.begin(), key.end(), key.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        dirs.emplace(std::move(key), dir);
+    }
+    std::unique_lock<std::shared_mutex> lock(addonDirsMutex_);
+    addonDirs_ = std::move(dirs);
+}
+
+std::string AssetManager::resolveAddonFile(const std::string& normalizedPath) const {
+    static constexpr const char kPrefix[] = "interface\\addons\\";
+    constexpr size_t kPrefixLen = sizeof(kPrefix) - 1;
+    if (normalizedPath.compare(0, kPrefixLen, kPrefix) != 0) return {};
+    const size_t nameEnd = normalizedPath.find('\\', kPrefixLen);
+    if (nameEnd == std::string::npos) return {};
+    const std::string name = normalizedPath.substr(kPrefixLen, nameEnd - kPrefixLen);
+    std::string dir;
+    {
+        std::shared_lock<std::shared_mutex> lock(addonDirsMutex_);
+        auto it = addonDirs_.find(name);
+        if (it == addonDirs_.end()) return {};
+        dir = it->second;
+    }
+    // Each component matched without regard to case: the path arrives
+    // lower-cased, and the addon's files are spelled however its author wrote
+    // them - Media\Textures\NormTex.tga - on a filesystem that minds.
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path at(dir);
+    size_t pos = nameEnd + 1;
+    while (pos <= normalizedPath.size()) {
+        const size_t next = normalizedPath.find('\\', pos);
+        const std::string part = normalizedPath.substr(
+            pos, next == std::string::npos ? std::string::npos : next - pos);
+        pos = (next == std::string::npos) ? normalizedPath.size() + 1 : next + 1;
+        if (part.empty()) continue;
+        fs::path found;
+        if (fs::exists(at / part, ec)) {
+            found = at / part;
+        } else {
+            for (const auto& entry : fs::directory_iterator(at, ec)) {
+                std::string n = entry.path().filename().string();
+                std::transform(n.begin(), n.end(), n.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (n == part) { found = entry.path(); break; }
+            }
+        }
+        if (found.empty()) return {};
+        at = found;
+    }
+    return fs::is_regular_file(at, ec) ? at.string() : std::string();
+}
+
 std::string AssetManager::resolveFile(const std::string& normalizedPath) const {
+    // An addon's own files, from wherever that addon was installed.
+    if (std::string addonFile = resolveAddonFile(normalizedPath); !addonFile.empty()) {
+        return addonFile;
+    }
     // Check override directory first (for HD upgrades, custom textures)
     if (!overridePath_.empty()) {
         const auto* entry = manifest_.lookup(normalizedPath);

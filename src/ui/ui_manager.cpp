@@ -158,6 +158,7 @@ bool UIManager::initialize(core::Window* win) {
 void UIManager::loadInterfaceFont(const std::string& dataRoot,
                                   pipeline::AssetManager* assets) {
     if (!imguiInitialized) return;
+    if (assets) fontAssets_ = assets;
     // Called more than once on purpose: with the archives open and again after
     // in case they never opened, and against more than one root because the
     // fonts do not sit in the same place in every install. Whichever gets
@@ -486,8 +487,56 @@ void UIManager::shutdown() {
     LOG_INFO("UI manager shutdown");
 }
 
+/// The font files addons asked for by path, added to the atlas the way the
+/// interface's own faces are - same size, same weight, the sharp twin and the
+/// stock metrics - and registered under their file name. ElvUI ships its own
+/// (PT Sans Narrow, Expressway, Homespun and four more) and draws nearly every
+/// label in one of them; until now each fell back to FRIZQT.
+void UIManager::loadWantedInterfaceFaces() {
+    const std::vector<std::string> wanted = takeWantedInterfaceFaces();
+    if (wanted.empty() || !fontAssets_) return;
+    ImGuiIO& io = ImGui::GetIO();
+    const float atlasSize = 18.0f * interfaceScale_;
+    for (const std::string& path : wanted) {
+        std::vector<uint8_t> data = fontAssets_->readFileOptional(path);
+        if (data.empty()) {
+            LOG_WARNING("Interface font not found: ", path);
+            continue;
+        }
+        const float emScale = fontEmSizeScale(data.data(), data.size());
+        auto add = [&](bool crisp) -> ImFont* {
+            void* owned = IM_ALLOC(data.size());
+            std::memcpy(owned, data.data(), data.size());
+            ImFontConfig cfg;
+            cfg.RasterizerMultiply = 1.35f;
+            cfg.ExtraSizeScale = emScale;
+            if (crisp) {
+                cfg.OversampleH = 1;
+                cfg.OversampleV = 1;
+                cfg.PixelSnapH = true;
+            }
+            cfg.FontDataOwnedByAtlas = true;
+            return io.Fonts->AddFontFromMemoryTTF(owned, static_cast<int>(data.size()),
+                                                  atlasSize, &cfg);
+        };
+        ImFont* face = add(false);
+        if (!face) {
+            LOG_WARNING("Interface font unreadable: ", path);
+            continue;
+        }
+        registerInterfaceFace(path, face);
+        registerInterfaceCrispFace(path, face, add(true));
+        registerInterfaceFaceMetrics(
+            face, std::make_shared<const std::vector<uint8_t>>(std::move(data)));
+        LOG_INFO("Interface font loaded for an addon: ", path);
+    }
+}
+
 void UIManager::update([[maybe_unused]] float deltaTime) {
     if (!imguiInitialized) return;
+
+    // Faces addons named since the last frame, while the atlas may still grow.
+    loadWantedInterfaceFaces();
 
     // Start ImGui frame
     ImGui_ImplVulkan_NewFrame();

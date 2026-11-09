@@ -176,7 +176,23 @@ public:
      */
     [[nodiscard]] std::string resolveFile(const std::string& normalizedPath) const;
 
+    /**
+     * Where each installed addon lives on disk, by name. An addon names its own
+     * art, fonts and sounds as "Interface\\AddOns\\<Name>\\...", and in the
+     * client those resolve to the addon's folder wherever it was found - the
+     * game's own AddOns directory or the player's. Without this, an addon
+     * installed anywhere but inside the archives' extraction drew blank
+     * textures and fell back to the default font. Replaces the whole set.
+     */
+    void setAddonDirectories(const std::vector<std::pair<std::string, std::string>>& nameToDir);
+
 private:
+    /// "interface\\addons\\<name>\\rest" -> the file under that addon's
+    /// directory, matched without regard to case; "" when it is not one.
+    [[nodiscard]] std::string resolveAddonFile(const std::string& normalizedPath) const;
+    /// Lower-cased addon name -> its directory.
+    std::unordered_map<std::string, std::string> addonDirs_;
+    mutable std::shared_mutex addonDirsMutex_;
     bool initialized = false;
     std::string dataPath;
     std::string expansionDataPath_;  // e.g. "Data/expansions/wotlk"

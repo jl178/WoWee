@@ -39,6 +39,13 @@ ImFont* interfaceCrispFace(const ImFont* face);
 /// in which case the caller should draw with whatever it was already using.
 ImFont* interfaceFace(const std::string& pathOrName);
 
+/// Font files an addon asked for by path - ElvUI's PT_Sans_Narrow.ttf under
+/// its own Media folder - that are not loaded yet, taken once each. The
+/// atlas can only grow between frames, so the face is noted on the first
+/// miss and loaded before the next frame begins (UIManager::update); until
+/// then the text draws in the default face.
+std::vector<std::string> takeWantedInterfaceFaces();
+
 /// The TrueType file behind a registered face, for measuring it the stock
 /// client's way. A face with none is measured by ImGui's own advances.
 /// Registering again replaces what was there.

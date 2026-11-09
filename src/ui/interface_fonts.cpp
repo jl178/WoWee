@@ -98,10 +98,40 @@ ImFont* interfaceCrispFace(const ImFont* face) {
     return nullptr;
 }
 
+namespace {
+std::vector<std::string>& wantedFaces() {
+    static std::vector<std::string> v;
+    return v;
+}
+std::unordered_map<std::string, bool>& askedFaces() {
+    static std::unordered_map<std::string, bool> m;
+    return m;
+}
+}  // namespace
+
 ImFont* interfaceFace(const std::string& pathOrName) {
     if (pathOrName.empty()) return nullptr;
-    const auto it = faces().find(faceKey(pathOrName));
-    return (it == faces().end()) ? nullptr : it->second;
+    const std::string key = faceKey(pathOrName);
+    const auto it = faces().find(key);
+    if (it != faces().end()) return it->second;
+    // A font file named by path that nothing has loaded: ask for it once.
+    // Only a path with a TrueType extension - a bare name is one of the
+    // built-in faces, and asking for those again would load nothing new.
+    if (pathOrName.size() > 4 && pathOrName.find_first_of("\\/") != std::string::npos) {
+        std::string ext = pathOrName.substr(pathOrName.size() - 4);
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if ((ext == ".ttf" || ext == ".otf") && askedFaces().emplace(key, true).second) {
+            wantedFaces().push_back(pathOrName);
+        }
+    }
+    return nullptr;
+}
+
+std::vector<std::string> takeWantedInterfaceFaces() {
+    std::vector<std::string> out;
+    out.swap(wantedFaces());
+    return out;
 }
 
 ImFont* interfaceFaceOrDefault(const std::string& fontFace) {

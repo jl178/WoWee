@@ -132,6 +132,10 @@ private:
     /// drawn. Decided once at start-up; the style and the font atlas both use
     /// it, and they have to agree. 1.0 off Android.
     float interfaceScale_ = 1.0f;
+    /// Where the interface fonts were read from, for the faces addons ask for
+    /// later (loadWantedInterfaceFaces).
+    pipeline::AssetManager* fontAssets_ = nullptr;
+    void loadWantedInterfaceFaces();
     /// What the style is scaled to right now. The font atlas stays at
     /// interfaceScale_, the figure it was built for, and is stretched to this.
     float appliedScale_ = 1.0f;
