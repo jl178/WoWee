@@ -290,6 +290,24 @@ positions near 10^4 yd lose the precision the facing needs, so it works in
 view space; and a per-pixel noise rotation with no blur pass after it (ASSAO
 runs two) shows as diagonal bands.
 
+**Halos (round 5).** Jered's Goldshire road showed dark grey jagged lines
+along every branch, leaf-card cluster and the character's arms. Two causes,
+both in the shader now: on a silhouette the facing rebuilt from depth is a
+guess and the disk counted whatever stood behind or beside as cover; and up
+close the 1-yard disk spans a hundred pixels or more, where six fixed taps
+print copies of the edges they cross as bands. So a pixel whose neighbours
+do not continue its surface (ASSAO's depth edges: the second difference of
+the view positions over 0.08 yd + 1.2%/yd) takes no occlusion; a tap more
+than 0.35-0.8 of the radius in front of or behind the pixel along the view
+(a leaf card, a branch, an arm across the body) counts less, then not at
+all; and the disk is held to 3% of the screen height, the radius in yards
+shrinking with it, so up close it is contact shading. On the close-ups
+(AO on against off) the pixels darkened by over 20% on the character view
+fell from 13.9% to 7.4% of the frame, and the bands along the character's
+side and the house eaves are gone; a real crease (a branch growing out of
+the trunk) keeps its shade. Alpha-tested foliage is not told apart (the pass
+sees only depth); the edge test is what keeps the leaf cards clean.
+
 ## 5. Volumetric fog and the two fog layers
 
 Two systems:
