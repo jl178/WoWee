@@ -685,8 +685,11 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
 
     // The frame's fog (0x7f16f0): it ends by the far clip - the view
     // distance - and starts at the blended fraction of that end.
+    // The far clip the fog is held to, the long view's reach included (the
+    // strength below keeps to it too).
+    float fogClip = std::max(viewDistance_, 1.0f);
     {
-        float farClip = std::max(viewDistance_, 1.0f);
+        float& farClip = fogClip;
         // Long view (not stock; the Enhanced preset): Enhanced draws to a
         // 7000-yard far clip and its outdoor fog ends at 18000, so what is
         // drawn is never swallowed by a fog wall. Here the fog may end at
@@ -694,7 +697,8 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         // WDL horizon carries the land past the clip, and the Enhanced haze
         // gives the distance its air. Only on the maps whose fog is the
         // band's own (below 530), never under water.
-        if (longView_ && !farClipFog_ && !isUnderwater) farClip *= kLongViewFogReach;
+        if (longView_ && !farClipFog_ && !isUnderwater)
+            farClip = std::max(farClip, longViewReach_) * kLongViewFogReach;
         stock_light::LightFog blended;
         blended.end = newParams.fogEnd;
         blended.scaler = newParams.fogScaler;
@@ -725,7 +729,7 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     } else if (std::abs(strength - 1.0f) > 0.001f) {
         const float scale = 1.0f / strength;
         newParams.fogStart *= scale;
-        newParams.fogEnd = std::min(newParams.fogEnd * scale, std::max(viewDistance_, 1.0f));
+        newParams.fogEnd = std::min(newParams.fogEnd * scale, fogClip);
     }
 
 

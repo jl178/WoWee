@@ -1686,6 +1686,12 @@ wowee_add_test(test_secondary_motion
 wowee_add_test(test_phase2_motion
     SOURCES test_phase2_motion.cpp)
 
+# ── test_far_field ──────────────────────────────────────────
+# Far field (the reference client): the minimap atlas's layout, box filter and BC1
+# encoder, and the limits it is drawn between.
+wowee_add_test(test_far_field
+    SOURCES test_far_field.cpp)
+
 # ── test_phase2_surfaces ────────────────────────────────────
 # Unstretched cliffs (E16): flat ground read top-down only; sunlight under
 # water (E15): by day, shallow and near only; soft highlights (E18): stock

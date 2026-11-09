@@ -2171,6 +2171,16 @@ void WMORenderer::cullForRecording(const Camera& camera, const glm::vec3* viewer
     bool doPortalCull = portalCulling && cullingEnabled_;
     bool doDistanceCull = distanceCulling && cullingEnabled_;
 
+    // The far field's silhouettes (setFarReach): a big outdoor group past
+    // the view distance, within the far reach.
+    const float farReachSq = farReach_ * farReach_;
+    const auto keepFarGroup = [&](const auto& group, float distSq) {
+        if (farReach_ <= 0.0f || distSq > farReachSq) return false;
+        if ((group.groupFlags & 0x8) == 0 || (group.groupFlags & 0x2000) != 0) return false;
+        const glm::vec3 size = group.boundingBoxMax - group.boundingBoxMin;
+        return glm::dot(size, size) >= kFarGroupMinSize * kFarGroupMinSize;
+    };
+
     auto cullInstance = [&](size_t instIdx, InstanceDrawList& result) {
         // Retire the slot before anything can return. drawLists_ is reused
         // across frames, so a slot that bails out below would otherwise keep
@@ -2195,7 +2205,8 @@ void WMORenderer::cullForRecording(const Camera& camera, const glm::vec3* viewer
         if (cullingEnabled_) {
             const glm::vec3 closest = glm::clamp(camPos, instance.worldBoundsMin, instance.worldBoundsMax);
             const glm::vec3 toCam = closest - camPos;
-            if (glm::dot(toCam, toCam) > viewDistance_ * viewDistance_) return;
+            const float reach = std::max(viewDistance_, farReach_);
+            if (glm::dot(toCam, toCam) > reach * reach) return;
             if (!frustum.intersectsAABB(instance.worldBoundsMin, instance.worldBoundsMax)) return;
         }
         auto mdlIt = loadedModels.find(instance.modelId);
@@ -2234,7 +2245,8 @@ void WMORenderer::cullForRecording(const Camera& camera, const glm::vec3* viewer
                     const float distSq = glm::dot(closestPoint - camPos, closestPoint - camPos);
                     const float groupViewDistance = doDistanceCull
                         ? std::min(viewDistance_, maxGroupDistance) : viewDistance_;
-                    if (distSq > groupViewDistance * groupViewDistance) {
+                    if (distSq > groupViewDistance * groupViewDistance &&
+                        !keepFarGroup(model.groups[gi], distSq)) {
                         result.distanceCulled++;
                         continue;
                     }
@@ -2339,7 +2351,8 @@ void WMORenderer::cullForRecording(const Camera& camera, const glm::vec3* viewer
                 const float groupViewDistance = doDistanceCull
                     ? std::min(viewDistance_, maxGroupDistance)
                     : viewDistance_;
-                if (distSq > groupViewDistance * groupViewDistance) {
+                if (distSq > groupViewDistance * groupViewDistance &&
+                    !keepFarGroup(model.groups[gi], distSq)) {
                     result.distanceCulled++;
                     continue;
                 }

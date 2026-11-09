@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rendering/far_field.hpp"
 #include "rendering/horizon_detail.hpp"
 #include "rendering/stock_terrain.hpp"
 #include "rendering/vk_utils.hpp"
@@ -8,6 +9,7 @@
 #include <glm/glm.hpp>
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace wowee {
@@ -31,6 +33,11 @@ class Camera;
 /// under the fog colour, through pipelines and a normal buffer made on first
 /// use; off, those are never made and the pass is the stock one.
 ///
+/// With setFarField ("Far field (the reference client)", far_field.hpp) and a colour
+/// atlas from setAtlas, the same tiles are drawn in the land's own colours,
+/// lit and fogged as the ground, from where the chunks stop out to
+/// far_field::kReach; until the atlas arrives the pass is as before.
+///
 /// Owned by TerrainRenderer and recorded on its worker, after the chunks.
 /// setTiles, setFarMesh and setLit are main-thread only; cull and record only
 /// read.
@@ -48,6 +55,13 @@ public:
     /// E11 on or off: on makes the lit pipelines and the normals (main
     /// thread, at once); off releases them once no frame can use them.
     void setLit(bool lit);
+    /// The far field on or off. On makes its pipelines and the normals (main
+    /// thread); off draws as before. The atlas is kept until the map changes.
+    void setFarField(bool on);
+    /// Whether the far field is on and has no atlas yet.
+    [[nodiscard]] bool wantsAtlas() const { return farField_ && !atlas_ && !colorFailed_; }
+    /// The map's colour atlas; empty releases it. Main thread.
+    void setAtlas(far_field::Atlas atlas);
 
     /// The tiles in reach of a far clip and in the view.
     void cull(const Camera& camera, float farClip);
@@ -55,13 +69,17 @@ public:
 
 private:
     bool buildPipeline();
-    VkPipeline buildOne(const char* vertPath, const char* fragPath, bool lit);
+    VkPipeline buildOne(const char* vertPath, const char* fragPath, bool lit,
+                        VkPipelineLayout layout = VK_NULL_HANDLE);
     void releaseBuffers();
     void releaseFarBuffers();
     /// The lit pipelines and the normals, made if missing. False if they
     /// cannot be. Main thread.
     bool ensureLit();
     void releaseLit();
+    /// The far field's pipelines, made if missing. Main thread.
+    bool ensureColor();
+    void releaseAtlas();
 
     struct Tile {
         glm::vec3 center{0.0f};
@@ -104,6 +122,20 @@ private:
     AllocatedBuffer farNormals_{};
     AllocatedBuffer farIndices_{};
     std::vector<uint32_t> farVisible_;
+
+    // The far field (far_field.hpp): its pipelines (made on first use), the
+    // map's colour atlas and the set that binds it.
+    bool farField_ = false;
+    bool colorFailed_ = false;
+    bool drawColor_ = false;                   // this frame's cull chose it
+    float colorGain_ = 1.0f;
+    VkDescriptorSetLayout atlasSetLayout_ = VK_NULL_HANDLE;
+    VkPipelineLayout colorLayout_ = VK_NULL_HANDLE;
+    VkPipeline colorPipeline_ = VK_NULL_HANDLE;
+    VkPipeline colorFarPipeline_ = VK_NULL_HANDLE;
+    struct AtlasGpu;
+    std::shared_ptr<AtlasGpu> atlas_;
+    far_field::AtlasLayout atlasLayout_;
 };
 
 }  // namespace rendering

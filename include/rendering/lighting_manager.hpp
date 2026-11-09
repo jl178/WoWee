@@ -334,6 +334,10 @@ public:
     [[nodiscard]] size_t enhancedLightCount() const { return enhancedProfiles_.size(); }
     /// Long view: the fog may end past the far clip (see update()).
     void setLongView(bool on) { longView_ = on; }
+    /// The far field's reach (far_field::kReach), or 0: with the long view,
+    /// the fog ends at kLongViewFogReach times the farther of it and the
+    /// view distance - Enhanced's 18000 over its 7000-yard horizonClip.
+    void setLongViewReach(float yards) { longViewReach_ = yards; }
     /// Enhanced's fog end over its far clip: 18000 / 7000.
     static constexpr float kLongViewFogReach = 18000.0f / 7000.0f;
     [[nodiscard]] float getFogSkyBlend() const { return fogSkyBlend_; }
@@ -519,6 +523,7 @@ private:
     /// Enhanced's keyframes by 3.3.5 light id * 8 + slot (loadEnhancedProfiles).
     std::map<uint32_t, LightParamsProfile> enhancedProfiles_;
     bool longView_ = false;
+    float longViewReach_ = 0.0f;
     float fogStrength_ = 1.0f;
     /// stock_light::usesFarClipFog for the map being drawn; read by
     /// sampleLightParams, which shapes each light's fog the way 0x7ecd80

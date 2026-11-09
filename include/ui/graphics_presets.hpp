@@ -113,6 +113,9 @@ constexpr rendering::Enhancements enhancedEnhancements() {
     e.sunHaze = true;
     e.bloom = 0.6f;
     e.longView = true;
+    // Enhanced's distance: full detail to its 1900-yard horizonStart (the
+    // view distance below), the far field to its 7000-yard horizonClip.
+    e.farField = true;
     // Enhanced's ground is covered where 3.3.5's shows bare texture between
     // tufts. Its clutter data is 1.12's; the cover comes from its settings
     // (groundEffectDist 200) and models. Wowee's grass field stands in for
@@ -164,10 +167,11 @@ constexpr GraphicsPresetValues kGraphicsPresets[] = {
     /* High   */ {.viewDistance = 1600.0f, .shadowDistance = 350.0f, .antiAliasing = 2, .fxaa = false, .groundClutter = 100, .enh = presetEnhancements(2)},
     /* Ultra  */ {.viewDistance = 2400.0f, .shadowDistance = 500.0f, .antiAliasing = 3, .fxaa = false, .groundClutter = 150, .enh = presetEnhancements(3)},
     /* Classic */ {.viewDistance = kDefaultViewDistance, .shadowDistance = 350.0f, .antiAliasing = 2, .fxaa = false, .groundClutter = 100, .enh = rendering::Enhancements{}},
-    // Enhanced: Ultra's distances and clutter, and FXAA in place of
+    // Enhanced: Ultra's shadows and clutter, Enhanced's 1900-yard detailed
+    // range (horizonStart; the far field carries on), and FXAA in place of
     // multisampling, as Enhanced's own edge filter (CMAA2) is a post pass -
     // which also leaves a one-sample depth for the occlusion pass to read.
-    /* Enhanced */ {.viewDistance = 2400.0f, .shadowDistance = 500.0f, .antiAliasing = 0, .fxaa = true, .groundClutter = 150, .enh = enhancedEnhancements()},
+    /* Enhanced */ {.viewDistance = 1900.0f, .shadowDistance = 500.0f, .antiAliasing = 0, .fxaa = true, .groundClutter = 150, .enh = enhancedEnhancements()},
 };
 
 /// The number of presets, not counting Custom - which is not a set of values

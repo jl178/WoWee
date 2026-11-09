@@ -5,16 +5,33 @@
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_shader.hpp"
+#include "rendering/vk_texture.hpp"
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
 
 namespace wowee {
 namespace rendering {
 
 namespace st = stock_terrain;
+namespace ff = far_field;
+
+/// The far field's atlas on the GPU, with the one descriptor set that binds
+/// it; released whole once no frame can use it.
+struct TerrainHorizon::AtlasGpu {
+    VkTexture texture;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    VkDevice device = VK_NULL_HANDLE;
+    VmaAllocator allocator = VK_NULL_HANDLE;
+    ~AtlasGpu() {
+        if (pool) vkDestroyDescriptorPool(device, pool, nullptr);
+        texture.destroy(device, allocator);
+    }
+};
 
 namespace {
 /// Tiles wholly past this many far clips draw the coarse level.
@@ -34,7 +51,8 @@ bool TerrainHorizon::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLa
     return buildPipeline();
 }
 
-VkPipeline TerrainHorizon::buildOne(const char* vertPath, const char* fragPath, bool lit) {
+VkPipeline TerrainHorizon::buildOne(const char* vertPath, const char* fragPath, bool lit,
+                                    VkPipelineLayout layout) {
     VkDevice device = vkCtx_->getDevice();
     VkShaderModule vert, frag;
     if (!vert.loadFromFile(device, vertPath) || !frag.loadFromFile(device, fragPath)) {
@@ -69,7 +87,7 @@ VkPipeline TerrainHorizon::buildOne(const char* vertPath, const char* fragPath, 
         .setDepthTest(true, true, VK_COMPARE_OP_LESS_OR_EQUAL)
         .setColorBlendAttachment(PipelineBuilder::blendDisabled())
         .setMultisample(vkCtx_->getMsaaSamples())
-        .setLayout(layout_)
+        .setLayout(layout ? layout : layout_)
         .setRenderPass(vkCtx_->getImGuiRenderPass())
         .setDynamicStates(viewportAndScissorDynamic())
         .build(device, vkCtx_->getPipelineCache());
@@ -89,14 +107,21 @@ bool TerrainHorizon::buildPipeline() {
 void TerrainHorizon::recreatePipeline() {
     if (!vkCtx_ || !layout_) return;
     const bool hadLit = litPipeline_ != VK_NULL_HANDLE;
+    const bool hadColor = colorPipeline_ != VK_NULL_HANDLE;
+    destroy(vkCtx_->getDevice(), colorPipeline_);
+    destroy(vkCtx_->getDevice(), colorFarPipeline_);
     destroy(vkCtx_->getDevice(), pipeline_);
     destroy(vkCtx_->getDevice(), farPipeline_);
     destroy(vkCtx_->getDevice(), litPipeline_);
     destroy(vkCtx_->getDevice(), litFarPipeline_);
     buildPipeline();
-    if (hadLit || lit_) {
+    if (hadLit || lit_ || farField_) {
         litFailed_ = false;
         ensureLit();
+    }
+    if (hadColor || farField_) {
+        colorFailed_ = false;
+        ensureColor();
     }
 }
 
@@ -106,9 +131,133 @@ void TerrainHorizon::setLit(bool lit) {
     if (lit) {
         litFailed_ = false;
         ensureLit();
-    } else {
+    } else if (!farField_) {
         releaseLit();
     }
+}
+
+void TerrainHorizon::setFarField(bool on) {
+    if (on == farField_) return;
+    farField_ = on;
+    if (on) {
+        litFailed_ = false;
+        colorFailed_ = false;
+        ensureLit();
+        ensureColor();
+    } else if (!lit_) {
+        releaseLit();
+    }
+}
+
+bool TerrainHorizon::ensureColor() {
+    if (colorFailed_ || !vkCtx_) return false;
+    VkDevice device = vkCtx_->getDevice();
+    if (!atlasSetLayout_) {
+        VkDescriptorSetLayoutBinding b{};
+        b.binding = 0;
+        b.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        b.descriptorCount = 1;
+        b.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        ci.bindingCount = 1;
+        ci.pBindings = &b;
+        if (vkCreateDescriptorSetLayout(device, &ci, nullptr, &atlasSetLayout_) != VK_SUCCESS) {
+            atlasSetLayout_ = VK_NULL_HANDLE;
+            colorFailed_ = true;
+            return false;
+        }
+    }
+    if (!colorLayout_) {
+        VkPushConstantRange push{};
+        push.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        push.offset = 0;
+        push.size = 2 * sizeof(glm::vec4);
+        colorLayout_ = createPipelineLayout(device, {perFrameLayout_, atlasSetLayout_}, {push});
+        if (!colorLayout_) {
+            colorFailed_ = true;
+            return false;
+        }
+    }
+    if (!colorPipeline_ || !colorFarPipeline_) {
+        colorPipeline_ = buildOne("assets/shaders/terrain_horizon_color.vert.spv",
+                                  "assets/shaders/terrain_horizon_color.frag.spv", true, colorLayout_);
+        colorFarPipeline_ = buildOne("assets/shaders/terrain_horizon_color.vert.spv",
+                                     "assets/shaders/terrain_horizon_far_color.frag.spv", true, colorLayout_);
+        if (!colorPipeline_ || !colorFarPipeline_) {
+            LOG_WARNING("TerrainHorizon: far field shaders missing - the horizon stays as it was");
+            colorFailed_ = true;
+            return false;
+        }
+    }
+    // WOWEE_FARFIELD_GAIN: the minimap colour's scale, for matching the
+    // near ground by eye.
+    if (const char* g = std::getenv("WOWEE_FARFIELD_GAIN"); g && *g) {
+        colorGain_ = std::clamp(std::strtof(g, nullptr), 0.1f, 4.0f);
+    }
+    return true;
+}
+
+void TerrainHorizon::releaseAtlas() {
+    if (!atlas_) return;
+    std::shared_ptr<AtlasGpu> old = std::move(atlas_);
+    atlas_.reset();
+    atlasLayout_ = {};
+    if (vkCtx_) vkCtx_->deferAfterAllFrameFences([old]() mutable { old.reset(); });
+}
+
+void TerrainHorizon::setAtlas(ff::Atlas atlas) {
+    releaseAtlas();
+    if (!vkCtx_ || atlas.empty()) return;
+    if (!ensureColor()) return;
+    auto gpu = std::make_shared<AtlasGpu>();
+    gpu->device = vkCtx_->getDevice();
+    gpu->allocator = vkCtx_->getAllocator();
+    std::vector<const uint8_t*> data;
+    std::vector<uint32_t> sizes;
+    for (const auto& level : atlas.levels) {
+        data.push_back(level.data());
+        sizes.push_back(static_cast<uint32_t>(level.size()));
+    }
+    const auto w = static_cast<uint32_t>(atlas.layout.width());
+    const auto h = static_cast<uint32_t>(atlas.layout.height());
+    if (!gpu->texture.uploadMips(*vkCtx_, data.data(), sizes.data(), static_cast<uint32_t>(data.size()), w, h,
+                                 VK_FORMAT_BC1_RGB_UNORM_BLOCK) ||
+        !gpu->texture.createSampler(gpu->device, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                                    VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 4.0f)) {
+        LOG_WARNING("TerrainHorizon: far field atlas upload failed");
+        return;
+    }
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
+    VkDescriptorPoolCreateInfo pci{};
+    pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pci.maxSets = 1;
+    pci.poolSizeCount = 1;
+    pci.pPoolSizes = &ps;
+    if (vkCreateDescriptorPool(gpu->device, &pci, nullptr, &gpu->pool) != VK_SUCCESS) {
+        gpu->pool = VK_NULL_HANDLE;
+        return;
+    }
+    VkDescriptorSetAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    ai.descriptorPool = gpu->pool;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &atlasSetLayout_;
+    if (vkAllocateDescriptorSets(gpu->device, &ai, &gpu->set) != VK_SUCCESS) return;
+    const VkDescriptorImageInfo info = gpu->texture.descriptorInfo();
+    VkWriteDescriptorSet wr{};
+    wr.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wr.dstSet = gpu->set;
+    wr.dstBinding = 0;
+    wr.descriptorCount = 1;
+    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr.pImageInfo = &info;
+    vkUpdateDescriptorSets(gpu->device, 1, &wr, 0, nullptr);
+    atlas_ = std::move(gpu);
+    atlasLayout_ = atlas.layout;
+    size_t bytes = 0;
+    for (uint32_t sz : sizes) bytes += sz;
+    LOG_INFO("TerrainHorizon: far field atlas ", w, "x", h, ", ", bytes / 1024, " KB");
 }
 
 void TerrainHorizon::releaseLit() {
@@ -229,7 +378,7 @@ void TerrainHorizon::setFarMesh(horizon_detail::FarMesh mesh) {
     far_.indices.clear();
     far_.indices.shrink_to_fit();
     LOG_INFO("TerrainHorizon: ", far_.objects.size(), " low-detail WMOs");
-    if (lit_) ensureLit();
+    if (lit_ || farField_) ensureLit();
 }
 
 void TerrainHorizon::shutdown() {
@@ -245,6 +394,12 @@ void TerrainHorizon::shutdown() {
     destroy(device, farPipeline_);
     destroy(device, litPipeline_);
     destroy(device, litFarPipeline_);
+    destroy(device, colorPipeline_);
+    destroy(device, colorFarPipeline_);
+    destroy(device, colorLayout_);
+    atlas_.reset();
+    if (atlasSetLayout_) vkDestroyDescriptorSetLayout(device, atlasSetLayout_, nullptr);
+    atlasSetLayout_ = VK_NULL_HANDLE;
     far_ = {};
     source_.clear();
     destroy(device, layout_);
@@ -304,7 +459,7 @@ void TerrainHorizon::setTiles(const std::vector<st::WdlTile>& wdl) {
     }
     LOG_INFO("TerrainHorizon: ", tiles_.size(), " WDL tiles, ", verts.size(), " vertices, ",
              idx.size() / 3, " triangles");
-    if (lit_) ensureLit();
+    if (lit_ || farField_) ensureLit();
 }
 
 void TerrainHorizon::cull(const Camera& camera, float farClip) {
@@ -313,10 +468,15 @@ void TerrainHorizon::cull(const Camera& camera, float farClip) {
     farVisible_.clear();
     // The lit pipelines and normals are made on the main thread (setLit,
     // setTiles, setFarMesh); this only looks.
-    drawLit_ = lit_ && farClip > 0.0f && litPipeline_ && litFarPipeline_ &&
-               (tiles_.empty() || normals_.buffer) && (far_.objects.empty() || farNormals_.buffer);
+    const bool normalsReady = litPipeline_ && litFarPipeline_ && (tiles_.empty() || normals_.buffer) &&
+                              (far_.objects.empty() || farNormals_.buffer);
+    drawLit_ = lit_ && farClip > 0.0f && normalsReady;
+    // The far field: from where the chunks stop (by distance in the plane)
+    // to its reach, once its atlas is here.
+    drawColor_ = farField_ && farClip > 0.0f && normalsReady && colorPipeline_ && colorFarPipeline_ && atlas_;
     if (!pipeline_ || !farPipeline_) return;
-    depthRange_ = st::horizonDepthRange(farClip);
+    depthRange_ = drawColor_ ? glm::vec2(std::max(farClip - ff::kNearInset, 0.0f), std::max(ff::kReach, farClip))
+                             : st::horizonDepthRange(farClip);
     farClip_ = farClip;
     // The low-detail WMOs, by the tiles' rule (reach and view).
     if (!far_.objects.empty() && farClip > 0.0f) {
@@ -345,7 +505,7 @@ void TerrainHorizon::cull(const Camera& camera, float farClip) {
         if (d + t.radius < depthRange_.x || d - t.radius > depthRange_.y) continue;
         if (!frustum.intersectsSphere(t.center, t.radius)) continue;
         // Its nearest view depth: past the near limit, it needs no discard.
-        const float nearDepth = -(view * glm::vec4(t.center, 1.0f)).z - t.radius;
+        const float nearDepth = drawColor_ ? d - t.radius : -(view * glm::vec4(t.center, 1.0f)).z - t.radius;
         (nearDepth >= depthRange_.x ? visibleFar_ : visible_).push_back(i);
         // Past two far clips a tile is a few dozen pixels across, and the
         // full mesh's thousand triangles were most of what the horizon cost.
@@ -360,6 +520,14 @@ void TerrainHorizon::cull(const Camera& camera, float farClip) {
     };
     std::sort(visible_.begin(), visible_.end(), nearer);
     std::sort(visibleFar_.begin(), visibleFar_.end(), nearer);
+    // WOWEE_FARFIELD_DEBUG=1: what the pass draws, every few seconds.
+    static const bool kDebug = std::getenv("WOWEE_FARFIELD_DEBUG") != nullptr;
+    static uint32_t debugFrame = 0;
+    if (kDebug && (++debugFrame % 600) == 0) {
+        LOG_INFO("TerrainHorizon: farField=", farField_, " color=", drawColor_, " lit=", drawLit_,
+                 " atlas=", atlas_ != nullptr, " range=(", depthRange_.x, ", ", depthRange_.y, ") tiles ",
+                 visible_.size(), " + ", visibleFar_.size(), ", wmos ", farVisible_.size());
+    }
 }
 
 void TerrainHorizon::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) const {
@@ -367,16 +535,29 @@ void TerrainHorizon::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) co
     const bool farWmos = !farVisible_.empty() && farPositions_.buffer && farIndices_.buffer;
     if (!tiles && !farWmos) return;
     // E11: the shaded pipelines, with the normals as a second stream.
-    const bool lit = drawLit_ && litPipeline_ && litFarPipeline_;
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &perFrameSet, 0,
-                            nullptr);
-    // z, which the stock shader does not read: the far clip, for the lit haze.
-    const glm::vec4 push(depthRange_, farClip_, 0.0f);
-    vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+    const bool color = drawColor_ && atlas_ && atlas_->set;
+    const bool lit = color || (drawLit_ && litPipeline_ && litFarPipeline_);
+    VkPipeline nearPipe = color ? colorPipeline_ : (lit ? litPipeline_ : pipeline_);
+    VkPipeline farPipe = color ? colorFarPipeline_ : (lit ? litFarPipeline_ : farPipeline_);
+    if (color) {
+        const VkDescriptorSet sets[2] = {perFrameSet, atlas_->set};
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, colorLayout_, 0, 2, sets, 0, nullptr);
+        const glm::vec4 push[2] = {
+            glm::vec4(depthRange_, farClip_, colorGain_),
+            glm::vec4(static_cast<float>(atlasLayout_.minX), static_cast<float>(atlasLayout_.minY),
+                      static_cast<float>(atlasLayout_.tilesW), static_cast<float>(atlasLayout_.tilesH))};
+        vkCmdPushConstants(cmd, colorLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), push);
+    } else {
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &perFrameSet, 0,
+                                nullptr);
+        // z, which the stock shader does not read: the far clip, for the lit haze.
+        const glm::vec4 push(depthRange_, farClip_, 0.0f);
+        vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+    }
     VkDeviceSize offset = 0;
     if (farWmos) {
         // The buildings first: they stand in front of the ground behind them.
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, lit ? litPipeline_ : pipeline_);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, nearPipe);
         vkCmdBindVertexBuffers(cmd, 0, 1, &farPositions_.buffer, &offset);
         if (lit) vkCmdBindVertexBuffers(cmd, 1, 1, &farNormals_.buffer, &offset);
         vkCmdBindIndexBuffer(cmd, farIndices_.buffer, 0, VK_INDEX_TYPE_UINT32);
@@ -402,8 +583,8 @@ void TerrainHorizon::record(VkCommandBuffer cmd, VkDescriptorSet perFrameSet) co
             }
         }
     };
-    draw(lit ? litPipeline_ : pipeline_, visible_);
-    draw(lit ? litFarPipeline_ : farPipeline_, visibleFar_);
+    draw(nearPipe, visible_);
+    draw(farPipe, visibleFar_);
 }
 
 }  // namespace rendering

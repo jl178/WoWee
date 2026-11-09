@@ -37,6 +37,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/euler_angles.hpp>
+#include <algorithm>
 #include <cmath>
 #include <cctype>
 #include <cstdlib>
@@ -219,6 +220,13 @@ void TerrainManager::loadMapWideData() {
     const std::vector<uint8_t> wdlData = assetManager->readFile(base + ".wdl");
     if (!wdlData.empty()) wdl = stock_terrain::parseWdl(wdlData);
     terrainRenderer->setHorizonTiles(wdl);
+    // The far field's colour is this map's; the last map's atlas goes, and
+    // pollFarFieldAtlas builds this one when the horizon first wants it.
+    wdlTileCoords_.clear();
+    for (const auto& t : wdl) wdlTileCoords_.emplace_back(t.tileX, t.tileY);
+    wdlLayout_ = far_field::layoutFor(wdl);
+    farAtlasFor_.clear();
+    terrainRenderer->setHorizonAtlas(far_field::Atlas{});
     // And the low-detail buildings it places (MWMO/MODF; Northrend's
     // cathedral, Valgarde and the oil platform), drawn with them.
     terrainRenderer->setHorizonWmos(wdlData.empty() ? horizon_detail::FarMesh{} : loadHorizonWmos(wdlData));
@@ -280,6 +288,130 @@ horizon_detail::FarMesh TerrainManager::loadHorizonWmos(const std::vector<uint8_
     return mesh;
 }
 
+far_field::Atlas TerrainManager::buildFarFieldAtlas(pipeline::AssetManager* assets, std::string map,
+                                                    far_field::AtlasLayout layout,
+                                                    std::vector<std::pair<int, int>> tiles) {
+    namespace ff = far_field;
+    const auto t0 = std::chrono::steady_clock::now();
+    if (!assets || layout.empty()) return {};
+    const auto lower = [](std::string v) {
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return v;
+    };
+    const auto stripBlp = [](std::string& v) {
+        if (v.size() > 4 && (v.compare(v.size() - 4, 4, ".blp") == 0 || v.compare(v.size() - 4, 4, ".BLP") == 0))
+            v.resize(v.size() - 4);
+    };
+    // md5translate.trs: "<map>\map<x>_<y>.blp<TAB><hash>.blp" lines under
+    // "dir:" headers, as Minimap::parseTRS reads it.
+    std::unordered_map<std::string, std::string> trs;
+    {
+        const std::vector<uint8_t> data = assets->readFile("Textures\\Minimap\\md5translate.trs");
+        const std::string prefix = lower(map) + "\\";
+        std::string line;
+        size_t i = 0;
+        while (i < data.size()) {
+            size_t j = i;
+            while (j < data.size() && data[j] != '\n') ++j;
+            line.assign(reinterpret_cast<const char*>(data.data()) + i, j - i);
+            i = j + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const size_t tab = line.find('\t');
+            if (tab == std::string::npos) continue;
+            std::string key = lower(line.substr(0, tab));
+            if (key.compare(0, prefix.size(), prefix) != 0) continue;
+            stripBlp(key);
+            std::string hash = line.substr(tab + 1);
+            stripBlp(hash);
+            trs[key.substr(prefix.size())] = std::move(hash);
+        }
+    }
+    // WOWEE_FARFIELD_TRANSPOSE=1 lays each picture in turned over its
+    // diagonal (a check of the orientation against the near ground).
+    static const bool kTranspose = core::envFlagEnabled("WOWEE_FARFIELD_TRANSPOSE", false);
+    constexpr int T = ff::kTexelsPerTile;
+    const int W = layout.width(), H = layout.height();
+    std::vector<uint8_t> rgba(static_cast<size_t>(W) * H * 4, 0);
+    std::vector<uint8_t> found(static_cast<size_t>(layout.tilesW) * layout.tilesH, 0);
+    std::vector<uint8_t> cell(static_cast<size_t>(T) * T * 4);
+    uint64_t sum[3] = {0, 0, 0};
+    uint64_t sumN = 0;
+    int got = 0;
+    for (const auto& [tx, ty] : tiles) {
+        auto it = trs.find("map" + std::to_string(tx) + "_" + std::to_string(ty));
+        if (it == trs.end()) continue;
+        const pipeline::BLPImage img = assets->loadTexture("Textures\\Minimap\\" + it->second + ".blp");
+        if (!img.isValid() || img.data.empty() || img.width % T != 0 || img.height % T != 0) continue;
+        ff::boxDownsample(img.data.data(), img.width, img.height, T, cell.data(), T, 0, 0);
+        const int ox = (tx - layout.minX) * T, oy = (ty - layout.minY) * T;
+        for (int y = 0; y < T; ++y) {
+            for (int x = 0; x < T; ++x) {
+                const size_t src = (static_cast<size_t>(kTranspose ? x : y) * T + (kTranspose ? y : x)) * 4;
+                const uint8_t* c = &cell[src];
+                uint8_t* o = &rgba[(static_cast<size_t>(oy + y) * W + ox + x) * 4];
+                o[0] = c[0];
+                o[1] = c[1];
+                o[2] = c[2];
+                o[3] = 255;
+                sum[0] += c[0];
+                sum[1] += c[1];
+                sum[2] += c[2];
+            }
+        }
+        sumN += static_cast<uint64_t>(T) * T;
+        found[static_cast<size_t>(ty - layout.minY) * layout.tilesW + (tx - layout.minX)] = 1;
+        ++got;
+    }
+    if (got == 0) {
+        LOG_WARNING("Far field: no minimap tiles for ", map);
+        return {};
+    }
+    // Tiles without a picture (open sea, mostly) take the mean, so the
+    // filtering at a coast does not pull it toward black.
+    const uint8_t mean[3] = {static_cast<uint8_t>(sum[0] / sumN), static_cast<uint8_t>(sum[1] / sumN),
+                             static_cast<uint8_t>(sum[2] / sumN)};
+    for (int ty = 0; ty < layout.tilesH; ++ty) {
+        for (int tx = 0; tx < layout.tilesW; ++tx) {
+            if (found[static_cast<size_t>(ty) * layout.tilesW + tx]) continue;
+            for (int y = 0; y < T; ++y) {
+                for (int x = 0; x < T; ++x) {
+                    uint8_t* o = &rgba[(static_cast<size_t>(ty * T + y) * W + tx * T + x) * 4];
+                    o[0] = mean[0];
+                    o[1] = mean[1];
+                    o[2] = mean[2];
+                    o[3] = 255;
+                }
+            }
+        }
+    }
+    ff::Atlas atlas = ff::encodeAtlas(layout, std::move(rgba));
+    atlas.tilesFound = got;
+    LOG_INFO("Far field atlas for ", map, ": ", got, " of ", tiles.size(), " minimap tiles, ", W, "x", H,
+             " BC1, ",
+             std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count(), " ms");
+    return atlas;
+}
+
+void TerrainManager::pollFarFieldAtlas() {
+    if (!terrainRenderer || !assetManager) return;
+    if (farAtlasJob_.valid()) {
+        if (farAtlasJob_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+        far_field::Atlas atlas = farAtlasJob_.get();
+        // A map changed while it was being built: it is thrown away and the
+        // new map's started below.
+        if (farAtlasJobMap_ == mapWideDataFor_) {
+            farAtlasFor_ = farAtlasJobMap_;
+            terrainRenderer->setHorizonAtlas(std::move(atlas));
+        }
+    }
+    if (!terrainRenderer->horizonWantsAtlas() || farAtlasFor_ == mapWideDataFor_ || wdlTileCoords_.empty())
+        return;
+    farAtlasJobMap_ = mapWideDataFor_;
+    farAtlasJob_ = std::async(std::launch::async, &TerrainManager::buildFarFieldAtlas, assetManager,
+                              mapWideDataFor_, wdlLayout_, wdlTileCoords_);
+}
+
 void TerrainManager::markTerrainMaterial(pipeline::TerrainMesh& mesh) const {
     mesh.bigAlpha = mapBigAlpha_.load();
     // With specular on the client loads every tileset as its `_s` file, whose
@@ -303,6 +435,7 @@ std::vector<std::string> TerrainManager::drawnTerrainTextures(const pipeline::Te
 
 void TerrainManager::update(const Camera& camera, float deltaTime) {
     if (mapWideDataFor_ != mapName) loadMapWideData();
+    pollFarFieldAtlas();
     ZoneScopedN("TerrainManager::update");
     lastPhases_ = UpdatePhases{};
     if (!streamingEnabled || !assetManager || !terrainRenderer) {

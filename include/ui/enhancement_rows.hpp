@@ -754,6 +754,18 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "LightingManager: the frame fog's end at 18/7 of the view distance "
                  "on maps below 530",
      .asBool = &Enhancements::longView},
+    {.key = "farfield", .label = "Far field (the reference client)", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
+     .tooltip = "Past the view distance the land goes on in its own colours\n"
+                "to the reference client's 7000 yards, lit and hazed like the ground\n"
+                "near you, with the outlines of big buildings. Off is the\n"
+                "original: a flat fog-coloured silhouette.",
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "far_field",
+     .controls = "TerrainHorizon's far-field pipelines and the minimap colour atlas "
+                 "(TerrainManager, built on first use per map); WMORenderer's far "
+                 "reach for big outdoor groups; with the long view, the fog's end at "
+                 "18/7 of the far reach",
+     .asBool = &Enhancements::farField},
 
     // ------------------------------------------------------------ Experimental
     {.key = "grassenabled", .label = "Grass (experimental)", .kind = SettingKind::Bool,

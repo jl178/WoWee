@@ -7,6 +7,8 @@
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "rendering/horizon_detail.hpp"
+#include "rendering/far_field.hpp"
+#include <future>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -536,6 +538,18 @@ private:
     void loadMapWideData();
     /// The WDL's low-detail WMOs as one world-space mesh (horizon_detail.hpp).
     horizon_detail::FarMesh loadHorizonWmos(const std::vector<uint8_t>& wdlData) const;
+    /// The far field's colour (far_field.hpp): the map's minimap tiles in one
+    /// BC1 atlas, built on an IO worker the first time the renderer's
+    /// horizon wants it for this map, and handed over when done.
+    std::vector<std::pair<int, int>> wdlTileCoords_;
+    far_field::AtlasLayout wdlLayout_;
+    std::string farAtlasFor_;
+    std::string farAtlasJobMap_;
+    std::future<far_field::Atlas> farAtlasJob_;
+    void pollFarFieldAtlas();
+    static far_field::Atlas buildFarFieldAtlas(pipeline::AssetManager* assets, std::string mapName,
+                                               far_field::AtlasLayout layout,
+                                               std::vector<std::pair<int, int>> tiles);
     /// A tile's blend mode and `_s` tilesets (stock_terrain); worker thread.
     void markTerrainMaterial(pipeline::TerrainMesh& mesh) const;
     /// The tileset files a tile is drawn with, by MTEX index.

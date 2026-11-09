@@ -226,6 +226,14 @@ public:
     void setHorizonWmos(horizon_detail::FarMesh mesh);
     /// "Lit far horizon" (E11): shade the horizon with the sun under the fog.
     void setHorizonLit(bool lit);
+    /// "Far field (the reference client)" (far_field.hpp): the horizon in the land's
+    /// own colours, lit and fogged as the ground, out to far_field::kReach.
+    void setHorizonFarField(bool on);
+    /// Whether the horizon would draw a colour atlas it does not have yet
+    /// (TerrainManager builds it). Main thread.
+    bool horizonWantsAtlas() const;
+    /// The map's colour atlas (empty clears it). Main thread.
+    void setHorizonAtlas(far_field::Atlas atlas);
     /// "Unstretched cliffs" (E16): draw the ground with terrain_cliff.frag,
     /// which reads steep pixels' layers from the side as well. Its pipelines
     /// are made when the row first goes on and let go when it goes off; off,

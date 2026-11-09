@@ -115,7 +115,11 @@ TEST_CASE("Enhanced preset: Ultra plus the Enhanced rows, on one-sample depth", 
     // The occlusion pass reads a one-sample depth: no multisampling.
     CHECK(f.antiAliasing == 0);
     CHECK(f.fxaa);
-    CHECK(f.viewDistance >= ultra.viewDistance);
+    // Enhanced's detailed range (horizonStart 1900) and its far field past
+    // it to 7000 (far_field.hpp), with the fog over that reach.
+    CHECK(f.viewDistance == 1900.0f);
+    CHECK(f.shadowDistance >= ultra.shadowDistance);
+    CHECK(f.enh.farField);
     // Neither new row is in the ladder: they are what the Enhanced row adds.
     for (int i = 0; i < kClassicPresetIndex; ++i) {
         CHECK_FALSE(kGraphicsPresets[i].enh.ambientOcclusion);
@@ -125,6 +129,7 @@ TEST_CASE("Enhanced preset: Ultra plus the Enhanced rows, on one-sample depth", 
         CHECK_FALSE(kGraphicsPresets[i].enh.sunHaze);
         CHECK(kGraphicsPresets[i].enh.bloom == 0.0f);
         CHECK_FALSE(kGraphicsPresets[i].enh.longView);
+        CHECK_FALSE(kGraphicsPresets[i].enh.farField);
     }
 }
 

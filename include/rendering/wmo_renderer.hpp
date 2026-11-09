@@ -382,6 +382,12 @@ public:
     bool isDistanceCullingEnabled() const { return distanceCulling; }
     float getMaxGroupDistance() const { return maxGroupDistance; }
     void setViewDistance(float distance) { viewDistance_ = std::clamp(distance, 400.0f, 2400.0f); }
+    /// "Far field (the reference client)": past the view distance and out to `yards`,
+    /// the big outdoor groups of the buildings already loaded (MOGP 0x8, at
+    /// least kFarGroupMinSize across) are still drawn - their silhouettes on
+    /// the far field. 0 is stock: nothing past the view distance.
+    void setFarReach(float yards) { farReach_ = std::max(yards, 0.0f); }
+    static constexpr float kFarGroupMinSize = 40.0f;
 
     /**
      * Get number of groups culled by portals last frame
@@ -1242,6 +1248,7 @@ private:
     float maxGroupDistance = 500.0f;
     float maxGroupDistanceSq = 250000.0f;  // maxGroupDistance^2
     float viewDistance_ = 1200.0f;
+    float farReach_ = 0.0f;   // setFarReach
     // Atomic because recordPart adds to it from more than one thread.
     std::atomic<uint32_t> lastDrawCalls{0};
     mutable uint32_t lastPortalCulledGroups = 0;

@@ -25,5 +25,12 @@ void main() {
 #ifdef HORIZON_LIT
     vNormal = aNormal.xyz;
 #endif
+#ifdef HORIZON_COLOR
+    // The far field a little further along its view ray (far_field::
+    // kDepthPushBack): the same pixel, but behind the real ground where the
+    // two overlap at the far clip.
+    gl_Position = projection * vec4(v.xyz * 1.004, 1.0);
+#else
     gl_Position = projection * v;
+#endif
 }

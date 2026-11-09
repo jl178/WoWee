@@ -501,6 +501,18 @@ void TerrainRenderer::setHorizonLit(bool lit) {
     if (horizon_) horizon_->setLit(lit);
 }
 
+void TerrainRenderer::setHorizonFarField(bool on) {
+    if (horizon_) horizon_->setFarField(on);
+}
+
+bool TerrainRenderer::horizonWantsAtlas() const {
+    return horizon_ && horizon_->wantsAtlas();
+}
+
+void TerrainRenderer::setHorizonAtlas(far_field::Atlas atlas) {
+    if (horizon_) horizon_->setAtlas(std::move(atlas));
+}
+
 void TerrainRenderer::shutdown() {
     LOG_INFO("Shutting down terrain renderer");
 

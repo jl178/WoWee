@@ -1658,6 +1658,7 @@ void Renderer::applyEnhancementsToSubsystems() {
         lightingManager->setFogSkyBlend(e.fogSkyBlend);
         lightingManager->setEnhancedDaylight(e.enhancedDaylight);
         lightingManager->setLongView(e.longView);
+        lightingManager->setLongViewReach(e.farField ? far_field::kReach : 0.0f);
     }
 
     // Water, weather and motion. The water and swim switches are handed on
@@ -1674,6 +1675,17 @@ void Renderer::applyEnhancementsToSubsystems() {
     // enh_ each frame (updateCorpseSettle, the weather update); the lit
     // horizon (E11) goes to the terrain's horizon.
     if (terrainRenderer) terrainRenderer->setHorizonLit(e.horizonDetail);
+    // The far field (far_field.hpp): the coloured horizon, the buildings'
+    // silhouettes past the view distance, and the tiles loaded for them.
+    if (terrainRenderer) terrainRenderer->setHorizonFarField(e.farField);
+    // WOWEE_FARFIELD_WMO_REACH=<yards> overrides the reach, for measuring.
+    static const float kWmoReach = static_cast<float>(
+        core::envIntClamped("WOWEE_FARFIELD_WMO_REACH", static_cast<int>(kFarFieldWmoReach), 0, 6000));
+    if (wmoRenderer) wmoRenderer->setFarReach(e.farField ? kWmoReach : 0.0f);
+    if (farField_ != e.farField) {
+        farField_ = e.farField;
+        setViewDistance(viewDistance_);
+    }
 
     // Experimental.
     setGrassEnabled(e.grass);
@@ -5448,7 +5460,10 @@ void Renderer::setViewDistance(float distance) {
 
 int Renderer::getTerrainLoadRadius() const {
     constexpr float kAdtTileSize = core::coords::TILE_SIZE;
-    return glm::clamp(static_cast<int>(std::ceil(viewDistance_ / kAdtTileSize)) + 1, 2, 6);
+    // The far field's building silhouettes stand on the loaded tiles: six
+    // rings hold the 3000 yards they reach.
+    const int floor = farField_ ? 6 : 2;
+    return glm::clamp(static_cast<int>(std::ceil(viewDistance_ / kAdtTileSize)) + 1, floor, 6);
 }
 void Renderer::renderHUD() {
     if (currentCmd == VK_NULL_HANDLE) return;

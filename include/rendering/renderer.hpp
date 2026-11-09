@@ -670,6 +670,10 @@ public:
         terrainRelief_ = enabled ? glm::clamp(strength / 0.8f, 0.0f, 2.5f) : 0.0f;
     }
     int getTerrainLoadRadius() const;
+    /// "Far field (the reference client)" is on (applyEnhancements): the buildings'
+    /// silhouettes reach kFarFieldWmoReach, so six rings of tiles stay loaded.
+    bool farField_ = false;
+    static constexpr float kFarFieldWmoReach = 3000.0f;
     int getTerrainUnloadRadius() const { return getTerrainLoadRadius() + 3; }
     void setMsaaSamples(VkSampleCountFlagBits samples);
 

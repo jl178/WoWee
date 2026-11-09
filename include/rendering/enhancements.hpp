@@ -125,6 +125,13 @@ struct Enhancements {
     /// and the sun haze carry the distance. Off is stock: the fog ends at
     /// the far clip.
     bool  longView = false;
+    /// Past the view distance the land goes on in its own colours to
+    /// Enhanced's 7000-yard horizonClip (far_field.hpp): the WDL heights
+    /// coloured by the minimap, lit and fogged as the ground, and the big
+    /// outdoor parts of the loaded buildings out to 3000 yards. With the
+    /// long view, the fog ends at 18/7 of that reach, as Enhanced's. Off is
+    /// stock: the fog-coloured WDL silhouette.
+    bool  farField = false;
 
     // ---- Water and weather -------------------------------------------------
     bool  shorelineFoam = false;

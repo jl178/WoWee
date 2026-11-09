@@ -560,6 +560,9 @@ function(compile_shaders TARGET_NAME)
         "terrain_horizon.vert.glsl|terrain_horizon_lit.vert.spv|-DHORIZON_LIT"
         "terrain_horizon.frag.glsl|terrain_horizon_lit.frag.spv|-DHORIZON_LIT"
         "terrain_horizon_far.frag.glsl|terrain_horizon_far_lit.frag.spv|-DHORIZON_LIT"
+        "terrain_horizon.vert.glsl|terrain_horizon_color.vert.spv|-DHORIZON_LIT -DHORIZON_COLOR"
+        "terrain_horizon.frag.glsl|terrain_horizon_color.frag.spv|-DHORIZON_LIT -DHORIZON_COLOR"
+        "terrain_horizon_far.frag.glsl|terrain_horizon_far_color.frag.spv|-DHORIZON_LIT -DHORIZON_COLOR"
         "character.vert.glsl|character_tess.vert.spv|-DCHAR_TESS"
     )
     foreach(VARIANT ${SHADER_VARIANTS})
