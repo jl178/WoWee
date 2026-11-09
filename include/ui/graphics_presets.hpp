@@ -106,7 +106,9 @@ constexpr rendering::Enhancements presetEnhancements(int level /* 0 Low .. 3 Ult
 /// reflections are the HD water and the sky in it.
 constexpr rendering::Enhancements enhancedEnhancements() {
     rendering::Enhancements e = presetEnhancements(3);
-    e.ambientOcclusion = true;
+    // Ambient occlusion stays off: the screen-space version darkens rims
+    // around everything (Jered, 2026-11-09); on again only once it is subtle
+    // and clean against Enhanced's captures.
     e.colorGrade = true;
     e.enhancedDaylight = true;
     e.fillLight = true;

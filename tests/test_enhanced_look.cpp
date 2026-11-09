@@ -102,7 +102,7 @@ TEST_CASE("Enhanced preset: Ultra plus the Enhanced rows, on one-sample depth", 
     using namespace wowee::ui;
     const GraphicsPresetValues& f = kGraphicsPresets[kEnhancedPresetIndex];
     const GraphicsPresetValues& ultra = kGraphicsPresets[kClassicPresetIndex - 1];
-    CHECK(f.enh.ambientOcclusion);
+    CHECK_FALSE(f.enh.ambientOcclusion);  // off until clean (graphics_presets.hpp)
     CHECK(f.enh.colorGrade);
     CHECK(f.enh.enhancedDaylight);
     CHECK(f.enh.fillLight);
