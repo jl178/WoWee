@@ -447,7 +447,7 @@ grade, Enhanced's daylight, the Medium light volume at the stock mist
 (High's volume cost 2.5 ms more GPU at 1280x540 for little visible
 difference side by side; twice the mist was too foggy in play, section 8c),
 soft particles (Enhanced's "Depth Based
-Opacity"), HD water and sky reflections (its PBR water and SSR); 2400-yard
+Opacity"), HD water and sky reflections (its PBR water and SSR); 1900-yard (Enhanced's horizonStart, with the far field past it)
 view distance, 500-yard shadows, ground clutter 150%, and FXAA instead of
 MSAA (Enhanced's anti-aliasing is CMAA2, a post filter, and the occlusion
 pass needs a one-sample depth). Round 2 added the fill light, the sun haze
@@ -487,7 +487,14 @@ against its capture. These four rows live on their own settings page,
   detail, which 2400 already covers, and past that both clients draw the
   low-detail horizon. Raising the detailed range past 2400 means a terrain
   load radius of seven or more tiles (225 tiles resident against 169) and
-  was not measured here.
+  was not measured here. The far field (below) replaced that plan.
+- **Far field (the reference client)** row (`farfield`, on the Enhanced page, E39 in
+  `docs/enhancements-plan.md`): Enhanced's distance as it is built - full
+  detail to 1900 yd (the preset's view distance now), then the WDL heights
+  in the minimap's colours, lit and fogged as the ground, to 7000 yd, with
+  the loaded buildings' big outdoor groups to 3000; with the long view the
+  fog ends at 18/7 of 7000, Enhanced's 18000. Within the noise on the GPU
+  and the CPU in A/B; see E39.
 
 ## 8c. Too foggy in play (round 2 as Jered first played it)
 
@@ -553,8 +560,10 @@ What still separates the two pictures, largest first:
    groundEffectDist 200) is denser and taller than Wowee's at 150%.
 4. Per-zone light keyframes: ported for 198 of 209 lights (section 2b);
    ZoneLight polygons where 3.3.5 has no light of its own are not.
-5. Draw distance: Enhanced draws terrain to 7000 yd with fog ending at 18000;
-   Wowee stops at 2400 and its fog ends at the far clip.
+5. Draw distance: Enhanced draws terrain to 7000 yd with fog ending at 18000.
+   With the far field the Enhanced preset does too (low detail past 1900);
+   what is left is the light data's own fog, which in 3.3.5 ends short of
+   1900 in most zones (Enhanced's own keyframes, section 2b, are thinner).
 
 ## 9b. An HDR/linear path - scoped, not built
 

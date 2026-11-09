@@ -2835,6 +2835,72 @@ Done (2026-11-07): the row `hdwater`, "HD water" (the Sky page, after
 - **Off is stock.** Nothing drawn; the swing times are kept either way.
 - **Cost.** Two ImGui rectangles and two labels in combat.
 
+### E39. Far field (the reference client)
+
+- **Stock.** The WDL heights past the far clip, every pixel the fog colour
+  (terrain.md section 8): right for a fog that ends at the far clip, a grey
+  cut-out under a fog that ends past it. Enhanced draws full detail to its
+  `horizonStart` 1900 and a low-detail horizon to `horizonClip` 7000 under
+  a fog that ends at 18000 (`docs/re/enhanced-lighting.md` section 1).
+- **What.** Row `farfield` (Enhanced page), Enhanced preset on, recommended
+  off. `rendering/far_field.hpp` (pure, `test_far_field`):
+  - **Ground.** The same WDL mesh (`TerrainHorizon`), drawn by
+    `terrain_horizon_color.vert/.frag/_far_color.frag` (`HORIZON_COLOR`)
+    from where the chunks stop to 7000 yd. Colour: the map's minimap tiles
+    (the only colour the client ships for land it has not loaded), box
+    filtered to 64 texels a tile (8.3 yd) into one BC1 atlas over the WDL
+    tiles' box with five mips, built by `TerrainManager::
+    buildFarFieldAtlas` on a thread the first time the row is on for a map
+    (Azeroth 687 tiles, 1344x2688, 2.3 MB, 320-470 ms; Kalimdor 970 of 988,
+    3136x3584, 7.3 MB, 500-700 ms) and uploaded once. Light: terrain.frag's
+    terms (min(ambient + sun x N.L, 1) times the shadow floor's average)
+    on the WDL normals; fog: the same `stock_fog.glsli` and fog volume as
+    the ground. The last 18% of the reach fades to the fog colour, so it
+    ends in the sky's fog band.
+  - **Seam.** The chunks are kept by their centre's distance in the plane,
+    so the far field starts at the far clip less 24 yd (half a chunk's
+    diagonal) by distance in the plane - not the stock view depth, which at
+    the sides of a 16:9 view starts hundreds of yards past where the
+    ground stops (a gap the stock fog hides and the long view does not).
+    Where both draw, the far field is pushed 0.4% back along its view ray
+    (same pixels) and the real ground wins the depth test.
+  - **Buildings.** `WMORenderer::setFarReach(3000)`: past the view distance
+    the loaded buildings' outdoor groups (MOGP 0x8, not 0x2000) at least
+    40 yd across are still drawn, with the ordinary pipeline (lit and
+    fogged as the rest). The load radius is held at six rings with the row
+    on (what the Enhanced preset's old 2400-yard view distance loaded).
+    The WDL's own low-detail WMOs (Northrend) go through the far field's
+    pipeline. 3.3.5 has no WMO LOD files; doodads stop at the view
+    distance.
+  - **Fog.** With the long view on, the fog ends at 18/7 of the far reach -
+    Enhanced's 18000 - instead of 18/7 of the view distance; the fog
+    thickness option now keeps to the same limit instead of the view
+    distance.
+  - **Preset.** Enhanced's view distance goes from 2400 to its 1900.
+- **Off is stock.** The fog-coloured (or E11-lit) horizon; no atlas is
+  built, the pipelines are not made, the WMO reach is 0, the load radius
+  follows the view distance.
+- **What shows.** With 3.3.5's own light data most zones' fog ends well
+  inside 1900 yd, so the far field is the fog colour there, as stock; it
+  shows where the fog is thin - with Enhanced's light data or a lower fog
+  thickness (shots at fog thickness 0.15: `farfield/shots/l3_thin_*`,
+  `cmp_westfall_thin.png`).
+- **Cost (Nov 8, 1280x720, Enhanced preset, vsync).** Static A/B from 300 yd
+  up over Westfall and the Crossroads, three alternating 7 s windows each:
+  GPU 11.75 on / 11.94 off and 11.11 / 11.14 ms, CPU identical, no frame
+  over 25 ms either way in Westfall. Flights at 70 yd/s (Elwynn to
+  Westfall, Westfall past Stormwind, the Barrens; on and off, twice): GPU
+  and renderWorld within the run-to-run noise of the shared machine (one
+  pair of windows read 9.4 vs 58 ms GPU from another load on the GPU);
+  frames over 20 ms come from tile arrival and spawns in both modes, none
+  from the far field. The horizon already drew to four far clips; the row
+  changes its shading, not its triangles. Memory: the atlas (above) and
+  the sixth ring of tiles. 7000 yd is kept: farther costs nothing more on
+  the GPU but runs past Enhanced's own clip.
+- **Gaps.** The minimap carries its own baked light and roofs; a lake or
+  sea in the WDL is its bed, coloured by the minimap's water; no far
+  doodads; `WOWEE_FARFIELD_GAIN` scales the colour for matching by eye.
+
 ### Further weather ideas (not done)
 
 - **The stock mist and sand on the stock path** (E26, E28): trace the mist

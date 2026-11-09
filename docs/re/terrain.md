@@ -256,7 +256,7 @@ out = primary · c · (0.7 + 0.3·shadow) · 2 + secondary · c.a · shadow
 | Specular | `_s` tilesets, pow(N·H, 20) × sun colour × alpha × shadow, per vertex | none | **stock**, per vertex (`terrain.vert`), `WOWEE_TERRAIN_SPECULAR=0` turns it off |
 | MCCV | MPHD 0x2 maps only | when the chunk has it | unchanged (only Northrend has it) |
 | Holes | 2x2-quad bits | the same | unchanged |
-| WDL horizon | fog-coloured, far clip − 50 to 4 far clips | none: sky past the far clip | **stock** (`TerrainHorizon`), with the WDL's low-detail WMOs; tiles past 2 far clips drawn at a coarse level (128 triangles, Wowee's), `WOWEE_TERRAIN_HORIZON=0` turns it off; the "Lit far horizon" enhancement (E11) shades it under the fog colour |
+| WDL horizon | fog-coloured, far clip − 50 to 4 far clips | none: sky past the far clip | **stock** (`TerrainHorizon`), with the WDL's low-detail WMOs; tiles past 2 far clips drawn at a coarse level (128 triangles, Wowee's), `WOWEE_TERRAIN_HORIZON=0` turns it off; the "Lit far horizon" enhancement (E11) shades it under the fog colour; "Far field (the reference client)" (E39, `far_field.hpp`) colours it from the minimap, lit and fogged as the ground, from the far clip less 24 yd (distance in the plane) to 7000 yd |
 | Alpha resolution option | 32 or 64 (`shadowLevel`) | 64 | unchanged (= the Ultra preset) |
 | Cube-map layers | Crystalsong | drawn as a flat 2D texture | gap |
 | Streaming | chunk square ≈ 1.25 far clips, nearest first | tile circle ⌈far/533⌉+1, nearest first, unload at +3 | unchanged |
