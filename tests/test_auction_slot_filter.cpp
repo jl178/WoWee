@@ -45,8 +45,8 @@ std::set<uint32_t> offeredSlots(uint32_t classId, int subIndex) {
 
 // Positions in kAuctionArmorSubs.
 constexpr int kArmorAll           = 0;
-constexpr int kArmorCloth         = 1;
-constexpr int kArmorMiscellaneous = 6;
+constexpr int kArmorCloth         = 2;
+constexpr int kArmorMiscellaneous = 1;
 
 // Inventory types, as kAuctionSlots carries them.
 constexpr uint32_t kNeck    = 2;
@@ -168,9 +168,9 @@ TEST_CASE("a subclass narrows the list to where that item is worn",
     // the ones GetAuctionItemSubClasses hands out.
     int count = 0;
 
-    auctionSlotsFor(4, 5, count);            // Armor, Shield
+    auctionSlotsFor(4, 6, count);            // Armor, Shields
     CHECK(count == 1);
-    CHECK(auctionSlotIdAt(4, 5, 1) == 14);   // INVTYPE_SHIELD
+    CHECK(auctionSlotIdAt(4, 6, 1) == 14);   // INVTYPE_SHIELD
 
     auctionSlotsFor(2, 3, count);            // Weapon, Bow
     CHECK(count == 1);
@@ -179,18 +179,18 @@ TEST_CASE("a subclass narrows the list to where that item is worn",
     // Nine: the eight places a suit is worn, and the back. Ten before, which
     // was those nine with Neck and Finger in place of the back - jewellery
     // this subclass cannot contain, and no room for the cloaks it does.
-    auctionSlotsFor(4, 1, count);            // Armor, Cloth
+    auctionSlotsFor(4, 2, count);            // Armor, Cloth
     CHECK(count == 9);
-    CHECK(auctionSlotIdAt(4, 1, 1) == 1);    // Head
+    CHECK(auctionSlotIdAt(4, 2, 1) == 1);    // Head
 
     auctionSlotsFor(2, 9, count);            // Weapon, Sword (2H)
     CHECK(count == 1);
     CHECK(auctionSlotIdAt(2, 9, 1) == 17);   // INVTYPE_2HWEAPON
 
     // Miscellaneous armour is the jewellery, not the worn plate.
-    auctionSlotsFor(4, 6, count);
+    auctionSlotsFor(4, 1, count);
     CHECK(count == 4);
-    CHECK(auctionSlotIdAt(4, 6, 1) == 2);    // Neck
+    CHECK(auctionSlotIdAt(4, 1, 1) == 2);    // Neck
 }
 
 TEST_CASE("an unpicked subclass still offers the whole class", "[auction-slot]") {

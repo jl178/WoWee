@@ -79,20 +79,38 @@ inline constexpr AuctionClassFilter kAuctionClasses[] = {
 };
 inline constexpr int kNumAuctionClasses = 13;
 
+// The stock client's lists, in its order and with its names: seventeen
+// weapon types and ten armour types, which is what GetAuctionItemSubClasses
+// answers in 3.3.5 and what addons index positionally - LibItemSearch's Unfit
+// reads subclass 16 of weapons (Wands) and 7 of armour (Librams) by number.
+// The lists here used to be this client's own shorter ones (fifteen and six,
+// with Miscellaneous moved last), so those positions named the wrong type or
+// nothing, and "table index is nil" took the library down on load.
 inline constexpr AuctionSubFilter kAuctionWeaponSubs[] = {
-    {.label = "All", .subId = kAuctionAny}, {.label = "Axe (1H)", .subId = 0}, {.label = "Axe (2H)", .subId = 1}, {.label = "Bow", .subId = 2},
-    {.label = "Gun", .subId = 3}, {.label = "Mace (1H)", .subId = 4}, {.label = "Mace (2H)", .subId = 5}, {.label = "Polearm", .subId = 6},
-    {.label = "Sword (1H)", .subId = 7}, {.label = "Sword (2H)", .subId = 8}, {.label = "Staff", .subId = 10},
-    {.label = "Fist Weapon", .subId = 13}, {.label = "Dagger", .subId = 15}, {.label = "Thrown", .subId = 16},
-    {.label = "Crossbow", .subId = 18}, {.label = "Wand", .subId = 19},
+    {.label = "All", .subId = kAuctionAny},
+    {.label = "One-Handed Axes", .subId = 0},   {.label = "Two-Handed Axes", .subId = 1},
+    {.label = "Bows", .subId = 2},              {.label = "Guns", .subId = 3},
+    {.label = "One-Handed Maces", .subId = 4},  {.label = "Two-Handed Maces", .subId = 5},
+    {.label = "Polearms", .subId = 6},          {.label = "One-Handed Swords", .subId = 7},
+    {.label = "Two-Handed Swords", .subId = 8}, {.label = "Staves", .subId = 10},
+    {.label = "Fist Weapons", .subId = 13},     {.label = "Miscellaneous", .subId = 14},
+    {.label = "Daggers", .subId = 15},          {.label = "Thrown", .subId = 16},
+    {.label = "Crossbows", .subId = 18},        {.label = "Wands", .subId = 19},
+    {.label = "Fishing Poles", .subId = 20},
 };
-inline constexpr int kNumAuctionWeaponSubs = 16;
+inline constexpr int kNumAuctionWeaponSubs = 18;
+static_assert(std::size(kAuctionWeaponSubs) == kNumAuctionWeaponSubs);
 
 inline constexpr AuctionSubFilter kAuctionArmorSubs[] = {
-    {.label = "All", .subId = kAuctionAny}, {.label = "Cloth", .subId = 1}, {.label = "Leather", .subId = 2}, {.label = "Mail", .subId = 3},
-    {.label = "Plate", .subId = 4}, {.label = "Shield", .subId = 6}, {.label = "Miscellaneous", .subId = 0},
+    {.label = "All", .subId = kAuctionAny},
+    {.label = "Miscellaneous", .subId = 0}, {.label = "Cloth", .subId = 1},
+    {.label = "Leather", .subId = 2},       {.label = "Mail", .subId = 3},
+    {.label = "Plate", .subId = 4},         {.label = "Shields", .subId = 6},
+    {.label = "Librams", .subId = 7},       {.label = "Idols", .subId = 8},
+    {.label = "Totems", .subId = 9},        {.label = "Sigils", .subId = 10},
 };
-inline constexpr int kNumAuctionArmorSubs = 7;
+inline constexpr int kNumAuctionArmorSubs = 11;
+static_assert(std::size(kAuctionArmorSubs) == kNumAuctionArmorSubs);
 
 /// Equipment-slot ids, carried in the auctionSlotID field of the same request.
 inline constexpr AuctionSlotFilter kAuctionSlots[] = {
@@ -213,6 +231,8 @@ inline const uint8_t* auctionSlotsFor(uint32_t classId, int subIndex, int& count
         kSlotHead, kSlotShoulder, kSlotChest, kSlotWaist, kSlotLegs,
         kSlotFeet, kSlotWrist, kSlotHands, kSlotBack};
     static constexpr uint8_t kShield[] = {kSlotShield};
+    static constexpr uint8_t kRelicOnly[] = {kSlotRelic};
+    static_assert(auctionSlotsKnown(kRelicOnly, std::size(kRelicOnly)));
     // Miscellaneous armour: the jewellery, and the things held in the off hand
     // that are not weapons.
     static constexpr uint8_t kTrinketry[] = {
@@ -239,25 +259,28 @@ inline const uint8_t* auctionSlotsFor(uint32_t classId, int subIndex, int& count
     if (classId == 2) {
         // Positions in kAuctionWeaponSubs, which is what FrameXML hands back.
         switch (subIndex) {
-            case 1: case 5: case 8: case 11: case 12:   // Axe/Mace/Sword 1H, Fist, Dagger
+            case 1: case 5: case 8: case 12: case 14:   // Axe/Mace/Sword 1H, Fist, Dagger
                 return give(kOneHand, sizeof(kOneHand));
             case 2: case 6: case 7: case 9: case 10:    // Axe/Mace/Sword 2H, Polearm, Staff
+            case 18:                                     // Fishing Pole
                 return give(kTwoHand, sizeof(kTwoHand));
-            case 3: case 4: case 13: case 14: case 15:  // Bow, Gun, Thrown, Crossbow, Wand
+            case 3: case 4: case 15: case 16: case 17:  // Bow, Gun, Thrown, Crossbow, Wand
                 return give(kRanged, sizeof(kRanged));
-            default:
+            default:                                     // All, Miscellaneous
                 return give(kAnyWeapon, sizeof(kAnyWeapon));
         }
     }
     if (classId == 4) {
         // Positions in kAuctionArmorSubs.
         switch (subIndex) {
-            case 1: case 2: case 3: case 4:   // Cloth, Leather, Mail, Plate
-                return give(kWorn, sizeof(kWorn));
-            case 5:                           // Shield
-                return give(kShield, sizeof(kShield));
-            case 6:                           // Miscellaneous
+            case 1:                           // Miscellaneous
                 return give(kTrinketry, sizeof(kTrinketry));
+            case 2: case 3: case 4: case 5:   // Cloth, Leather, Mail, Plate
+                return give(kWorn, sizeof(kWorn));
+            case 6:                           // Shields
+                return give(kShield, sizeof(kShield));
+            case 7: case 8: case 9: case 10:  // Libram, Idol, Totem, Sigil
+                return give(kRelicOnly, sizeof(kRelicOnly));
             default:
                 return give(kAnyArmor, sizeof(kAnyArmor));
         }
