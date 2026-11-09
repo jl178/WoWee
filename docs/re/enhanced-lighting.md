@@ -613,6 +613,17 @@ in four steps, each with the row off drawing exactly what it drew before:
    bloom also spreads the light above 1 (x0.75 of the Bloom row). The sun's
    disc and glare draw at 2.5x and the haze's light may reach 3 (1.3 in the
    8-bit scene).
+
+   Glows held small (round 2): Jered saw a huge halo round the player on
+   Holy Light, lamps and torches with big bright halos, and the Barrens'
+   sunlit road glowing. Additive effects and lamp cards pile up far past 1 in
+   the 16F scene where the 8-bit one stopped each draw at 1, and the bloom
+   spread all of it four quarter-size texels wide, on top of the 8-bit halo
+   over everything above 0.8. Now, with the HDR scene, only light above 1.6
+   blooms (`kHdrBloomFloor`: the sun's disc and glare, lamps, fire, spells),
+   its taps are a texel and a half apart, it adds at most 0.3 a channel
+   (`kHdrBloomMax`), and the 8-bit halo is left to the 8-bit scene. A
+   candle or a torch keeps a small local glow, as in Enhanced's capture.
 3. **Cost** (Iris Xe, 1280x540, Goldshire 15:24, row off and on in turn,
    five 10 s windows each): the final composite +0.49 ms (1.93 -> 2.42), the
    scene pass +0.43 ms (the 16F writes), the frame's GPU time 15.2 -> 16.3

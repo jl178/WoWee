@@ -281,6 +281,10 @@ vec3 enhancedGrade(vec3 c) {
 // lifts only the highlights - sunlit leaves, the sky round the sun, the
 // shafts - into a soft halo.
 const float kBloomKnee = 0.8;
+// The HDR scene's bloom: only light above kHdrBloomFloor, and no more than
+// kHdrBloomMax a channel of it (fxaa.frag stockScreenEffect).
+const float kHdrBloomFloor = 1.6;
+const float kHdrBloomMax = 0.3;
 // The two at once, from one set of taps: x the 8-bit bloom over the
 // displayed picture, as the Enhanced preset has always drawn it; y, with the
 // HDR scene only, the light above 1 in the same tent, in the scene's light -
@@ -294,10 +298,17 @@ void bloomAt(vec2 uv, out vec3 ldr, out vec3 hdr) {
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             float w = (2.0 - abs(float(x))) * (2.0 - abs(float(y)));
-            vec3 s = glowLinearAt(uv + vec2(x, y) * 4.0 * texel);
+            // With the HDR scene the bloom is only the light above the floor
+            // (a lamp, a candle, a spell, the sun): spread tight, a texel and
+            // a half of the quarter-size scene apart, so a torch keeps a small
+            // local glow rather than a wide halo (Jered's Goldshire candles).
+            vec3 s = glowLinearAt(uv + vec2(x, y) * (pc.hdr > 0.5 ? 1.5 : 4.0) * texel);
             vec3 d = pc.hdr > 0.5 ? hdrToDisplay(s) : s;
             ldr += max(d - kBloomKnee, 0.0) * w;
-            hdr += max(s - 1.0, 0.0) * w;
+            // Light above kHdrBloomFloor: the sun's disc and glare (2.5x),
+            // lamps, fire and spell effects. At 1 the sunlit Barrens ground
+            // under an HDR sun bloomed into a glowing orange-white sheet.
+            hdr += max(s - kHdrBloomFloor, 0.0) * w;
             wsum += w;
         }
     }
@@ -312,7 +323,10 @@ vec3 stockScreenEffect(vec3 c, vec2 uv) {
         bloomAt(uv, ldr, hdr);
         // Capped: a backlit, haze-lit face beside the sun already sits near
         // white, and the halo on top of it was what blew it out.
-        r += min(ldr * pc.bloom, vec3(0.25));
+        // With the HDR scene the light above its floor is the bloom; the
+        // 8-bit halo over the displayed picture's top fifth bloomed every
+        // sunlit wall and road, so it is left to the 8-bit scene.
+        if (pc.hdr < 0.5) r += min(ldr * pc.bloom, vec3(0.25));
     }
     if (pc.hdr > 0.5) {
         // The HDR scene: what the glow and the bloom added on the displayed
@@ -320,7 +334,12 @@ vec3 stockScreenEffect(vec3 c, vec2 uv) {
         // 1 the bloom spreads (a halo that grows with how bright its source
         // is), and the sum is tone mapped once - so a lit face under the
         // glow eases toward white on the shoulder instead of clipping there.
-        vec3 lin = displayToHdr(c) + (r - c) + hdr * (pc.bloom * pc.hdrBloom);
+        // The bloom's light is held to kHdrBloomMax a channel: additive
+        // spell effects (Holy Light, Consecration, a level-up) and lamp cards
+        // pile up far past 1 in the HDR scene, where the 8-bit one stopped
+        // each at 1, and their bloom grew into a large halo round the player.
+        // Held, a bright effect keeps a small, tight glow at most.
+        vec3 lin = displayToHdr(c) + (r - c) + min(hdr * (pc.bloom * pc.hdrBloom), vec3(kHdrBloomMax));
         r = hdrToDisplay(lin);
     } else if (pc.rollWhite > 0.0) {
         // Soft highlights belong to the 8-bit scene; the tone curve does it
