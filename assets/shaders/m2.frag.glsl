@@ -140,6 +140,11 @@ vec3 localLightContribution(vec3 pos, vec3 normal, vec3 albedo) {
                (localLightColorIntensity[i].w * attenuation * wrappedDiffuse);
     }
     }
+    // Lamp light fades with the daylight around it: added at full strength
+    // under a noon sun it painted a pool no eye would see there. Full at
+    // night and indoors-dark, about an eighth in full day (Jered, 2026-11-09).
+    float lampDaylight = dot(ambientColor.rgb + lightColor.rgb, vec3(0.299, 0.587, 0.114));
+    sum *= mix(1.0, 0.12, smoothstep(0.35, 0.9, lampDaylight));
     return sum;
 }
 
