@@ -31,6 +31,8 @@
 //                                  player model's camera fade
 //   WoweeDebug_TimeOfDay(hours)    hold the world clock at an hour (0..24),
 //                                  or a negative hour for the game's clock
+//   WoweeDebug_SunYaw()            the camera yaw (as Camera takes it) that
+//                                  faces the sun, and the sun's height
 //   WoweeDebug_UseObject(name)     right-click the nearest game object of
 //                                  that name (a mailbox, a guild vault)
 //   WoweeDebug_RightClickCorpse()  right-click the targeted corpse (loot,
@@ -282,6 +284,22 @@ int luaDebugKnockBack(lua_State* L) {
     return 0;
 }
 
+/// WoweeDebug_SunYaw() - the camera yaw offset (as WoweeDebug_Camera takes
+/// it) that looks toward the sun, and the sun's height in degrees, so a test
+/// can shoot into and across the sun at any hour.
+int luaDebugSunYaw(lua_State* L) {
+    auto* renderer = Application::getInstance().getRenderer();
+    auto* lm = renderer ? renderer->getLightingManager() : nullptr;
+    auto* cc = renderer ? renderer->getCameraController() : nullptr;
+    if (!lm || !cc) return 0;
+    const glm::vec3 s = lm->getLightingParams().sunDir;
+    float yaw = glm::degrees(std::atan2(s.y, s.x)) - cc->getFacingYaw();
+    yaw = std::fmod(yaw + 720.0f, 360.0f);
+    lua_pushnumber(L, yaw);
+    lua_pushnumber(L, glm::degrees(std::asin(glm::clamp(s.z, -1.0f, 1.0f))));
+    return 2;
+}
+
 /// WoweeDebug_TimeOfDay(hours) - the light and sky held at an hour, so a test
 /// can shoot the same place at noon and at dusk. A negative hour gives the
 /// clock back to the game.
@@ -443,6 +461,7 @@ void debugLuaHookTick(addons::LuaEngine* engine, SDL_Window* window) {
     lua_register(L, "WoweeDebug_KnockBack", luaDebugKnockBack);
     lua_register(L, "WoweeDebug_CameraState", luaDebugCameraState);
     lua_register(L, "WoweeDebug_TimeOfDay", luaDebugTimeOfDay);
+    lua_register(L, "WoweeDebug_SunYaw", luaDebugSunYaw);
     lua_register(L, "WoweeDebug_UseObject", luaDebugUseObject);
     lua_register(L, "WoweeDebug_RightClickCorpse", luaDebugRightClickCorpse);
     lua_register(L, "WoweeDebug_UnitMotion", luaDebugUnitMotion);
