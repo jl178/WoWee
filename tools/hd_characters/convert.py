@@ -325,6 +325,43 @@ def default_geosets(skin, look, retail_first):
     return out
 
 
+def opaque_blp(d):
+    """A DXT5 BLP as DXT1, its alpha dropped. Enhanced composites the eyes
+    over an opaque base (ChrModelMaterial type 19), so some races' eye
+    textures carry alpha that means nothing; drawn as they are, the eyes
+    come out as holes. Every other texture is left alone."""
+    if d[8] != 2 or d[10] != 7:
+        return d
+    offs = struct.unpack_from('<16I', d, 20)
+    sizes = struct.unpack_from('<16I', d, 84)
+    mips = []
+    for o, n in zip(offs, sizes):
+        if not o or not n:
+            break
+        src = d[o:o + n]
+        out = bytearray()
+        for p in range(0, len(src) - 15, 16):
+            c0, c1, bits = struct.unpack_from('<HHI', src, p + 8)
+            if c0 < c1:  # DXT1 reads c0 <= c1 as 3 colours + transparent
+                c0, c1 = c1, c0
+                bits ^= 0x55555555  # swap indices 0<->1 and 2<->3
+            elif c0 == c1:
+                bits = 0
+            out += struct.pack('<HHI', c0, c1, bits)
+        mips.append(bytes(out))
+    head = bytearray(d[:min(offs[0], len(d))])  # header (and palette, if any)
+    head[9] = 0   # alpha depth
+    head[10] = 0  # alpha type: DXT1
+    new_offs, new_sizes = [0] * 16, [0] * 16
+    data = bytearray()
+    for i, m in enumerate(mips):
+        new_offs[i], new_sizes[i] = len(head) + len(data), len(m)
+        data += m
+    struct.pack_into('<16I', head, 20, *new_offs)
+    struct.pack_into('<16I', head, 84, *new_sizes)
+    return bytes(head + data)
+
+
 def check_blp(d, name):
     if d[:4] != b'BLP2':
         raise ValueError('%s: not BLP2' % name)
@@ -375,7 +412,7 @@ class Converter:
             f.write(data)
         os.replace(fn + '.part', fn)
 
-    def texture(self, fdid, region=''):
+    def texture(self, fdid, region='', opaque=False):
         """Write a Enhanced texture into the HD tree; return Wowee's name for it.
 
         Wowee's body compositor places a layer by the words in its name
@@ -388,6 +425,8 @@ class Converter:
         if (fdid, region) not in self.written_tex:
             d = self.read(fdid)
             check_blp(d, rel)
+            if opaque:
+                d = opaque_blp(d)
             self.put(rel, d)
             self.written_tex.add((fdid, region))
         return 'HD\\' + rel.replace('/', '\\')
@@ -473,7 +512,7 @@ class Converter:
 
         look, eye = self.look(race, sex, cmid, layout)
         tex_names = {i: self.texture(fd) for i, fd in enumerate(txid) if fd}
-        eye_name = self.texture(eye) if eye else None
+        eye_name = self.texture(eye, opaque=True) if eye else None
         skin = self.read(sfid[0])
         self.put(rel_dir + base + '.m2', convert_m2(md20, tex_names, eye_name, skin_vertex_count(skin)))
         self.put(rel_dir + base + '00.skin', skin)
