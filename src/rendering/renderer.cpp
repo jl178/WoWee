@@ -1644,6 +1644,7 @@ void Renderer::applyEnhancementsToSubsystems() {
     // Sky and air.
     setVolumetricFogQuality(e.lightShafts);
     setVolumetricFogDensity(e.mistDensity);
+    if (volumetricFog_) volumetricFog_->setLongReach(e.sunHaze);
     setSunShaftsEnabled(e.sunShafts);
     if (lensFlare) lensFlare->setIntensity(e.lensFlare);
     setSharpStars(e.sharpStars);
@@ -3608,6 +3609,7 @@ uint32_t Renderer::grassProfileFor(uint32_t effectId, uint32_t areaId) {
 }
 
 void Renderer::updateGrassPopulation() {
+    if (grassRenderer_) grassRenderer_->pollPopulation();
     if (!grassEnabled_) return;
     if (!grassRenderer_ || !grassRenderer_->isReady() || !terrainManager) return;
 
@@ -3894,12 +3896,13 @@ void Renderer::updateGrassPopulation() {
     // is now sized by time instead: after each one the cell count is set to
     // what kGrassSliceMs would have bought at the rate just measured, so the
     // field takes more frames to land and no frame pays more than about that.
-    constexpr double kGrassSliceMs = 2.5;
+    constexpr double kGrassSliceMs = 4.0;
     constexpr size_t kMinCellsPerSlice = 1000;
     constexpr size_t kMaxCellsPerSlice = 64000;
     const size_t cells = grassCellsPerSlice_;
     const auto started = std::chrono::steady_clock::now();
-    const bool done = grassBuilder_.step(sampler, profileFor, cells);
+    const bool done = grassBuilder_.step(sampler, profileFor, cells, kGrassSliceMs);
+    const auto stepped = std::chrono::steady_clock::now();
 
     // Only when it grew, and after every slice rather than at the end: the
     // shaders index this by blade, so it has to reach the device before the
@@ -3909,6 +3912,11 @@ void Renderer::updateGrassPopulation() {
     }
     const double generateMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    if (generateMs > 8.0) {
+        LOG_INFO("Grass slow slice: ", generateMs, " ms for ", cells, " cells (step ",
+                 std::chrono::duration<double, std::milli>(stepped - started).count(), " ms, profiles ",
+                 grassProfiles_.size() - profilesBefore, " new)");
+    }
     grassWorstGenerateMs_ = std::max(grassWorstGenerateMs_, generateMs);
     if (generateMs > 0.05) {
         // Down at once, up by at most a quarter a frame: the cost of a cell
@@ -3951,7 +3959,10 @@ void Renderer::updateGrassPopulation() {
         }
     }
 
-    grassRenderer_->setPopulation(blades.data(), blades.size());
+    // Packed and staged on a worker; it lands in a later frame
+    // (pollPopulation at the top of this function).
+    const size_t populationCount = blades.size();
+    grassRenderer_->setPopulationAsync(std::move(blades));
     // The build's centre, not where the player stands now: they may have
     // walked most of a rebuild step while the window generated, and measuring
     // future movement from here rather than from them is what keeps the
@@ -3959,7 +3970,7 @@ void Renderer::updateGrassPopulation() {
     grassWindowCenter_ = grassBuildCenter_;
     grassWindowValid_ = true;
     ++grassRebuilds_;
-    grassLastCount_ = blades.size();
+    grassLastCount_ = populationCount;
 
     const double totalMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();

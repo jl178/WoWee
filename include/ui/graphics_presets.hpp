@@ -117,11 +117,10 @@ constexpr rendering::Enhancements enhancedEnhancements() {
     // tufts. Its clutter data is 1.12's; the cover comes from its settings
     // (groundEffectDist 200) and models. Wowee's grass field stands in for
     // it, out to the same 200 yards, at the density and height the terrain
-    // asks for - but stays off for now: side by side its blades read as dark
-    // stubs against the afternoon sun, and the first sight of each ground
-    // effect still costs a 40-80 ms frame deriving its profile (section 7 of
-    // docs/re/enhanced-lighting.md). The values are here for when it is on.
-    e.grass = false;
+    // asks for. Its slices are timed, the blades glow against a low sun
+    // (grass.frag), and walking Goldshire, Elwynn and the Barrens stays
+    // under 20 ms a frame (docs/re/enhanced-lighting.md section 7).
+    e.grass = true;
     e.grassDensity = 100;
     e.grassHeight = 100;
     e.grassDistance = 200;

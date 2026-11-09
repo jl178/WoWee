@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <future>
+#include <memory>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -9,6 +11,7 @@
 
 #include "pipeline/grass_population.hpp"
 #include "rendering/grass_blade.hpp"
+#include "rendering/vk_utils.hpp"
 #include "rendering/vk_context.hpp"
 
 namespace wowee {
@@ -65,6 +68,14 @@ public:
     /// Blades beyond kMaxBlades are dropped, and the caller is told.
     bool setPopulation(const pipeline::GrassBladeSample* blades, size_t count);
 
+    /// The same, off the main thread: the staging buffer is made here, a
+    /// worker packs the blades straight into it, and pollPopulation - once a
+    /// frame - records the copy when the worker is done. Packing and copying
+    /// 300000 blades took 11-19 ms of one frame on Jered's laptop. A request
+    /// made while one is still packing waits for it first.
+    void setPopulationAsync(std::vector<pipeline::GrassBladeSample>&& blades);
+    void pollPopulation();
+
     /// Replace the vegetation profile table the shaders index by blade.
     /// Uploaded whole; there are a few dozen at most.
     bool setProfiles(const std::vector<pipeline::GrassProfile>& profiles);
@@ -105,7 +116,17 @@ public:
     [[nodiscard]] float cullDistance() const { return cullDistance_; }
 
 private:
+    struct PendingPopulation {
+        std::future<void> work;
+        AllocatedBuffer staging{};
+        VkDeviceSize bytes = 0;
+        uint32_t count = 0;
+        std::vector<pipeline::GrassBladeSample> blades;
+    };
+    std::unique_ptr<PendingPopulation> pending_;
+    void landPending();
     bool createSourceBuffer();
+    static void packBlades(const pipeline::GrassBladeSample* blades, size_t count, GrassBladeGPU* out);
     bool createPerFrameBuffers();
     bool createCullPipeline();
     bool createDrawPipeline(VkDescriptorSetLayout perFrameLayout);

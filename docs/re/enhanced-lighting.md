@@ -311,6 +311,27 @@ rows but leaves the generator off; prewarming the profiles at zone load,
 packing the upload across frames, and lighting the blades are what it
 needs first.
 
+Round 4: the grass is on in the preset. What the round-3 timing missed
+was not in the generator at all: the profile table and the finished field
+went up through `immediateSubmit` outside an upload batch, which submits and
+waits on a fence for the queue - 20-76 ms on the main thread with a frame in
+flight, each time a new ground effect was met and each time a field landed.
+Both now go in an upload batch of their own (submitted, not waited on), the
+field's packing runs on a worker straight into the mapped staging buffer
+(`GrassRenderer::setPopulationAsync`, landed by `pollPopulation`), and the
+generator's slice also stops on the clock (every 8 cells, at 4 ms). A 2.5 ms
+slice was too short: walking outran the build, which restarts when the
+player moves 24 yards, and only one field landed in three places. The
+blades are lit through when the camera looks toward the sun
+(`grass.frag`, strongest straight into it, gone by 60 degrees), so a meadow
+glows against a low sun instead of reading as dark stubs.
+
+Walking 20 s each through Goldshire, the fields south of it and the
+Barrens at 16:30 (1280x540): nine fields built and landed, the generator's
+worst slice 11 ms (76 ms before), no hitch frame with more than 4.2 ms of
+grass in it; the hitches left are terrain tiles streaming in after the
+teleports. Frame median 16.7-16.9 ms (vsync), GPU 10.1-10.3 ms.
+
 ## 8. What the Enhanced preset sets
 
 The "Enhanced" quality preset (`kGraphicsPresets[kEnhancedPresetIndex]`,
@@ -337,7 +358,13 @@ against its capture. These four rows live on their own settings page,
   the fill and the bloom stacked on it. The shafts no longer get stronger
   with the haze (only golder), the bloom's addition is capped at 0.25 and
   the fill at 1.5x the light a pixel had.
-- **Shaft depth.** Tried: the froxel mist over 800 yards instead of 400
+- **Shaft depth (round 4, done).** With the haze on the froxel mist spans
+  800 yards (`VolumetricFog::kFarLong`, same cells) and torch light is
+  gathered only in its first 150 yards (`kLocalLightReach` in the inject
+  shader); the inject pass measured 0.32-0.33 ms walking Goldshire, Elwynn
+  and the Barrens, against 0.3 ms at 400 yards. The round-3 attempt, below,
+  had kept the gather everywhere.
+- **Shaft depth (round 3).** Tried: the froxel mist over 800 yards instead of 400
   (same cells). Its inject pass went from 0.3 ms to 6.6 ms in Goldshire -
   more of the volume in the dense part of the frustum gathering local
   lights and sampling the shadow map - so it was taken out again. Longer

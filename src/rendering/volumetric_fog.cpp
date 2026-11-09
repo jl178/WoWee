@@ -408,13 +408,13 @@ bool VolumetricFog::applyPendingQuality() {
     historyValid_ = false;
     lastRecordedFrame_ = -1;
     LOG_WARNING("VolumetricFog: on, ", size.x, "x", size.y, "x", size.z, " cells over ",
-                kNear, "-", kFar, " yards");
+                kNear, "-", far_, " yards");
     return true;
 }
 
 glm::vec4 VolumetricFog::frameParams() const {
     if (!volumesReady_) return glm::vec4(0.0f);
-    return {1.0f, kNear, 1.0f / std::log(kFar / kNear), static_cast<float>(size_.z)};
+    return {1.0f, kNear, 1.0f / std::log(far_ / kNear), static_cast<float>(size_.z)};
 }
 
 VkImageView VolumetricFog::getVolumeView(uint32_t frame) const {

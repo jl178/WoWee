@@ -59,7 +59,7 @@ const float kSkyDistance = 5000.0;   // how far a sky pixel's ray runs
 // little elsewhere. The sky's own share is small and taken from the fog
 // colour, which is grey under cloud - most of what made the wall grey.
 const float kSkyScatter = 0.35;      // of the fog colour, light from the sky
-const float kSunScatter = 1.1;       // of the sun colour, at even scattering
+const float kSunScatter = 0.8;       // of the sun colour, at even scattering
 const float kG = 0.7;
 
 float phaseHG(float c, float g) {
@@ -96,7 +96,9 @@ void main() {
     float sunUp = smoothstep(0.0, 0.08, -travel.z);
     float phase = mix(1.0, phaseHG(dot(-travel, v), kG), 0.6);
     vec3 light = fogColor.rgb * kSkyScatter + lightColor.rgb * (phase * kSunScatter * sunUp);
-    light = min(light, vec3(2.5));   // the picture is 0..1; past this is the sun itself
+    // Capped near white: past it the haze only blows a bright sky and the
+    // land under it out (the Barrens toward an evening sun, round 4).
+    light = min(light, vec3(1.3));
     // Indoors the outdoor air stays outside.
     float outdoors = 1.0 - clamp(shadowParams.w, 0.0, 1.0);
     float a = mix(1.0, T, outdoors);

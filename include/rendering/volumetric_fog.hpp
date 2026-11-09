@@ -56,6 +56,12 @@ public:
     /// distance can be thick where the trees and doorways are.
     static constexpr float kNear = 0.5f;
     static constexpr float kFar = 400.0f;
+    /// The Enhanced haze's reach (sunHaze): the same cells over twice the
+    /// depth, so canopy shafts run on past 400 yards. Torch and lamp light
+    /// is gathered only in the near kLocalLightReach of either (the inject
+    /// shader), which is what kept the longer volume cheap.
+    static constexpr float kFarLong = 800.0f;
+    void setLongReach(bool on) { far_ = on ? kFarLong : kFar; }
 
     /// What one frame's volume is built from.
     struct FrameInputs {
@@ -106,6 +112,7 @@ public:
 
     /// Takes effect at the next applyPendingQuality().
     void setQuality(Quality quality) { pendingQuality_ = quality; }
+    [[nodiscard]] float farDistance() const { return far_; }
 
     /// Builds or frees the volumes for a quality change. Called between
     /// frames; waits for the device when there is something to change.
@@ -141,6 +148,7 @@ public:
     void resetHistory() { historyValid_ = false; }
 
 private:
+    float far_ = kFar;
     static constexpr uint32_t MAX_FRAMES = 2;
 
     struct Volume {

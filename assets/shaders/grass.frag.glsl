@@ -100,9 +100,20 @@ void main() {
     float wrapped = clamp(ndl * 0.5 + 0.5, 0.0, 1.0);
 
     // Roots sit in the shade of everything above them.
-    float ao = mix(0.55, 1.0, vHeightT);
+    float ao = mix(0.7, 1.0, vHeightT);
 
-    vec3 lit = albedo * (ambientColor.rgb + lightColor.rgb * wrapped) * ao;
+    // Light through the blade: looking toward the sun the upper blade glows
+    // with the light behind it, as a meadow does against a low sun (WoW
+    // Enhanced's Goldshire afternoon). Without it the field read as dark
+    // stubs exactly where the sun made everything else brightest. Strongest
+    // looking straight into the light, gone by 60 degrees off it, and only
+    // while the sun is up.
+    vec3 travel = normalize(lightDir.xyz);
+    float facing = clamp(dot(normalize(vWorldPos - viewPos.xyz), travel), 0.0, 1.0);
+    float sunUp = smoothstep(0.0, 0.1, -travel.z);
+    float through = facing * facing * facing * vHeightT * sunUp;
+
+    vec3 lit = albedo * (ambientColor.rgb + lightColor.rgb * (wrapped + 0.9 * through)) * ao;
     // Fogged as the ground under it is, or a field stands out of the haze
     // the terrain it grows from has gone into.
     lit = applyFog(lit, vWorldPos, length(viewPos.xyz - vWorldPos));

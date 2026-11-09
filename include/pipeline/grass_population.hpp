@@ -152,10 +152,12 @@ public:
     void begin(float centerX, float centerY, float radius,
                const GrassPopulationParams& params, size_t maxBlades);
 
-    /// Walk up to `cellBudget` lattice cells. Returns true when the window is
-    /// finished (including a window that hit maxBlades and stopped early).
+    /// Walk up to `cellBudget` lattice cells, and stop early once `maxMs`
+    /// milliseconds have passed (0: no time limit; checked every 8 cells).
+    /// Returns true when the window is finished (including a window that hit
+    /// maxBlades and stopped early).
     bool step(const SuitabilitySampler& sample, const ProfileLookupFn& profileFor,
-              size_t cellBudget);
+              size_t cellBudget, double maxMs = 0.0);
 
     /// A build has begun and step() has not yet finished it.
     [[nodiscard]] bool active() const { return active_; }

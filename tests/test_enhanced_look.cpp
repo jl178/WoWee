@@ -105,6 +105,7 @@ TEST_CASE("Enhanced preset: Ultra plus the Enhanced rows, on one-sample depth", 
     CHECK(f.enh.sunHaze);
     CHECK(f.enh.bloom > 0.0f);
     CHECK(f.enh.longView);
+    CHECK(f.enh.grass);
     CHECK(f.enh.grassDistance == 200);
     CHECK(f.enh.shadows);
     CHECK(f.enh.lightShafts >= 2);

@@ -136,6 +136,7 @@ float sunVisibility(vec3 p) {
 // order - the set bits of a 64-bit mask, lowest first - so the sum each cell
 // adds up is the one it added before, term for term.
 shared uint sLightMask[2];
+const float kLocalLightReach = 150.0;
 
 void gatherGroupLights() {
     uint lane = gl_LocalInvocationIndex;   // 64 invocations, one light each
@@ -163,7 +164,11 @@ void gatherGroupLights() {
     float reach = 0.0;
     for (int i = 0; i < 8; ++i) reach = max(reach, distance(corners[i], centre));
     barrier();
-
+    // Torch and lamp light only near the camera: past kLocalLightReach a
+    // block is a slab tens of yards deep whose sphere takes in every light
+    // in a town, and walking them all was most of the pass once the volume
+    // reached 800 yards (0.3 ms became 6.6 ms in Goldshire).
+    if (d0 > kLocalLightReach) count = 0u;
     if (lane < count) {
         float radius = localLightPosRadius[lane].w;
         // A margin for the rounding in placing the corners and the cells,
@@ -248,7 +253,7 @@ void main() {
     // A carried cell lit afresh (new to the view) had no gather: it walks
     // every light, which the radius test below cuts to the same terms.
     vec3 local = vec3(0.0);
-    uint count = uint(clamp(localLightMeta.x, 0, 64));
+    uint count = depth > kLocalLightReach ? 0u : uint(clamp(localLightMeta.x, 0, 64));
     uvec2 lightMask = carried
         ? uvec2(count >= 32u ? 0xFFFFFFFFu : ((1u << count) - 1u),
                 count >= 64u ? 0xFFFFFFFFu : (count > 32u ? ((1u << (count - 32u)) - 1u) : 0u))

@@ -1,6 +1,7 @@
 #include "pipeline/grass_population.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 
@@ -192,7 +193,8 @@ void GrassPopulationBuilder::enterRing() {
 }
 
 bool GrassPopulationBuilder::step(const SuitabilitySampler& sample,
-                                  const ProfileLookupFn& profileFor, size_t cellBudget) {
+                                  const ProfileLookupFn& profileFor, size_t cellBudget,
+                                  double maxMs) {
     if (!active_) return true;
     if (!sample) {
         active_ = false;
@@ -206,6 +208,15 @@ bool GrassPopulationBuilder::step(const SuitabilitySampler& sample,
     const float r0 = params.fullDensityRadius;
 
     size_t walked = 0;
+    // The cost of a cell varies tenfold (a chunk's first sample builds its
+    // data), so a cell count alone let a slice run to 15 ms; the clock is
+    // read every 8 cells and the slice ends at maxMs.
+    const auto started = std::chrono::steady_clock::now();
+    auto overTime = [&]() {
+        if (maxMs <= 0.0 || (walked & 7u) != 0) return false;
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count() >
+               maxMs;
+    };
     while (ring_ <= maxRing_) {
         const float innerSq = ringInner_ * ringInner_;
         const float outerSq = ringOuter_ * ringOuter_;
@@ -218,7 +229,7 @@ bool GrassPopulationBuilder::step(const SuitabilitySampler& sample,
 
         for (int32_t by = cursorY_; by <= maxBlockY_; ++by) {
             for (int32_t bx = cursorX_; bx <= maxBlockX_; ++bx) {
-                if (walked >= cellBudget) {
+                if (walked >= cellBudget || (walked > 0 && overTime())) {
                     cursorY_ = by;
                     cursorX_ = bx;
                     return false;
