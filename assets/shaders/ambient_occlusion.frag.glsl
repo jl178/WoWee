@@ -66,6 +66,8 @@ layout(location = 0) out vec4 outColor;
 
 // SSAOSettings 116 (Enhanced 1.60.1.70862).
 const float kRadius = 1.0;           // yards
+// The most the disk spans on screen, as a share of its height (see main).
+const float kMaxRadiusScreen = 0.03;
 const float kHorizon = 0.1;          // horizon angle threshold
 // Enhanced's ShadowMultiplier is 3 (3 * 4.3, clamped at 10 as ASSAO does).
 // Side by side in Goldshire that took the whole road and every shaded bush
@@ -98,6 +100,21 @@ const float kPlaneBias = 0.03;        // yards
 const float kPlaneBiasPerYard = 0.003;
 const float kQuadDepthYards = 0.1;
 const float kQuadDepthPerYard = 0.02;
+// Depth edges (ASSAO computes the same edges for its blur). Where the
+// surface breaks - a trunk's or an arm's silhouette, the cards of a leaf
+// cluster - the facing rebuilt from depth is a guess, and the disk then
+// counts whatever stands behind or beside as cover: the dark grey jagged
+// lines along every branch and leaf edge in Jered's Goldshire. A pixel whose
+// neighbours do not continue its surface (the second difference of the
+// positions, yards) takes no occlusion; a smooth surface is untouched.
+const float kEdgeYards = 0.08;
+const float kEdgePerYard = 0.012;
+// Thickness: a tap well in front of or behind the pixel along the view is
+// another object - a leaf card, a branch, an arm across the body - not a
+// crease the pixel sits in. Such a tap counts less from kThickNear of the
+// disk's radius in depth difference and not at all from kThickFar.
+const float kThickNear = 0.35;
+const float kThickFar = 0.8;
 
 float eyeDistance(float d) {
     return projection[3][2] / (d + projection[2][2]);
@@ -147,9 +164,22 @@ void main() {
     if (dot(nV, -posV) < 0.0) nV = -nV;
     // The same facing in world space, for the sun's share below.
     vec3 n = normalize(transpose(mat3(view)) * nV);
+    // How far the neighbours fail to continue this pixel's surface (see
+    // kEdgeYards): 1 on a smooth surface, 0 on a depth edge.
+    float edgeTol = kEdgeYards + kEdgePerYard * dist;
+    float broken = max(length((pr - posV) - (posV - pl)), length((pu - posV) - (posV - pd)));
+    float smoothSurface = 1.0 - smoothstep(edgeTol, 3.0 * edgeTol, broken);
 
     // The disk's radius in pixels at this depth.
     float radiusPx = kRadius * abs(projection[1][1]) * 0.5 * pc.target.y / max(dist, 1e-3);
+    // Near the camera the 1-yard disk spans a hundred pixels or more, and
+    // six fixed taps that far apart print copies of every edge they cross
+    // as bands beside it - the jagged grey streaks down trunks and arms. The
+    // disk is held to kMaxRadiusScreen of the screen's height, the radius in
+    // yards shrinking with it, so up close it is contact shading.
+    float maxPx = kMaxRadiusScreen * pc.target.y;
+    float radiusYd = kRadius * min(1.0, maxPx / max(radiusPx, 1e-3));
+    radiusPx = min(radiusPx, maxPx);
     int flags = int(pc.target.w + 0.5);
     bool aoOn = (flags & 1) != 0;
     bool fillOn = (flags & 2) != 0;
@@ -180,8 +210,9 @@ void main() {
             float h = dot(nV, delta);
             if (h < kPlaneBias + kPlaneBiasPerYard * dist) continue;
             float ndotd = h * inversesqrt(len2);
-            float falloff = max(0.0, 1.0 - len2 / (kRadius * kRadius));
-            sum += max(0.0, ndotd - kHorizon) * falloff;
+            float falloff = max(0.0, 1.0 - len2 / (radiusYd * radiusYd));
+            float thick = 1.0 - smoothstep(kThickNear * radiusYd, kThickFar * radiusYd, abs(delta.z));
+            sum += max(0.0, ndotd - kHorizon) * falloff * thick;
         }
     }
     // Pool across the quad, as contact_shadow.frag does: a neighbour more
@@ -204,7 +235,7 @@ void main() {
     if (working && wQ > 0.0) {
         float obscurance = sumQ / (wQ * float(kTaps));
         float fade = clamp((kFadeTo - dist) / (kFadeTo - kFadeFrom), 0.0, 1.0);
-        obscurance = min(obscurance * kStrength, kClamp) * fade;
+        obscurance = min(obscurance * kStrength, kClamp) * fade * smoothSurface;
         occlusion = max(pow(clamp(1.0 - obscurance, 0.0, 1.0), kPower), kFloor);
     }
     if (!fillOn && occlusion >= 0.999) discard;
@@ -233,7 +264,8 @@ void main() {
         // from below, warmed by the ground's colour; a face takes each by how
         // far it turns toward it. Occluded as the ambient is. Outdoors only.
         float sunUp = smoothstep(0.0, 0.1, -normalize(lightDir.xyz).z);
-        float up = clamp(n.z * 0.5 + 0.5, 0.0, 1.0);
+        // On a depth edge the facing is a guess: half sky, half ground.
+        float up = mix(0.5, clamp(n.z * 0.5 + 0.5, 0.0, 1.0), smoothSurface);
         vec3 sky = fogColor.rgb * kFillSky;
         vec3 bounce = lightColor.rgb * kGroundAlbedo * (kFillBounce * sunUp);
         ambNew += (sky * up + bounce * (1.0 - up)) * (pc.target.z * occlusion * (1.0 - indoor) * sunUp);
