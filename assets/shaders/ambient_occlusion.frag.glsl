@@ -65,7 +65,7 @@ layout(push_constant) uniform Push {
 layout(location = 0) out vec4 outColor;
 
 // SSAOSettings 116 (Enhanced 1.60.1.70862).
-const float kRadius = 1.0;           // yards
+const float kRadius = 0.6;           // yards (Enhanced's 1 drew rims a hand wide)
 // The most the disk spans on screen, as a share of its height (see main).
 const float kMaxRadiusScreen = 0.03;
 const float kHorizon = 0.1;          // horizon angle threshold
@@ -80,7 +80,10 @@ const float kPower = 3.0;            // ShadowPower
 // The most of the ambient light it takes. Enhanced's own result can reach
 // none, but Enhanced adds its probe GI back on top (section 6); Wowee has no
 // bounce light, so at full strength bushes and shaded walls went black.
-const float kFloor = 0.6;
+// Jered on the live client (Nov 2026): "too strong - it just creates
+// shadows around things". At most a fifth of the ambient now (it was 0.4),
+// a contact shade rather than a dark rim round every object.
+const float kFloor = 0.8;
 // Where it fades out. ASSAO's defaults are 50 to 300 yards; past 120 a
 // 1-yard disk is under two pixels at 1080 lines, so it stops there.
 const float kFadeFrom = 60.0;
@@ -235,7 +238,15 @@ void main() {
     if (working && wQ > 0.0) {
         float obscurance = sumQ / (wQ * float(kTaps));
         float fade = clamp((kFadeTo - dist) / (kFadeTo - kFadeFrom), 0.0, 1.0);
-        obscurance = min(obscurance * kStrength, kClamp) * fade * smoothSurface;
+        // Only ground-like receivers: what the occlusion is for is seating
+        // grass, roots, crates, walls and feet into the ground. On a
+        // character or a tree limb - curved, thin, moving, alpha-tested - the
+        // depth-rebuilt facing is a guess from moment to moment, and the
+        // occlusion showed as grey patches that came and went (Jered, on the
+        // Enhanced preset). A face turned up takes it; one turned sideways or
+        // down, as a body, an arm or a branch mostly is, takes none.
+        float receiver = smoothstep(0.45, 0.75, n.z);
+        obscurance = min(obscurance * kStrength, kClamp) * fade * smoothSurface * receiver;
         occlusion = max(pow(clamp(1.0 - obscurance, 0.0, 1.0), kPower), kFloor);
     }
     if (!fillOn && occlusion >= 0.999) discard;

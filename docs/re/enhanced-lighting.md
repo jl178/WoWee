@@ -397,6 +397,22 @@ fell from 13.9% to 7.4% of the frame, and the bands along the character's
 side and the house eaves are gone; a real crease (a branch growing out of
 the trunk) keeps its shade.
 
+Round 6: Jered still saw grey patches come and go on the characters and on
+tree limbs, and on his live client called it "too strong - it just creates
+shadows around things"; the preset leaves it off (0829bd7). On a curved,
+thin, moving or alpha-tested surface the facing rebuilt from depth changes
+from frame to frame, and the pass sees only depth, so it cannot tell a
+character or a leaf card apart. The occlusion now goes only onto
+ground-like receivers (a face turned up, from n.z 0.45 to 0.75): what it is
+for is seating grass, roots, crates, walls and feet into the ground; a body,
+an arm or a branch takes none. And it is subtler: at most a fifth of the
+ambient (it was 0.4) over a 0.6-yard disk (1). AO on against off, Goldshire
+10:00: pixels darkened over 20% fell from 5.1-12.7% to 2.2-11.0% of the
+frame (character 5.1 -> 2.2, crates 5.9 -> 2.7; the tree view is mostly
+leaves moving in the wind between the two shots), and side by side on and
+off are hard to tell apart. Ten-frame sequences of the character walking
+and of trees in the wind show no grey patches at any frame.
+
 
 ## 5. Volumetric fog and the two fog layers
 
