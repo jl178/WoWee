@@ -115,16 +115,19 @@ firmly: **Float_0..2 is the absorption, Float_3 the density**; Color_1 and
 Color_2 the scattering colours lerped by the wave's height.
 
 Which column is which channel is not in the shader (the client copies the
-row into the struct). Read Float_0 as red, the fresh water absorbs blue
-fastest and its shallows go amber, the sea's bed turns orange, and in the lab
-the lakes' shallows and the canal floor came out pink-purple under the blue
-body. Read Float_2 as red (the columns blue first, as the DB2's colour ints
-are stored), every row takes the hue of its own colours: the sea and the
-lakes absorb red (turquoise and green shallows), the hot springs and canals
-pass blue (their colours are blue), Desolace absorbs blue (murky brown). Wowee
-uses the second reading; the table below lists the columns as stored. The foam,
-scattering-coefficient and FFT columns in between are not pinned to a
+row into the struct). Enhanced's own Crystal Lake settles it (Jered's capture,
+`enhanced_water_092847.png`, 9:27): from the shore out, the bed goes ochre,
+then olive, then is lost under a grey-teal - blue is absorbed first, so
+**Float_0 is red**, as stored. (Wowee's first version read the columns blue
+first, from the rows' scattering colours; the capture overturned that.) The
+foam, scattering-coefficient and FFT columns in between are not pinned to a
 meaning (the client fills the struct; that code was not read).
+
+The capture also shows how little the scattering colours show: Crystal Lake's
+deep water measures rgb (72, 85, 82) - hue 160, chroma 13 of 255, luma 80 -
+against rows whose Color_1/Color_2 are a clear sky blue. What the eye sees is
+mostly the mirrored surroundings (a grey-blue sky, the trees, the haze) over a
+dim body; the far lake is (91, 99, 88), the shallow edge (101, 81, 52).
 
 Which type each place uses (MH2O of the Enhanced ADT roots):
 
@@ -142,12 +145,11 @@ Others in the table: swamps (1297/1313: 2.8 0.5 1.5 x 8, olive), Desolace
 Tanaris puddles, Teldrassil, Orgrimmar, WMO interior (1290/1354). The four
 lake/river rows differ only in Float_7/9/11/13/25 (wave and foam columns).
 
-So (blue-first reading) Enhanced's fresh water loses red within a yard and the
-bed goes green while the light-blue scattering colour builds over it - green
-shallows going to a blue body. Its sea is far denser (x 8): the bed is gone
-within a yard or two and the water is its teal scattering colour. The canals
-are thin (x 0.5) and absorb red and green alike: the floor turns blue with
-depth.
+So Enhanced's fresh water loses blue within a yard: the bed shows ochre for a
+few yards at the shore and goes olive, then the dim body and the mirror take
+over. Its sea is far denser (x 8): the bed is gone within a yard or two. The
+canals are thin (x 0.5) and pass red best: the floor stays visible, browning
+with depth.
 
 ## 3. What Wowee draws ("Water (the reference client)")
 
@@ -157,23 +159,42 @@ were). `water_hd.frag` in Enhanced's mode (`hdParams.x == 2`), per pixel from
 above:
 
 - **Absorption and scattering**: Enhanced's formula with its per-liquid
-  absorption, density and colours (table above): ocean (terrain ocean,
-  LiquidType 2 family) -> 1250, exterior WMO water -> 1344, all other water
-  -> the lake row. `t` is the view-depth difference from the scene's depth
-  copy, as Enhanced's. The scene is display-encoded, so `T` is taken to that
-  encoding (`T^(1/2.2)`). Light: Light.dbc's ambient x 0.55 for the sky
-  irradiance and the sun x (0.12 + 0.12 HG(g 0.6)) through Enhanced's Fresnel
-  transmission and sun gate, one shadow-map tap - scaled so the body comes
-  out near 0.6 of its colour by day, as Enhanced's linear albedo times its
-  light does once encoded. The sun gate and highlight use the sun sprite's
-  own direction (`LightingParams::sunDir`, in the sky colours' `.w` of the
-  water's frame block), since the stock light stays up all night. The wave height that
-  picks between the two colours is the stock frame's brightness.
+  absorption, density and colours (table above, Float_0 red): ocean (terrain
+  ocean, LiquidType 2 family) -> 1250, exterior WMO water -> 1344, all other
+  water -> the lake row. `t` is the view-depth difference from the scene's
+  depth copy, as Enhanced's. The scene is display-encoded, so `T` is taken to
+  that encoding (`T^(1/2.2)`). The body's brightness and hue were set
+  numerically against the capture (section 4): the colours keep 15% of their
+  saturation, the sky light that reaches into the water is Light.dbc's
+  ambient brightness x 0.55 in a faint green-teal (Light.dbc's ambient is a
+  blue Enhanced's water does not take on), the sun x (0.05 + 0.05 HG(g 0.6))
+  through Enhanced's Fresnel transmission and sun gate, one shadow-map tap.
+  The sun gate and highlight use the sun sprite's own direction
+  (`LightingParams::sunDir`, in the sky colours' `.w` of the water's frame
+  block), since the stock light stays up all night. The wave height that
+  picks between the two colours is the waves' own (below).
+- **Waves**: Enhanced's surface is an FFT sea, per liquid up to four `FFTTile`
+  patches (`LiquidTypeXFFTTile`; FFTTile column 0 the patch size in yards,
+  column 2 the wind speed): the lakes and rivers 16, 32 and 64-yard patches at
+  winds of 3-4, the sea 128-512 yards at 2-6, the canals one 46-yard patch at
+  6 - a Phillips spectrum that peaks at waves of a few yards. Wowee sums
+  twelve directional waves analytically (slopes and height, no texture, so
+  no tile repeats): wavelengths spaced geometrically over 0.6-7 yd (lakes),
+  2.5-48 yd (sea), 1-9 yd (canals), spread +-83 degrees about one wind and
+  weaker across it, deep-water dispersion (w = 0.8 sqrt(g k)), each faded out
+  below two pixels, the field warped a little by value noise so crests are
+  not straight. In rivers the field is carried down the flow (below). The
+  stock lake_a/ocean_h frames are no longer read in this mode.
 - **Refraction**: Enhanced's bend (slope x depth), in view space, eased off
   with distance; refused where the bent tap lands in front of the water.
 - **Reflection**: EnvBRDFApprox at F0 0.02 (Enhanced's), of Light.dbc's sky
-  by the ring rule or the planar sky pass ("Water reflections"). No probe
-  cube or SSR: the surroundings are not mirrored (see 4).
+  by the ring rule or the planar sky pass ("Water reflections"), taken to a
+  grey with a touch of green at 0.86 of its brightness (Enhanced's mirrored
+  sky is grey-blue; set against the capture's far lake). Enhanced mirrors a
+  relit probe of the surroundings; as a stand-in, the lower a reflected ray
+  (below 0.6 of the zenith), the more of it (up to 0.75) is the "surroundings":
+  the fog colour and the ambient, green-tinted, at 0.6 brightness - the shore,
+  trees and haze. No probe cube or SSR.
 - **Sun and moon**: GGX (alpha 0.05) with Schlick at the half vector, the
   shadow tap; in the HDR scene up to 6 (it blooms), else 1.2. By night the
   path is the moon's, taken opposite the sun, at 0.35 of the night light
@@ -184,9 +205,9 @@ above:
   lakes, 1.2 sea, 0.5 canals) on a procedural pattern - the shore and every
   rock or post; and **river foam**: 3.3.5 has no flow data, but a river's
   sheet slopes, so the surface's own gradient (derivatives of the position)
-  gives the downhill direction and a speed; the foam and the fine ripple
-  layer are carried down it with a two-phase flow (bounded offsets, no
-  seams), and the ripples get choppier. Lit as Enhanced lights foam.
+  gives the downhill direction and a speed; the foam and the wave field are
+  carried down it with a two-phase flow (bounded offsets, no seams), and the
+  waves get choppier. Lit as Enhanced lights foam.
 - **Composition and fog**: Enhanced's, `bed + sat(2t)(body + reflection +
   sun + (1 - Fsun) lerp(bed T, foam, cover) - bed)`; the bed was fogged with
   the scene, so its fog is taken off before the water's is laid once.
@@ -197,32 +218,49 @@ checks them against the table and the row against the preset.
 
 ## 4. Measured, and what is left
 
-Cost (lab server, Iris Xe, 1280x540, Enhanced preset at noon, the row off
+**Against Enhanced's capture.** Crystal Lake from its south-east shore at 9:27
+in the lab (Enhanced preset, `.go xyz -9474 -110`, facing north-west), the
+same regions measured as in the capture (mean rgb of each, 0-255):
+
+| Region | Enhanced | HD water | Water (the reference client) |
+|---|---|---|---|
+| Deep, near | 72 85 82 (luma 80, chroma 13, hue 160) | 83 126 120 (113, 44, 172) | 67 79 75 (75, 12, 161) |
+| Deep, far | 91 99 88 (96, 11, 104) | 109 154 140 (139, 45, 161) | 90 106 103 (101, 17, 166) |
+| Shallow edge | 101 81 52 (83, 48, 35) | - | 101 74 61 (81, 40, 19) |
+
+Within about 6% in brightness and saturation in the deep water and at the
+shore; the far lake is a little greener than Enhanced's (its probe mirrors the
+real trees and island, here a fog-coloured stand-in), and the shallow bed a
+little redder (Enhanced's ground textures are its own). The first version
+(blue-first absorption, the colours at full saturation, the sky as it is) read
+38 65 79 near and 79 109 116 far: a saturated blue, as Jered saw.
+
+**Cost** (lab server, Iris Xe, 1280x540, Enhanced preset at noon, the row off
 (HD water) and on in turn, four 8 s pairs a place, `WOWEE_FRAME_PROFILE=1`,
-the GPU's `water` pass):
+the GPU's `water` pass, paired medians):
 
-| Place | HD water | Enhanced water | Difference | At 2560x1080 (x4) |
-|---|---|---|---|---|
-| Crystal Lake shore | 1.10 | 1.24 | +0.14 | about +0.6 |
-| Stormwind canal (water fills the view) | 1.05 | 1.30 | +0.24 | about +1.0 |
-| Stormwind harbour (water in the distance) | 0.56 | 0.56 | 0 | 0 |
+| Place | Difference over HD water | At 2560x1080 (x4) |
+|---|---|---|
+| Crystal Lake shore | +0.06 | about +0.25 |
+| Stormwind canal (water fills the view) | +0.08 | about +0.3 |
 
-The frame's GPU time is within its noise of HD water's (10.8 -> 10.9 ms at
-the lake). A first version cost the lake +0.26 and the canal +0.36: the foam
-pattern is now read only where there is foam (the band or a flowing river),
-and the fog over the composed water is one fog lookup instead of two.
+The twelve analytic waves replaced nine reads of the stock frame texture, so
+the row now costs less over HD water than its first version did (+0.14 and
++0.24); the frame GPU time is within noise. These windows were taken with
+another client sharing the GPU (absolute times up to twice the first run's),
+so the deltas are the paired medians only. The foam pattern is read only where
+there is foam, and the fog over the composed water is one lookup.
 
 Seen in the lab (Enhanced preset, HD water against this row, 12:00, 19:36 and
 23:00; Crystal Lake, the stream into it, the Stormwind canal and harbour, the
-Westfall coast, Lake Everstill at Lakeshire, Lushwater Oasis, and from under
-the surface at the lake and the canal): the lakes now go green at the edge to
-light blue and then a deeper blue instead of HD water's even pale cyan; the
-canal is a saturated blue with its floor fading out with depth; at sunset the
-sea carries a long gold sun path; at night the water is dark blue with the
-moon's glint; the shore and rocks carry a thin foam band. The first reading of
-the absorption (Float_0 red) gave pink-purple shallows and canal floor, which
-is why the columns are read blue first (section 2). Under the surface nothing
-changed (as section 3 says).
+Westfall coast, Lushwater Oasis, and from under the surface at the lake and
+the canal): the lakes are a calm slate grey-teal with an ochre-to-olive band of
+clear shallows and small soft ripples; the canal shows its floor browning
+with depth under a grey mirror instead of a royal blue; the sea is grey-teal
+with a gold sun path at sunset; nights are dark with the moon's glint. Under
+the surface nothing changed. Side by side with Enhanced: the session
+scratchpad's `fwater/side_crystal.png` (Enhanced | HD water | this row) and
+`fwater/sheet_r1.png` (the tour).
 
 - Not done: the FFT surface and its whitecaps (Wowee's sheet is flat; the
   ripples are the stock frames'); the reflection of the surroundings (probe

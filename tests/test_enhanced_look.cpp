@@ -268,9 +268,9 @@ TEST_CASE("Enhanced water: water_hd.frag carries LiquidType 1.60.1's columns", "
     // Float_0..2 (absorption) and Float_3 (density) of 1324 (Generic - Lake
     // - Forest), 1250 (Generic - Ocean) and 1344 (Stormwind - Canals), and
     // their Color_1 / Color_2.
-    CHECK(src.find("vec3(0.283, 0.477, 2.657).zyx, 2.0") != std::string::npos);
-    CHECK(src.find("vec3(0.25, 0.75, 6.0).zyx, 8.0") != std::string::npos);
-    CHECK(src.find("vec3(0.3, 1.0, 1.0).zyx, 0.5") != std::string::npos);
+    CHECK(src.find("vec3(0.283, 0.477, 2.657), 2.0") != std::string::npos);
+    CHECK(src.find("vec3(0.25, 0.75, 6.0), 8.0") != std::string::npos);
+    CHECK(src.find("vec3(0.3, 1.0, 1.0), 0.5") != std::string::npos);
     CHECK(src.find("vec3(0x9b, 0xbf, 0xec)") != std::string::npos);
     CHECK(src.find("vec3(0x48, 0xaa, 0xb0)") != std::string::npos);
     CHECK(src.find("vec3(0x1b, 0xb2, 0xe6)") != std::string::npos);
