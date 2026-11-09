@@ -1653,7 +1653,10 @@ endif()
 # Release build optimizations
 include(CheckIPOSupported)
 check_ipo_supported(RESULT _ipo_supported OUTPUT _ipo_error)
-if(_ipo_supported)
+# Link-time optimisation re-optimises the whole program at every link, which
+# is minutes per build. On for releases; a development tree can turn it off.
+option(WOWEE_LTO "Link-time optimisation for Release builds" ON)
+if(_ipo_supported AND WOWEE_LTO)
     set_property(TARGET wowee PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 if(NOT MSVC)

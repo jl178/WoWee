@@ -14,6 +14,7 @@
           packages = with pkgs; [
             cmake
             ninja
+            ccache           # used when a build dir is configured with the launcher
             pkg-config
             python3
             # Required
