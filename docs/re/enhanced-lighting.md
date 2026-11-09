@@ -640,6 +640,76 @@ a clipped white disc, pixels at 250+ down from 0.2-3.6% of the frame to
 0.03-3.2%; night within 2%, rain 6% brighter. `WOWEE_HDR_TUNE="knee,bloom,
 sunGain,sunLight"` overrides the four for tuning.
 
+## 9c. Sun through leaves ("Sun through leaves (the reference client)")
+
+In Enhanced's Goldshire at 9:22, looking toward the low sun, the canopy in
+front of it glows warm yellow-green: light coming through the leaves. 3.3.5
+lights a leaf's back with the ambient alone, so the same canopy read as a
+dark mass against a white sky.
+
+**What Enhanced's shader does.** `material3_mesh_ps` (5446721; 20 of its 40
+permutations disassemble) lights M2s with the sun (`N.L` saturated, a
+half-Lambert lerp of the hemisphere ambient) and with one more directional
+light from a 32-byte cbuffer: `(dir.xyz, w)`, `(colour.rgb, a)`. With `w`
+of 0 or more it is a second diffuse light, `w * albedo * colour * sat(N.L)`;
+with `w` negative it is a light from behind:
+
+    t        = (1 - (alpha * a)^2) * sat(-N.L)
+    colour  += albedo * colour * -w * t       (times the model's fade)
+    alpha   *= sat(1 - sat(5 t) * sat(-w (0.8 - 0.75 a)))
+
+added to the lit colour before its gamma/HDR output. `material3_wmo_ps` has
+the same block, so it is a scene light, not a foliage material; which light
+the engine puts there (the sun, or a fill) is not visible from the shader,
+and there is no view-dependent lobe in either shader - no `V.L` term at all.
+
+**What Wowee does** (`leafLight`, m2.frag, on in the Enhanced preset only):
+for the foliage cutout batches (`alphaTest == 2`: a foliage-classified
+model's alpha-keyed batch, m2_renderer_render.cpp `foliageCutout`; trunks
+are opaque batches and ground clutter is `alphaTest == 3`), Enhanced's form
+with the sun as the light, `albedo * sunColour * sat(-N.L)`, where `N` is
+the normal turned toward the eye (a card's authored normal says little
+about which side the eye is on) and a quarter of it whatever the angle (a
+thin leaf passes some light either way), and three weights Enhanced does not
+have in this shader:
+
+- a forward lobe toward the **sun sprite**, `x^4` and `x^8` mixed (x the
+  cosine between the view ray and the sun): half at about 26 degrees off
+  the sun, gone at 90. The world's light direction is not the sun - the
+  stock light stays 20-37 degrees up all day and night - so the sprite's
+  direction and a day weight (0 at the horizon, 1 from 9 degrees up, as the
+  HDR sun's) go to the shaders in `localLightMeta.w` (leaf_light.hpp).
+- the sun's shadow at the leaf, read from the side the sun is on (a card
+  turned away from the light is offset toward it, not into its own shadow);
+  it is the shadow the pixel already reads, so no extra taps. A leaf in
+  another's shade stays dark, so the crown glows at its rim and its gaps.
+- the leaf's colour twice, `albedo * (0.4 + 0.6 albedo)`: light through a
+  leaf is the leaf's colour, more saturated than its face.
+
+Strength 1.3, and the sum stops at 1.0 a channel (or where the leaf
+already was), under the tone map's 0.8 knee plus a little, so the bloom
+gets a glow and nothing blows out.
+
+The grass blades' light-through (round 4) also takes the sprite's
+direction and day weight now: it took the way the light *travels*, which
+points away from an eye looking into the sun, so the blades glowed with the
+sun behind the camera, and with the stock light up all night they glowed
+in the moonlight too.
+
+Side by side (Goldshire 09:22 toward and away from the sun, 12:00, 17:30,
+22:30; Duskwood and Ashenvale toward the sun; `leaf/sheet_b.png` in the
+session scratchpad, with the live captures beside the matched views):
+toward the sun 24-26% of the frame brightens by more than 8/255 in
+Goldshire and 20-22% in Ashenvale (its purple canopy in its own colour);
+looking away, at night and in Duskwood's dark canopy the change is within
+the frame-to-frame noise of the wind and the mist. Cost (Iris Xe,
+1280x540, Goldshire 9:22 looking into the sun through the canopy, the row
+off and on in turn, 6 s windows; other lab clients shared the GPU, so only
+the 12 windows with the frame's GPU time under 20 ms are kept): scene pass
+median 7.51 ms off, 7.29 ms on - no cost that can be told from the noise
+(+-0.3 ms). It is a dozen ALU operations on foliage pixels only, with no
+texture or shadow reads of its own.
+
 ## 10. Not done, and why
 
 - Enhanced's ZoneLight polygons (section 2b), and its keyframes for the 11

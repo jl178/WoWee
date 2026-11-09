@@ -106,12 +106,15 @@ void main() {
     // with the light behind it, as a meadow does against a low sun (WoW
     // Enhanced's Goldshire afternoon). Without it the field read as dark
     // stubs exactly where the sun made everything else brightest. Strongest
-    // looking straight into the light, gone by 60 degrees off it, and only
-    // while the sun is up.
-    vec3 travel = normalize(lightDir.xyz);
-    float facing = clamp(dot(normalize(vWorldPos - viewPos.xyz), travel), 0.0, 1.0);
-    float sunUp = smoothstep(0.0, 0.1, -travel.z);
-    float through = facing * facing * facing * vHeightT * sunUp;
+    // looking straight into the sun, gone by 60 degrees off it, and only
+    // while the sun is up. The sun is the sprite's direction and its day
+    // weight (localLightMeta.w, leaf_light.hpp): the light direction stays up
+    // all night and is not where the sun stands, and the way it travels
+    // points away from the eye looking into the sun, which lit the blades
+    // with the sun behind the camera instead.
+    vec4 sun = unpackSnorm4x8(uint(localLightMeta.w));
+    float facing = clamp(dot(normalize(vWorldPos - viewPos.xyz), sun.xyz), 0.0, 1.0);
+    float through = facing * facing * facing * vHeightT * max(sun.w, 0.0);
 
     vec3 lit = albedo * (ambientColor.rgb + lightColor.rgb * (wrapped + 0.9 * through)) * ao;
     // Fogged as the ground under it is, or a field stands out of the haze
