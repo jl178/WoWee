@@ -920,7 +920,10 @@ void Renderer::updatePerFrameUBO() {
     // The water renderer is built with the world, after the settings are
     // applied, so it is told every frame rather than once.
     if (waterRenderer) waterRenderer->setShorelineFoam(shorelineFoam_);
-    if (waterRenderer) waterRenderer->setHdWater(enh_.hdWater);  // E34
+    if (waterRenderer) {
+        waterRenderer->setHdWater(enh_.hdWater || enh_.enhancedWater);  // E34
+        waterRenderer->setEnhancedWater(enh_.enhancedWater);
+    }
     // Sunlight under water (E15): by day only, from the sun's height on the
     // stock clock (the light's own direction stays up all night).
     if (waterRenderer) {

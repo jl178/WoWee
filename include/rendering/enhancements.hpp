@@ -167,6 +167,12 @@ struct Enhancements {
     /// depth under the surface, a soft shoreline and a gentle refraction.
     /// Off draws water.frag, the stock surface, and takes no colour copy.
     bool  hdWater = false;
+    /// the reference client's PBR water (docs/re/enhanced-water.md): per liquid, its
+    /// absorption and scattering colours from LiquidType 1.60.1, its
+    /// reflection and sun highlight, foam where the bed meets the surface
+    /// and down flowing rivers. Uses the HD water pipelines. Off is the rows
+    /// above.
+    bool  enhancedWater = false;
 
     // ---- Weather (the "Enhancements: Weather" page; weather_fx.hpp) -------
     /// How much rain, snow and sand to draw, as a multiple of the stock count:

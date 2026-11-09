@@ -281,6 +281,84 @@ vec3 stockSkyAt(vec3 dir) {
     return skyFog.rgb;
 }
 
+// ---- Water (the reference client): its PBR water, cheaply (hdParams.x == 2) ---------
+// docs/re/enhanced-water.md. Enhanced's deferred water shader (FDID 7552027)
+// composes, per pixel, with t the depth of water behind the surface:
+//   T      = exp(-t * density * absorb)                    (per channel)
+//   body   = albedo * (1 - T) * (ambient + sun) light       (albedo between
+//            LiquidType Color_1 and Color_2 by the wave's height)
+//   out    = bed + sat(2t) * (body + reflection + sunSpec
+//                             + (1 - Fsun) * mix(bed * T, foam, foamCover) - bed)
+// with the reflection EnvBRDFApprox(roughness, N.V) (F0 0.02) times the
+// environment, and foam from the depth behind the surface (shore and rocks),
+// the distance to the shore and, in rivers, the flow. Constants per liquid
+// from LiquidType 1.60.1: absorb = Float_2, Float_1, Float_0 as r, g, b (the
+// columns run blue first, as the DB2's colours do: read that way every row's
+// water takes the hue of its own colours), density = Float_3.
+struct FwLiquid {
+    vec3 absorb;    // per yard, before density, r g b
+    float density;
+    vec3 colHigh;   // Color_1 (wave crests)
+    vec3 colLow;    // Color_2 (troughs)
+    float foamBand; // yards of depth over which the shore/rock foam runs out
+};
+
+FwLiquid fwLiquidFor(bool isOcean, bool isCanal) {
+    // 1250 "PBRWater - Generic - Ocean"
+    if (isOcean) return FwLiquid(vec3(0.25, 0.75, 6.0).zyx, 8.0,
+                                 vec3(0x48, 0xaa, 0xb0) / 255.0, vec3(0x33, 0x6d, 0x7c) / 255.0, 1.2);
+    // 1344 "PBRWater - Stormwind - Canals"
+    if (isCanal) return FwLiquid(vec3(0.3, 1.0, 1.0).zyx, 0.5,
+                                 vec3(0x1b, 0xb2, 0xe6) / 255.0, vec3(0x23, 0x5b, 0x9a) / 255.0, 0.5);
+    // 1324 "Generic - Lake - Forest" (Crystal Lake; 1240, 1288 and 1325 share
+    // these columns)
+    return FwLiquid(vec3(0.283, 0.477, 2.657).zyx, 2.0,
+                    vec3(0x9b, 0xbf, 0xec) / 255.0, vec3(0x71, 0xb2, 0xdc) / 255.0, 0.7);
+}
+
+// The flow phase: two copies of the pattern carried down the river half a
+// period apart, each faded out as it wraps (the usual two-phase flow map), so
+// the offset stays bounded and no seam opens between triangles.
+const float FW_FLOW_PERIOD = 2.4;  // seconds
+const float FW_FLOW_SPEED = 1.4;   // yards a second at full flow
+
+// Enhanced's surface is an FFT sea (LiquidTypeXFFTTile); here the stock
+// frame's own ripples as HD water takes them, the fine layer carried by the
+// flow and a calmer, rougher sheet than HD water's.
+vec3 fwSurfaceNormal(vec2 p, vec2 flow, float time, float dist) {
+    const float s1 = 0.06;
+    const float s2 = 0.026;
+    float ph = time / FW_FLOW_PERIOD;
+    float fa = fract(ph), fb = fract(ph + 0.5);
+    float wA = 1.0 - abs(1.0 - 2.0 * fa);
+    vec2 drift = vec2(0.017, 0.011) * time;
+    vec2 offA = flow * (fa * FW_FLOW_SPEED * FW_FLOW_PERIOD);
+    vec2 offB = flow * (fb * FW_FLOW_SPEED * FW_FLOW_PERIOD) + vec2(0.37, 0.61) / s1;
+    vec2 slopeA = frameSlope((p - offA) * s1 + drift, s1);
+    vec2 slopeB = frameSlope((p - offB) * s1 + drift, s1);
+    vec2 q = vec2(p.x * 0.8 - p.y * 0.6, p.x * 0.6 + p.y * 0.8);
+    vec2 slope2 = frameSlope(q * s2 + vec2(-0.009, 0.013) * time, s2);
+    vec2 slope = mix(slopeB, slopeA, wA) * 0.6 + slope2 * 0.9;
+    // Flowing water is choppier (Enhanced's river foam and rougher crests).
+    float strength = 0.3 * (1.0 + 0.8 * min(length(flow), 1.0))
+                   * mix(1.0, 0.35, smoothstep(40.0, 350.0, dist));
+    return normalize(vec3(-slope * strength, 1.0));
+}
+
+// Karis' EnvBRDFApprox, as Enhanced's water evaluates it (F0 0.02).
+float fwEnvBrdf(float roughness, float NdotV) {
+    vec4 r = roughness * vec4(-1.0, -0.0275, -0.572, 0.022) + vec4(1.0, 0.0425, 1.04, -0.04);
+    float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+    vec2 ab = vec2(-1.04, 1.04) * a004 + r.zw;
+    return 0.02 * ab.x + ab.y;
+}
+
+// Cheap cellular-ish foam pattern, 0..1.
+float fwFoamPattern(vec2 p) {
+    float n = noiseValue(p) * 0.55 + noiseValue(p * 2.7 + 17.0) * 0.3 + noiseValue(p * 6.1 - 5.0) * 0.15;
+    return n;
+}
+
 void main() {
     float time = fogParams.z;
     float basicType = push.liquidBasicType;
@@ -334,9 +412,24 @@ void main() {
     bool hd = hdParams.x > 0.5 && !isInterior && viewPos.z > FragPos.z;
     bool composeBed = false;
     vec3 bedColor = vec3(0.0);
+    vec3 fwBedT = vec3(1.0);  // Enhanced: the bed's share through the water
     // Outside the per-pixel branch, so its texture derivatives are sound
     // (hdParams is the same for every pixel).
-    vec3 N = hdParams.x > 0.5 ? hdSurfaceNormal(FragPos.xy, time, dist) : vec3(0.0, 0.0, 1.0);
+    bool fw = hdParams.x > 1.5;
+    // Enhanced: rivers flow. 3.3.5 has no flow data, but a river's sheet
+    // slopes downhill; its gradient gives the flow's direction and speed.
+    // (Derivatives here, in uniform control flow.)
+    vec2 flowDir = vec2(0.0);
+    float flowSpeed = 0.0;
+    vec3 geoN = normalize(cross(dFdx(FragPos), dFdy(FragPos)));
+    if (fw && abs(geoN.z) > 0.05) {
+        vec2 downhill = geoN.xy / geoN.z * sign(geoN.z);
+        float g = length(downhill);
+        flowSpeed = smoothstep(0.004, 0.05, g);
+        flowDir = g > 1e-5 ? downhill / g : vec2(0.0);
+    }
+    vec3 N = fw ? fwSurfaceNormal(FragPos.xy, flowDir * flowSpeed, time, dist)
+                : (hdParams.x > 0.5 ? hdSurfaceNormal(FragPos.xy, time, dist) : vec3(0.0, 0.0, 1.0));
     vec2 screenUV = gl_FragCoord.xy / max(push.screenSize, vec2(1.0));
     float near = push.depthRange.x;
     float far = push.depthRange.y;
@@ -365,6 +458,154 @@ void main() {
             path = length(bed - FragPos);
         }
 
+        if (fw) {
+            // ---- Water (the reference client) ----
+            FwLiquid L = fwLiquidFor(isOcean, isWmoWater);
+            // Depth of water behind the surface, as Enhanced measures it: the
+            // view depth of the bed past the surface's.
+            float t = depthKnown ? max(sceneLin - waterLin, 0.0) : 60.0;
+            composeBed = hdParams.y > 0.5 && push.sceneValid > 0.5;
+            if (composeBed) {
+                // Enhanced bends the bed by the surface's slope times the
+                // depth (uv + n.xy * 0.005 * min(t, 50)); the same here, in
+                // view space, eased off with distance.
+                vec2 uvR = screenUV;
+                if (depthKnown) {
+                    vec3 vN = mat3(view) * vec3(N.xy, 0.0);
+                    float k = 0.012 * min(t, 12.0) * (1.0 - smoothstep(30.0, 200.0, dist));
+                    vec2 cand = clamp(screenUV + vN.xy * k, vec2(0.001), vec2(0.999));
+                    float candLin = linearizeDepth(texture(SceneDepth, cand).r, near, far);
+                    if (candLin >= waterLin) {
+                        uvR = cand;
+                        t = max(t, candLin - waterLin);
+                    }
+                }
+                bedColor = texture(SceneColor, uvR * hdParams.zw).rgb;
+            }
+            // Absorption over the depth; the scene is display-encoded, so the
+            // transmittance is taken to that encoding.
+            vec3 T = pow(exp(-t * L.absorb * L.density), vec3(1.0 / 2.2));
+
+            // The light: Enhanced's sun term is gated by the sun's height
+            // (smoothstep of (sin elevation + 0.1) * 5) and enters through
+            // the surface's Fresnel transmission, 0.98 (1 - (1 - cos)^5).
+            // The sun sprite's own direction (the stock light stays up all
+            // night): LightingParams::sunDir in the sky .w's.
+            vec3 sunDir = normalize(vec3(skyBand1.w, skyBand2.w, skySmog.w) + vec3(0.0, 0.0, 1e-4));
+            float sunUp = smoothstep(0.0, 1.0, clamp((sunDir.z + 0.1) * 5.0, 0.0, 1.0));
+            float cosSun = clamp(sunDir.z, 0.0, 1.0);
+            vec3 sunIn = lightColor.rgb * sunUp * 0.98 * (1.0 - pow(1.0 - cosSun, 5.0));
+            vec3 amb = ambientColor.rgb;
+            float shadowF = 1.0;
+            if (shadowParams.x > 0.5 && sunUp > 0.01) {
+                vec4 ls = lightSpaceMatrix * vec4(FragPos, 1.0);
+                vec3 pr = ls.xyz / ls.w;
+                pr.xy = pr.xy * 0.5 + 0.5;
+                if (pr.x >= 0.0 && pr.x <= 1.0 && pr.y >= 0.0 && pr.y <= 1.0 && pr.z >= 0.0 && pr.z <= 1.0) {
+                    shadowF = texture(uShadowMap, vec3(pr.xy, pr.z - 0.0015));
+                }
+            }
+
+            // In-scattering: the albedo between Color_2 (troughs) and
+            // Color_1 (crests) by the ripple's height, times (1 - T), lit by
+            // the sky and the sun, forward-scattered toward a low sun (HG).
+            float hgt = hasLiquidTex ? clamp(dot(texel.rgb, vec3(0.3333)) + 0.5 * texel.a - 0.15, 0.0, 1.0) : 0.5;
+            vec3 albedo = mix(L.colLow, L.colHigh, hgt);
+            float cosVL = dot(-viewDir, ldir);
+            const float g = 0.6;
+            float hg = (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * cosVL, 1e-3), 1.5) * 0.25;
+            // Scaled to the display-encoded scene: Enhanced's linear albedo
+            // times its light comes out near 0.6 of the colour by day.
+            vec3 inLight = amb * 0.55 + sunIn * shadowF * (0.12 + 0.12 * hg);
+            vec3 bodyF = albedo * (vec3(1.0) - T) * inLight;
+
+            // Reflection: EnvBRDFApprox at F0 0.02 of the environment -
+            // Light.dbc's sky by the ring rule, or the planar sky pass.
+            vec3 Nr = normalize(mix(vec3(0.0, 0.0, 1.0), N, 0.6));
+            float NdotV = max(dot(Nr, viewDir), 1e-3);
+            float F = fwEnvBrdf(0.06, NdotV);
+            vec3 R = reflect(-viewDir, Nr);
+            R.z = max(R.z, 0.02);
+            vec3 env = stockSkyAt(normalize(R));
+            vec4 reflClip = reflViewProj * vec4(FragPos, 1.0);
+            if (reflClip.w > 0.1) {
+                vec2 reflUV = reflClip.xy / reflClip.w * 0.5 + 0.5;
+                reflUV.y = 1.0 - reflUV.y;
+                reflUV += N.xy * 0.03;
+                float edgeFade = smoothstep(0.0, 0.15, reflUV.x) * smoothstep(1.0, 0.85, reflUV.x)
+                               * smoothstep(0.0, 0.15, reflUV.y) * smoothstep(1.0, 0.85, reflUV.y);
+                vec3 sky = texture(ReflectionColor, clamp(reflUV, vec2(0.002), vec2(0.998))).rgb;
+                float valid = smoothstep(0.002, 0.05, dot(sky, vec3(0.299, 0.587, 0.114))) * edgeFade;
+                // The pass's sun and moon sprites mirror as hard discs cut
+                // by its target's edge; the highlight below is the sun's
+                // and moon's reflection here, so the pass gives only the sky.
+                env = mix(env, min(sky, env * 1.6 + 0.05), valid);
+            }
+
+            // The sun's (by night the moon's) highlight: GGX on a calm
+            // sheet, Fresnel at the half vector; in the HDR scene it may pass
+            // 1 and bloom.
+            // By day toward the sun sprite; by night toward the moon, taken
+            // opposite the sun, dimmer, in the night light's colour.
+            bool byDay = sunDir.z > -0.05;
+            vec3 Ls = byDay ? sunDir : normalize(vec3(-sunDir.xy, max(-sunDir.z, 0.15)));
+            vec3 H = normalize(Ls + viewDir);
+            float NdotH = max(dot(N, H), 0.0);
+            float VdotH = max(dot(viewDir, H), 0.0);
+            float NdotL = max(dot(N, Ls), 0.0);
+            const float a2 = 0.05 * 0.05;
+            float dd = NdotH * NdotH * (a2 - 1.0) + 1.0;
+            float D = a2 / (3.14159265 * dd * dd);
+            float Fh = 0.02 + 0.98 * pow(1.0 - VdotH, 5.0);
+            bool hdrLight = (localLightMeta.z & 32) != 0;
+            float specF = min(D * Fh * NdotL / max(4.0 * NdotV, 0.4), hdrLight ? 6.0 : 1.2);
+            vec3 specCol = byDay ? lightColor.rgb * sunUp * shadowF
+                                 : lightColor.rgb * 0.35 * clamp(skyMiddle.w, 0.0, 1.0);
+            vec3 sunSpec = specCol * specF;
+            float Fsun = Fh * sunUp;
+
+            // Foam: a band where the bed comes up to the surface - the shore
+            // and every rock (Enhanced: smoothstep(1 - t / width)^4) - and, in
+            // flowing water, foam carried down the river.
+            float near01 = 1.0 - smoothstep(60.0, 180.0, dist);
+            float cover = 0.0;
+            float band = 0.0;
+            if (depthKnown) {
+                float x = clamp(1.0 - t / L.foamBand, 0.0, 1.0);
+                band = pow(x * x * (3.0 - 2.0 * x), 4.0);
+            }
+            // The pattern only where there is foam to draw (most of a lake
+            // has none).
+            if (near01 > 0.0 && (band > 0.002 || flowSpeed > 0.0)) {
+                float ph = time / FW_FLOW_PERIOD;
+                float fa = fract(ph), fb = fract(ph + 0.5);
+                float wA = 1.0 - abs(1.0 - 2.0 * fa);
+                vec2 fl = flowDir * flowSpeed * FW_FLOW_SPEED * FW_FLOW_PERIOD;
+                vec2 fp = FragPos.xy * 1.1 + vec2(time * 0.05, -time * 0.035);
+                float pat = mix(fwFoamPattern(fp - fl * fb * 1.1 + 7.3),
+                                fwFoamPattern(fp - fl * fa * 1.1), wA);
+                float river = flowSpeed * smoothstep(0.42, 0.78, pat);
+                cover = clamp(band * smoothstep(0.25, 0.6, pat) * 1.7 + river * 0.75, 0.0, 1.0) * near01;
+            }
+            float crestLit = sunUp * shadowF * clamp(dot(N, ldir) + 0.25, 0.0, 1.0);
+            vec3 foamCol = mix(amb, clamp(lightColor.rgb, vec3(0.0), vec3(1.5)), crestLit) * 0.92;
+
+            // Enhanced's composition: the bed through the water, then the
+            // water's own light, faded in over the first half yard.
+            float s2 = depthKnown ? clamp(t * 2.0, 0.0, 1.0) : 1.0;
+            vec3 X = bodyF + env * F + sunSpec + (1.0 - Fsun) * foamCol * cover;
+            vec3 Tb = T * (1.0 - Fsun) * (1.0 - cover);
+            fwBedT = vec3(1.0 - s2) + s2 * Tb;
+            color = s2 * X;
+            shore = s2;
+            if (composeBed) {
+                alpha = 1.0;
+            } else {
+                alpha = clamp(1.0 - dot(fwBedT, vec3(1.0 / 3.0)), 0.0, 1.0);
+                color = color / max(alpha, 0.004);
+            }
+            surfaceLight = amb + sunIn;
+        } else {
         vec3 body;
         float op;
         // The canals' stock ramp is the river far colour alone, and so is
@@ -454,6 +695,7 @@ void main() {
         alpha = clamp(a + min(spec, 1.0) * (1.0 - a), 0.0, 1.0);
         color = min(premul / max(alpha, 0.004), vec3(8.0));
         surfaceLight = lit;
+        }
     }
 
     // ---- Rain ripples (the "Rain ripples" setting), as water.frag ----
@@ -485,7 +727,7 @@ void main() {
     }
 
     // ---- Shoreline foam (the "Shoreline foam" setting), as water.frag ----
-    if (push.shoreFoam > 0.5) {
+    if (push.shoreFoam > 0.5 && !(hd && fw)) {
         float depthBelow = sceneLin > 0.0 ? max(sceneLin - waterLin, 0.0) * max(abs(viewDir.z), 0.05) : -1.0;
         if (depthBelow >= 0.0) {
             float near01 = 1.0 - smoothstep(40.0, 150.0, dist);
@@ -545,6 +787,21 @@ void main() {
     alpha = clamp(alpha, 0.0, 1.0);
     if (!composeBed && alpha < 1.0 / 255.0) discard;
 
+    if (hd && fw && composeBed) {
+        // The fog over the composed water as Enhanced lays it: the bed was
+        // fogged with the scene, so only its share through the water is
+        // kept and the fog added once (fogged(c) = c * s + o).
+        float vis = stockFogVisibility(FragPos);
+        vec3 s = vec3(vis);
+        vec3 o = fogColor.rgb * (1.0 - vis);
+        if (volumetricParams.x > 0.5) {
+            vec4 air = fogVolumeAt(FragPos);
+            s *= air.a;
+            o = o * air.a + air.rgb;
+        }
+        outColor = vec4(max(bedColor - o, vec3(0.0)) * fwBedT + color * s + o, 1.0);
+        return;
+    }
     color = applyFog(color, FragPos, dist);
     if (composeBed) {
         outColor = vec4(mix(bedColor, color, alpha), 1.0);

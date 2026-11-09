@@ -781,11 +781,14 @@ void WaterRenderer::setLiquidLighting(const LightingParams& lighting) {
     frameUBO_.oceanClose = glm::vec4(lighting.oceanCloseColor, lighting.oceanShallowAlpha);
     frameUBO_.oceanFar = glm::vec4(lighting.oceanFarColor, lighting.oceanDeepAlpha);
     // HD water's reflected sky; water.frag never reads these.
-    frameUBO_.skyTop = glm::vec4(lighting.skyTopColor, 0.0f);
-    frameUBO_.skyMiddle = glm::vec4(lighting.skyMiddleColor, 0.0f);
-    frameUBO_.skyBand1 = glm::vec4(lighting.skyBand1Color, 0.0f);
-    frameUBO_.skyBand2 = glm::vec4(lighting.skyBand2Color, 0.0f);
-    frameUBO_.skySmog = glm::vec4(lighting.skySmogColor, 0.0f);
+    // The .w's carry the sun for the Enhanced water's highlight and sun gate:
+    // dnc.db's day and night intensity and the direction to the sun sprite
+    // (the stock light stays up all night; LightingParams::sunDir).
+    frameUBO_.skyTop = glm::vec4(lighting.skyTopColor, lighting.dayIntensity);
+    frameUBO_.skyMiddle = glm::vec4(lighting.skyMiddleColor, lighting.nightIntensity);
+    frameUBO_.skyBand1 = glm::vec4(lighting.skyBand1Color, lighting.sunDir.x);
+    frameUBO_.skyBand2 = glm::vec4(lighting.skyBand2Color, lighting.sunDir.y);
+    frameUBO_.skySmog = glm::vec4(lighting.skySmogColor, lighting.sunDir.z);
     frameUBO_.skyFog = glm::vec4(lighting.skyFogColor, 0.0f);
 }
 
@@ -1592,7 +1595,7 @@ void WaterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
         hdPipeline = hp;
     }
     if (hdPipeline) {
-        frameUBO_.hdParams = glm::vec4(1.0f, colorCopiedThisFrame_ ? 1.0f : 0.0f,
+        frameUBO_.hdParams = glm::vec4(enhancedWater_ ? 2.0f : 1.0f, colorCopiedThisFrame_ ? 1.0f : 0.0f,
                                        colorCopyUvScale_.x, colorCopyUvScale_.y);
     } else {
         frameUBO_.hdParams = glm::vec4(0.0f);

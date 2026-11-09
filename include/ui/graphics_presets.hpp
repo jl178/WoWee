@@ -140,6 +140,7 @@ constexpr rendering::Enhancements enhancedEnhancements() {
     e.mistDensity = 1.0f;
     e.softParticles = true;
     e.hdWater = true;
+    e.enhancedWater = true;
     e.waterReflections = true;
     // And how it plays (docs/re/enhanced-combat.md, kEnhancedCombatValues):
     // fades from the drawn pose, smoothed other units, the 400 ms spell

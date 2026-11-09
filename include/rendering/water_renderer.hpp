@@ -230,6 +230,12 @@ public:
     /// water.frag and no colour copy.
     void setHdWater(bool on);
     [[nodiscard]] bool hdWater() const { return hdWater_; }
+    /// Water (the reference client) (docs/re/enhanced-water.md): the HD pipelines in
+    /// Enhanced's mode (hdParams.x = 2) - its absorption and scattering per
+    /// liquid, its reflection and highlight, foam at the shore, rocks and in
+    /// flowing rivers. Needs the HD pipelines; the renderer turns those on
+    /// with it.
+    void setEnhancedWater(bool on) { enhancedWater_ = on; }
     /// Sunlight under water (E15, water_caustics.hpp): the row, which keeps
     /// the caustics pipelines (made on first use, let go when it goes off),
     /// and each frame its strength by the sun's height, 0 at night. While the
@@ -444,6 +450,7 @@ private:
     VkPipeline hdPipeline_ = VK_NULL_HANDLE;
     VkPipeline hd1xPipeline_ = VK_NULL_HANDLE;
     bool hdWater_ = false;
+    bool enhancedWater_ = false;
     bool hdBuildFailed_ = false;
     // Set by captureSceneHistory when it copied the scene's colour (taken
     // just before the water, in the same frame), cleared once render() has

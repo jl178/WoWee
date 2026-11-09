@@ -465,7 +465,8 @@ grade, Enhanced's daylight, the Medium light volume at the stock mist
 (High's volume cost 2.5 ms more GPU at 1280x540 for little visible
 difference side by side; twice the mist was too foggy in play, section 8c),
 soft particles (Enhanced's "Depth Based
-Opacity"), HD water and sky reflections (its PBR water and SSR); 1900-yard (Enhanced's horizonStart, with the far field past it)
+Opacity"), HD water and sky reflections with the "Water (the reference client)" row
+over them (its PBR water and SSR; enhanced-water.md); 1900-yard (Enhanced's horizonStart, with the far field past it)
 view distance, 500-yard shadows, ground clutter 150%, and FXAA instead of
 MSAA (Enhanced's anti-aliasing is CMAA2, a post filter, and the occlusion
 pass needs a one-sample depth). Round 2 added the fill light, the sun haze

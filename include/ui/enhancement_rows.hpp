@@ -765,6 +765,17 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "pipeline remade in RGBA16F (the anti-aliasing rebuild); ~2x the scene "
                  "colour memory and bandwidth",
      .asBool = &Enhancements::hdrScene},
+    {.key = "enhancedwater", .label = "Water (the reference client)", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
+     .tooltip = "Lakes, rivers, the sea and the canals as the reference client draws\n"
+                "them: clear in the shallows and deepening to each water's own\n"
+                "colour, mirroring the sky with a bright sun or moon path,\n"
+                "foam where the shore and rocks break the surface and down\n"
+                "running rivers. Lava and slime stay as they are.",
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "enhanced_water",
+     .controls = "the HD water pipelines (water_hd.frag) in Enhanced's mode, made on "
+                 "first use; the scene's depth and colour copies as HD water takes them",
+     .asBool = &Enhancements::enhancedWater},
 
     // ------------------------------------------------------------ Experimental
     {.key = "poseblend", .label = "Smoother animation changes", .kind = SettingKind::Bool,
