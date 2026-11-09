@@ -7,6 +7,7 @@
 #include "core/character_paths.hpp"
 #include "ui/settings_schema.hpp"
 #include "pipeline/m2_asset_loader.hpp"
+#include "pipeline/hd_characters.hpp"
 #include "core/coordinates.hpp"
 #include "ui/minimap_projection.hpp"
 #include "ui/minimap_stock.hpp"
@@ -5488,6 +5489,17 @@ void Application::update(float deltaTime) {
                 handleWorldDisconnect();
                 break;
             }
+            // The "HD characters" setting changed: the player wears the other
+            // model from the next frame (a model that was not converted stays).
+            if (playerCharacterSpawned && pipeline::hdCharactersEnabled() != lastHdCharactersSetting_) {
+                lastHdCharactersSetting_ = pipeline::hdCharactersEnabled();
+                if (assetManager && gameHandler) {
+                    const std::string want = pipeline::hdCharacterModelPath(
+                        *assetManager, game::getPlayerModelPath(playerRace_, playerGender_));
+                    if (pipeline::isHdCharacterModelPath(want) != spawnedHdCharacter_)
+                        refreshPlayerCharacterModel(/*force=*/true);
+                }
+            }
             updateInGame(deltaTime, updateCheckpoint);
             break;
 
@@ -7138,6 +7150,11 @@ void Application::spawnPlayerCharacter() {
     }
     std::string m2Path =
         game::getPlayerModelPath(playerRace_, playerGender_, useFemaleModel);
+    // Enhanced's HD model in its place when the setting is on and it was
+    // converted (pipeline/hd_characters.hpp).
+    if (assetManager) m2Path = pipeline::hdCharacterModelPath(*assetManager, m2Path);
+    spawnedHdCharacter_ = pipeline::isHdCharacterModelPath(m2Path);
+    lastHdCharactersSetting_ = pipeline::hdCharactersEnabled();
 
     // Try loading selected character model from MPQ
     if (assetManager && assetManager->isInitialized()) {
@@ -7352,14 +7369,14 @@ void Application::spawnPlayerCharacter() {
     }
 }
 
-void Application::refreshPlayerCharacterModel() {
+void Application::refreshPlayerCharacterModel(bool force) {
     if (!playerCharacterSpawned || !gameHandler) return;
     const game::Character* ch = gameHandler->getActiveCharacter();
     if (!ch) return;
     // Only rebuild when the visible appearance actually changed. PLAYER_BYTES_2
     // also carries rest state, so the appearance hook fires on entering/leaving
     // inns and cities - a full respawn on those would be needless and jarring.
-    if (ch->appearanceBytes == spawnedAppearanceBytes_ &&
+    if (!force && ch->appearanceBytes == spawnedAppearanceBytes_ &&
         ch->facialFeatures == spawnedFacialFeatures_) {
         return;
     }

@@ -168,8 +168,28 @@ PlayerTextureInfo AppearanceComposer::resolvePlayerTextures(pipeline::M2Model& m
     // the skin row's second texture, so ears and eyelashes were unbound on the
     // other two; only this one had a fallback for a face the table does not
     // carry. Every fault in this area had to be fixed two or three times.
-    auto charSectionsDbc = assetManager_->loadDBC("CharSections.dbc");
-    if (charSectionsDbc) {
+    // An HD model (the "HD characters" setting) takes its textures from the
+    // table converted beside it, in CharSections' shape; nothing below the
+    // table differs.
+    playerHdLook_ = pipeline::isHdCharacterModelPath(model.name)
+        ? pipeline::loadHdCharacterLook(*assetManager_, model.name) : nullptr;
+    auto charSectionsDbc = playerHdLook_ ? nullptr : assetManager_->loadDBC("CharSections.dbc");
+    if (playerHdLook_) {
+        pipeline::CharacterAppearance who;
+        who.raceId = targetRaceId;
+        who.sexId = targetSexId;
+        who.skinId = charSkinId;
+        who.faceId = charFaceId;
+        who.hairStyleId = charHairStyleId;
+        who.hairColorId = charHairColorId;
+        who.facialHairId = facialHairId;
+        const auto sections = pipeline::resolveHdCharacterTextures(*playerHdLook_, who);
+        if (!sections.bodySkin.empty()) result.bodySkinPath = sections.bodySkin;
+        result.hairTexturePath = sections.hair;
+        result.underwearPaths = sections.underwear;
+        LOG_INFO("HD character: ", model.name, " body '", result.bodySkinPath, "', ",
+                 result.underwearPaths.size(), " layers, hair '", result.hairTexturePath, "'");
+    } else if (charSectionsDbc) {
         const auto* csL = pipeline::getActiveDBCLayout()
             ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
         const auto csF = pipeline::detectCharSectionsFields(charSectionsDbc.get(), csL);
@@ -363,10 +383,26 @@ std::unordered_set<uint16_t> AppearanceComposer::buildDefaultPlayerGeosets(uint8
         // No row for this character: the "none" variant of all three channels.
         facial100 = facial200 = facial300 = 1;
     }
+    // The HD model's own (pipeline/hd_characters.hpp): its beards are meshes,
+    // and it has groups 3.3.5 has no option for.
+    std::vector<uint16_t> hdExtra;
+    if (playerHdLook_) {
+        pipeline::CharacterAppearance who;
+        who.hairStyleId = hairStyleId;
+        who.facialHairId = facialId;
+        const auto hd = pipeline::resolveHdCharacterGeosets(*playerHdLook_, who);
+        selectedHairScalp = hd.hairScalp > 0 ? hd.hairScalp : 1;
+        facial100 = hd.facial100;
+        facial200 = hd.facial200;
+        facial300 = hd.facial300;
+        facial1700 = 0;
+        hdExtra = hd.extra;
+    }
 
     std::unordered_set<uint16_t> activeGeosets =
         bareCharacterGeosets(selectedHairScalp, facial100, facial200, facial300, raceId,
                              facial1700);
+    activeGeosets.insert(hdExtra.begin(), hdExtra.end());
 
     return activeGeosets;
 }

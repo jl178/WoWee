@@ -2289,6 +2289,14 @@ bool M2Loader::loadSkin(const std::vector<uint8_t>& skinData, M2Model& model) {
                 batch.vertexCount = sm.vertexCount;
                 batch.submeshId = sm.id;
                 batch.submeshLevel = sm.level;
+                // A skin with more than 65535 indices (the HD characters,
+                // pipeline/hd_characters.hpp) cannot say where a submesh
+                // starts in 16 bits: its level is the high half of the start,
+                // not a LOD.
+                if (model.indices.size() > 0xFFFF) {
+                    batch.indexStart = sm.indexStart + (static_cast<uint32_t>(sm.level) << 16);
+                    batch.submeshLevel = 0;
+                }
                 batch.centerBoneIndex = sm.centerBoneIndex;
                 batch.sortCenter = glm::vec3(sm.sortCenterPosition[0], sm.sortCenterPosition[1], sm.sortCenterPosition[2]);
                 batch.sortRadius = sm.sortRadius;

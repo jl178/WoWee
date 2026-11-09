@@ -297,7 +297,9 @@ private:
     void spawnPlayerCharacter();
     // Re-spawn the in-world player model in place after a live appearance change
     // (barber shop), so the new hair/facial hair shows without a restart.
-    void refreshPlayerCharacterModel();
+    /// `force` rebuilds even when the appearance bytes are unchanged (the
+    /// "HD characters" setting changed the model).
+    void refreshPlayerCharacterModel(bool force = false);
     void buildFactionHostilityMap(uint8_t playerRace);
     void setupTestTransport();  // Test transport boat for development
 
@@ -448,6 +450,10 @@ private:
     uint64_t spawnedPlayerGuid_ = 0;
     uint32_t spawnedAppearanceBytes_ = 0;
     uint8_t spawnedFacialFeatures_ = 0;
+    // Whether the spawned model is an HD one; the player is rebuilt when the
+    // "HD characters" setting no longer agrees.
+    bool spawnedHdCharacter_ = false;
+    bool lastHdCharactersSetting_ = false;
 
     // Static empty values for null-safe delegation
     static inline const std::string emptyString_;

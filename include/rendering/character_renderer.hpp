@@ -1098,7 +1098,9 @@ private:
     int pomQuality_ = 1;  // 0=Low(16), 1=Medium(32), 2=High(64)
 
     // Maximum bones supported
-    static constexpr int MAX_BONES = 240;
+    // 256: the HD blood elves (pipeline/hd_characters.hpp) have 252 bones, and
+    // the two slots below sit past them.
+    static constexpr int MAX_BONES = 256;
     /// The bone slot the robe sway's data rides in (character.vert
     /// HEM_SLOT): the last, past every character model's bones.
     static constexpr int kHemSlot = MAX_BONES - 1;

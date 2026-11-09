@@ -1408,7 +1408,7 @@ namespace {
 /// for the art being laid on it, and once to place each layer. It was written
 /// out inline at the placement site alone, and then the size question could
 /// only be answered by guessing.
-struct AtlasRegion256 { int x, y, w, h; bool known; };
+struct AtlasRegion256 { int x, y, w, h; bool known; bool head = false; };
 
 AtlasRegion256 regionFor(const std::string& pathLower) {
     // FacialUpperHair/FacialLowerHair (CharSections section 2) paint the same
@@ -1417,10 +1417,13 @@ AtlasRegion256 regionFor(const std::string& pathLower) {
     // two head regions, after the facial hair (stock 0x4F0AD0 / 0x4F0B70).
     if (pathLower.find("faceupper") != std::string::npos ||
         pathLower.find("scalpupper") != std::string::npos ||
-        pathLower.find("facialupper") != std::string::npos) return {  .x = 0, .y = 160, .w = 128, .h = 32, .known = true};
+        pathLower.find("facialupper") != std::string::npos) return {  .x = 0, .y = 160, .w = 128, .h = 32, .known = true, .head = true};
     if (pathLower.find("facelower") != std::string::npos ||
         pathLower.find("scalplower") != std::string::npos ||
-        pathLower.find("faciallower") != std::string::npos) return {  .x = 0, .y = 192, .w = 128, .h = 64, .known = true};
+        pathLower.find("faciallower") != std::string::npos) return {  .x = 0, .y = 192, .w = 128, .h = 64, .known = true, .head = true};
+    // the reference client's brows (humanmale_hd_eyebrows_*), drawn over the face.
+    // Only an HD atlas has them, where the head is the whole right half.
+    if (pathLower.find("eyebrows") != std::string::npos) return {.x = 0, .y = 160, .w = 128, .h = 32, .known = true, .head = true};
     if (pathLower.find("pelvis")    != std::string::npos) return {.x = 128,  .y = 96, .w = 128, .h = 64, .known = true};
     if (pathLower.find("torso")     != std::string::npos) return {.x = 128,   .y = 0, .w = 128, .h = 64, .known = true};
     if (pathLower.find("armupper")  != std::string::npos) return {  .x = 0,   .y = 0, .w = 128, .h = 64, .known = true};
@@ -1431,6 +1434,24 @@ AtlasRegion256 regionFor(const std::string& pathLower) {
     if (pathLower.find("legupper")  != std::string::npos ||
         pathLower.find("leg")       != std::string::npos) return {.x = 128, .y = 160, .w = 128, .h = 64, .known = true};
     return {.x = 0, .y = 0, .w = 0, .h = 0, .known = false};
+}
+
+/// The HD layout (CharComponentTextureLayouts 103-124, 2048x1024, WoW
+/// Enhanced's player models): the 3.3.5 body atlas, scaled, in the left square,
+/// and the head as one picture over the whole right half. Its art comes at
+/// half that, 1024x512. Every other atlas is square.
+bool isHdAtlas(int width, int height) { return height > 0 && width == 2 * height; }
+
+/// The pixels a region covers on a canvas of this size.
+struct PixelRect { int x, y, w, h; };
+PixelRect placeRegion(const AtlasRegion256& r, int width, int height) {
+    if (isHdAtlas(width, height)) {
+        if (r.head) return {.x = width / 2, .y = 0, .w = width / 2, .h = height};
+        const int s = std::max(1, height / 256);
+        return {.x = r.x * s, .y = r.y * s, .w = r.w * s, .h = r.h * s};
+    }
+    const int s = std::max(1, width / 256);
+    return {.x = r.x * s, .y = r.y * s, .w = r.w * s, .h = r.h * s};
 }
 
 std::string lowerPath(const std::string& s) {
@@ -1507,7 +1528,8 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
     // Foot            128  224  128  32
 
     // Scale factor: base texture may be larger than the 256x256 reference atlas
-    int coordScale = width / 256;
+    const bool hdAtlas = isHdAtlas(width, height);
+    int coordScale = (hdAtlas ? height : width) / 256;
     if (coordScale < 1) coordScale = 1;
 
     // Load every overlay before deciding how big the canvas is.
@@ -1576,7 +1598,8 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
     // softer in the right place beats sharp in the wrong one. It applies only
     // to the four race and sex pairs that ship such a layer; every other set
     // agrees with its body and is untouched.
-    if (sawRegionLayer && largestRegionScale > coordScale) {
+    // An HD atlas is drawn at the size its art set ships; nothing is mixed.
+    if (!hdAtlas && sawRegionLayer && largestRegionScale > coordScale) {
         requiredScale = largestRegionScale;
     }
 
@@ -1626,12 +1649,8 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
                 blitOverlay(composite, width, height, overlay, cx, cy);
                 continue;
             }
-            int dstX = region.x, dstY = region.y;
-            const int expectedW256 = region.w, expectedH256 = region.h;
-
-            // Scale coordinates from 256-base to actual canvas
-            dstX *= coordScale;
-            dstY *= coordScale;
+            const PixelRect rect = placeRegion(region, width, height);
+            const int dstX = rect.x, dstY = rect.y;
 
             // The region is a fixed fraction of the atlas, so the overlay has to
             // land at exactly this size whatever resolution it was authored at.
@@ -1642,8 +1661,8 @@ VkTexture* CharacterRenderer::compositeTextures(const std::vector<std::string>& 
             // resolutions - a 256-wide face belongs in a 128-wide slot on a
             // 256-wide atlas - so the two can meet whenever a lookup resolves
             // the body and the face from different sets.
-            const int expectedW = expectedW256 * coordScale;
-            const int expectedH = expectedH256 * coordScale;
+            const int expectedW = rect.w;
+            const int expectedH = rect.h;
             const bool needsResample =
                 (overlay.width != expectedW || overlay.height != expectedH);
 
@@ -1837,7 +1856,6 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
 
     // Blend face, facial hair and underwear overlays, each into its region at
     // the region's size on this canvas.
-    const int coordScale = std::max(1, width / 256);
     for (const auto& ul : baseLayers) {
         if (ul.empty()) continue;
         pipeline::BLPImage overlay;
@@ -1874,10 +1892,11 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
                             (width - overlay.width) / 2, (height - overlay.height) / 2);
                 continue;
             }
-            const int dstX = region.x * coordScale;
-            const int dstY = region.y * coordScale;
-            const int dstW = region.w * coordScale;
-            const int dstH = region.h * coordScale;
+            const PixelRect rect = placeRegion(region, width, height);
+            const int dstX = rect.x;
+            const int dstY = rect.y;
+            const int dstW = rect.w;
+            const int dstH = rect.h;
             if (overlay.width == dstW && overlay.height == dstH) {
                 blitOverlay(composite, width, height, overlay, dstX, dstY);
             } else {
@@ -1899,7 +1918,8 @@ VkTexture* CharacterRenderer::compositeWithRegions(const std::string& basePath,
     };
 
     // Scale factor from 256-base to actual texture size
-    int scaleX = width / 256;
+    // On an HD atlas the body is the left square (isHdAtlas).
+    int scaleX = (isHdAtlas(width, height) ? height : width) / 256;
     int scaleY = height / 256;
     if (scaleX < 1) scaleX = 1;
     if (scaleY < 1) scaleY = 1;

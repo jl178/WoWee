@@ -13,7 +13,7 @@
 #include <vector>
 
 namespace wowee {
-namespace pipeline { class AssetManager; struct M2Model; }
+namespace pipeline { class AssetManager; struct M2Model; struct HdCharacterLook; }
 namespace rendering {
 
 class CharacterRenderer;
@@ -315,6 +315,9 @@ private:
     /// CharSections' second texture on the skin row: the Skin Extra art an
     /// HD model draws its ears, eyes and mouth from.
     std::string skinExtraPath_;
+    // The HD model's appearance table when the preview draws one
+    // (pipeline/hd_characters.hpp); null for a 3.3.5 model.
+    std::shared_ptr<const pipeline::HdCharacterLook> hdLook_;
     std::vector<std::string> baseLayers_; // face + underwear, etc.
     uint32_t skinTextureSlotIndex_ = 0;
 

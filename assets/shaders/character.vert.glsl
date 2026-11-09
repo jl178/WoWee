@@ -1,6 +1,6 @@
 #version 450
 
-#define MAX_BONES 240u  // must match CharacterRenderer::MAX_BONES
+#define MAX_BONES 256u  // must match CharacterRenderer::MAX_BONES
 #define HEM_SLOT (MAX_BONES - 1u)  // CharacterRenderer::kHemSlot
 #define CAPE_SLOT (MAX_BONES - 2u)  // CharacterRenderer::kCapeSlot
 

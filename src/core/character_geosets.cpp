@@ -82,6 +82,8 @@ std::unordered_set<uint16_t> buildStockCharacterGeosets(pipeline::AssetManager& 
     // spellings so the model draws whichever it carries.
     on.insert(kGeosetBareFeet);
     on.insert(kGeosetBareFeetAlt);
+    for (uint16_t id : q.extra)
+        if (id / 100 > 20) on.insert(id);
     return on;
 }
 

@@ -495,6 +495,20 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "begun during a fade copies localPose); off keeps 0x826C40's swap",
      .after = "focuscastkey",
      .asBool = &Enhancements::poseBlend},
+    {.key = "hdcharacters", .label = "HD characters", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = "Combat", .section = "Feel (the reference client)",
+     .tooltip = "Players are drawn with the reference client's HD models, whose fuller\n"
+                "skeletons and denser keyframes are most of why it moves so\n"
+                "smoothly. Needs the models converted from a Enhanced install\n"
+                "(tools/hd_characters); a race without them stays as it was.\n"
+                "Off is the original models.",
+     // docs/re/enhanced-combat.md section 1; tools/hd_characters/convert.py.
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "hd_characters",
+     .controls = "pipeline::hdCharacterModelPath (the HD\\ models from the HD characters "
+                 "folder) for the player, other players and the portrait; off draws the "
+                 "3.3.5 models",
+     .after = "focuscastkey",  // below poseblend, which is laid in there first
+     .asBool = &Enhancements::hdCharacters},
     {.key = "smoothzoom", .label = "Smooth camera zoom", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageWater, .section = "",
      .tooltip = "The mouse wheel's zoom glides to its new distance and settles,\n"
@@ -885,6 +899,7 @@ struct EnhancementPresetValue {
 };
 inline constexpr EnhancementPresetValue kEnhancedCombatValues[] = {
     {"poseblend", 1.0f},
+    {"hdcharacters", 1.0f},
     {"remotesmoothing", 1.0f},
     {"spellqueue", 400.0f},
     {"swingtimer", 1.0f},

@@ -37,6 +37,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include "pipeline/hd_characters.hpp"
 #include <cctype>
 #include <sstream>
 #include <cstring>
@@ -125,6 +126,13 @@ std::shared_ptr<pipeline::M2Model> EntitySpawner::parsePlayerModel(pipeline::Ass
     return model;
 }
 
+std::string EntitySpawner::playerModelPathFor(uint8_t raceId, uint8_t genderId) const {
+    const std::string path = game::getPlayerModelPath(
+        static_cast<game::Race>(raceId), genderId == 1 ? game::Gender::FEMALE : game::Gender::MALE);
+    if (path.empty() || !assetManager_) return path;
+    return pipeline::hdCharacterModelPath(*assetManager_, path);
+}
+
 EntitySpawner::PlayerLook EntitySpawner::resolvePlayerLook(uint8_t raceId, uint8_t genderId,
                                                            uint32_t appearanceBytes,
                                                            uint8_t facialFeatures) {
@@ -149,7 +157,24 @@ EntitySpawner::PlayerLook EntitySpawner::resolvePlayerLook(uint8_t raceId, uint8
     std::string& facialUpperPath = out.facialUpperPath;
     std::vector<std::string>& underwearPaths = out.underwearPaths;
 
-    if (auto charSectionsDbc = assetManager_->loadDBC("CharSections.dbc");
+    // Enhanced's HD model takes its textures from the table beside it.
+    if (const std::string m2 = playerModelPathFor(raceId, genderId);
+        pipeline::isHdCharacterModelPath(m2)) {
+        if (auto hd = pipeline::loadHdCharacterLook(*assetManager_, m2)) {
+            pipeline::CharacterAppearance who;
+            who.raceId = raceId;
+            who.sexId = genderId;
+            who.skinId = look.skinId;
+            who.faceId = look.faceId;
+            who.hairStyleId = look.hairStyleId;
+            who.hairColorId = look.hairColorId;
+            who.facialHairId = facialFeatures;
+            const auto sections = pipeline::resolveHdCharacterTextures(*hd, who);
+            if (!sections.bodySkin.empty()) bodySkinPath = sections.bodySkin;
+            hairTexturePath = sections.hair;
+            underwearPaths = sections.underwear;
+        }
+    } else if (auto charSectionsDbc = assetManager_->loadDBC("CharSections.dbc");
         charSectionsDbc && charSectionsDbc->isLoaded()) {
         const auto* csL = pipeline::getActiveDBCLayout()
             ? pipeline::getActiveDBCLayout()->getLayout("CharSections") : nullptr;
@@ -228,7 +253,9 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     auto* charRenderer = renderer_->getCharacterRenderer();
 
     // Base geometry model: cache by (race, gender)
-    uint32_t cacheKey = (static_cast<uint32_t>(raceId) << 8) | static_cast<uint32_t>(genderId & 0xFF);
+    const std::string playerM2Path = playerModelPathFor(raceId, genderId);
+    const bool hdModel = pipeline::isHdCharacterModelPath(playerM2Path);
+    uint32_t cacheKey = playerModelKey(raceId, genderId, hdModel);
     uint32_t modelId = 0;
     auto itCache = playerModelCache_.find(cacheKey);
     if (itCache != playerModelCache_.end()) {
@@ -243,9 +270,7 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
         }
     }
     if (modelId == 0) {
-        game::Race race = static_cast<game::Race>(raceId);
-        game::Gender gender = (genderId == 1) ? game::Gender::FEMALE : game::Gender::MALE;
-        std::string m2Path = game::getPlayerModelPath(race, gender);
+        const std::string& m2Path = playerM2Path;
         if (m2Path.empty()) {
             LOG_WARNING("spawnOnlinePlayer: unknown race/gender for guid 0x", std::hex, guid, std::dec,
                         " race=", static_cast<int>(raceId), " gender=", static_cast<int>(genderId));
@@ -371,11 +396,27 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
 
     // Geosets: body + selected hair/facial hair. Do not enable every group-0
     // submesh; that activates all hair scalp variants at once.
-    const uint16_t selectedHairScalp = selectHairScalpGeoset(hairGeosetMap_, raceId, genderId, hairStyleId);
+    const auto hdLook = hdModel ? pipeline::loadHdCharacterLook(*assetManager_, playerM2Path) : nullptr;
+    uint16_t selectedHairScalp = selectHairScalpGeoset(hairGeosetMap_, raceId, genderId, hairStyleId);
     auto itFacial = facialHairGeosetMap_.find(appearanceKey(raceId, genderId, facialFeatures));
+    FacialHairGeosets hdFacial;
+    std::vector<uint16_t> hdExtra;
+    if (hdLook) {
+        // The HD model's own hair, beards (meshes) and extra groups.
+        pipeline::CharacterAppearance who;
+        who.hairStyleId = hairStyleId;
+        who.facialHairId = facialFeatures;
+        const auto hd = pipeline::resolveHdCharacterGeosets(*hdLook, who);
+        selectedHairScalp = hd.hairScalp > 0 ? hd.hairScalp : 1;
+        hdFacial.geoset100 = hd.facial100;
+        hdFacial.geoset200 = hd.facial200;
+        hdFacial.geoset300 = hd.facial300;
+        hdExtra = hd.extra;
+    }
     std::unordered_set<uint16_t> activeGeosets = bareGeosetsFor(
         selectedHairScalp,
-        itFacial != facialHairGeosetMap_.end() ? &itFacial->second : nullptr, raceId);
+        hdLook ? &hdFacial : itFacial != facialHairGeosetMap_.end() ? &itFacial->second : nullptr, raceId);
+    activeGeosets.insert(hdExtra.begin(), hdExtra.end());
     // This one is drawn before equipment is known and wants the no-cloak panel;
     // the shared set leaves group 15 alone so the equipment pass can decide.
     activeGeosets.insert(kGeosetNoCape);
@@ -419,6 +460,7 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     st.appearanceBytes = appearanceBytes;
     st.facialFeatures = facialFeatures;
     st.bodySkinPath = bodySkinPath;
+    st.hdLook = hdLook;
     // Include face textures so compositeWithRegions can rebuild the full base
     if (!faceLowerPath.empty()) st.underwearPaths.push_back(faceLowerPath);
     if (!faceUpperPath.empty()) st.underwearPaths.push_back(faceUpperPath);
@@ -529,7 +571,18 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
         if (kind >= 0 && displayInfoIds[s] != 0 && gq.displays[kind] == 0) gq.displays[kind] = displayInfoIds[s];
     }
     gq.hairScalp = selectHairScalpGeoset(hairGeosetMap_, st.raceId, st.genderId, hairStyleId);
-    if (auto itFacial = facialHairGeosetMap_.find(appearanceKey(st.raceId, st.genderId, st.facialFeatures));
+    if (st.hdLook) {
+        pipeline::CharacterAppearance who;
+        who.hairStyleId = hairStyleId;
+        who.facialHairId = st.facialFeatures;
+        const auto hd = pipeline::resolveHdCharacterGeosets(*st.hdLook, who);
+        gq.hairScalp = hd.hairScalp > 0 ? hd.hairScalp : 1;
+        gq.haveFacialRow = true;
+        gq.facial100 = hd.facial100;
+        gq.facial200 = hd.facial200;
+        gq.facial300 = hd.facial300;
+        gq.extra = hd.extra;
+    } else if (auto itFacial = facialHairGeosetMap_.find(appearanceKey(st.raceId, st.genderId, st.facialFeatures));
         itFacial != facialHairGeosetMap_.end()) {
         gq.haveFacialRow = true;
         gq.facial100 = itFacial->second.geoset100;
