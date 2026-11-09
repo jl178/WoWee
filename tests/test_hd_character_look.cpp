@@ -4,6 +4,7 @@
 #include "pipeline/hd_characters.hpp"
 
 #include <algorithm>
+#include <unordered_set>
 
 using namespace wowee::pipeline;
 
@@ -122,9 +123,13 @@ TEST_CASE("geosets in the 3.3.5 tables' shape", "[hd_characters]") {
     CHECK(g.facial100 == 6);
     CHECK(g.facial200 == 2);
     CHECK(g.facial300 == 7);
-    // Groups above 20: the face shape replaces 3201, the brows' 3400 removes
-    // 3401, the eyes stay.
-    CHECK(g.extra == std::vector<uint16_t>{3202, 3301});
+    // The model's own groups: the face shape replaces 3201, the brows' 3400
+    // says none of group 34, the eyes stay.
+    CHECK(g.extra == std::vector<uint16_t>{3202, 3301, 3400});
+
+    std::unordered_set<uint16_t> set = {0, 1601, 3201, 3401, 501};
+    applyHdExtraGeosets(set, {1600, 3202, 3400});
+    CHECK(set == std::unordered_set<uint16_t>{0, 3202, 501});
 
     // Bald and clean-shaven: no hair geoset at all, no beard.
     const auto bald = resolveHdCharacterGeosets(look, who(0, 0, 0, 0, 8));

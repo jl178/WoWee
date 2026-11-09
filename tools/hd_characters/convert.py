@@ -79,6 +79,8 @@ CLASSIC_OPTIONS = [
 
 # Geoset groups that equipment or the 3.3.5 appearance already decides.
 DECIDED_GROUPS = {0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 15, 17, 18, 20}
+RETAIL_TABLES = ['ChrCustomizationOption', 'ChrCustomizationChoice', 'ChrCustomizationElement',
+                 'ChrCustomizationGeoset']
 
 # Enhanced texture types Wowee's character renderer has no slot for.
 TEX_EYES = 19
@@ -86,16 +88,22 @@ TEX_EYES = 19
 
 # ---------------------------------------------------------------- data tables
 class Tables:
-    def __init__(self, db2_dir):
+    """DB2 tables as CSV from wago.tools, cached: Enhanced's build, or with
+    build=None the current retail one."""
+    def __init__(self, db2_dir, names=DB2_TABLES, build=BUILD):
         self.dir = db2_dir
+        self.build = build
         os.makedirs(db2_dir, exist_ok=True)
-        self.t = {n: self._load(n) for n in DB2_TABLES}
+        self.t = {n: self._load(n) for n in names}
 
     def _load(self, name):
         fn = os.path.join(self.dir, name + '.csv')
         if not os.path.exists(fn):
-            url = 'https://wago.tools/db2/%s/csv?build=%s' % (name, BUILD)
-            data = urllib.request.urlopen(url, timeout=300).read()
+            url = 'https://wago.tools/db2/%s/csv' % name
+            if self.build:
+                url += '?build=%s' % self.build
+            req = urllib.request.Request(url, headers={'User-Agent': 'curl/8'})
+            data = urllib.request.urlopen(req, timeout=300).read()
             with open(fn + '.part', 'wb') as f:
                 f.write(data)
             os.replace(fn + '.part', fn)
@@ -290,14 +298,22 @@ def skin_geosets(skin):
     return {struct.unpack_from('<H', skin, osub + i * 48)[0] for i in range(nsub)}
 
 
-def default_geosets(skin, look):
-    """Every group 3.3.5 and equipment do not decide draws its first variant
-    unless a chosen choice names another, as Enhanced does (the eyes, 3301;
-    the torso, 2201). Written as choice 0; Wowee lets a chosen geoset of the
-    same group replace it."""
+def default_geosets(skin, look, retail_first):
+    """What the groups 3.3.5 and equipment do not decide show when no choice
+    names them, written as choice 0 (a chosen geoset of the group replaces
+    it; variant 0 is none). The engine's default is the group's first
+    variant, which on these models is a decoration for some groups - a
+    tauren's headdress (37), necklace (36) and flower (39), earrings (35), a
+    nose ring (16) - that retail turns off with an option Enhanced does not
+    have. Where retail has such an option, its first choice decides
+    (retail_first: group -> variant); otherwise the first variant."""
     have = skin_geosets(skin)
     out = []
     for grp in sorted({g // 100 for g in have} - DECIDED_GROUPS):
+        if grp in retail_first:
+            v = retail_first[grp]
+            out.append('geo 0 %d' % (grp * 100 + v if v == 0 or grp * 100 + v in have else grp * 100))
+            continue
         # Group 32 is the face. Its first variant is a stub of some sixty
         # triangles; the face is 3202 (the human's face shapes add 3203-3204,
         # chosen through Face Shape). Races without that option need 3202.
@@ -335,6 +351,7 @@ class Converter:
             self.elements[e['ChrCustomizationChoiceID']].append(e)
         self.geo = {g['ID']: g for g in db['ChrCustomizationGeoset']}
         self.boneset = {b['ID']: b for b in db['ChrCustomizationBoneSet']}
+        self.retail = None
         self.mat = {m['ID']: m for m in db['ChrCustomizationMaterial']}
         self.tfd = defaultdict(list)
         for r in db['TextureFileData']:
@@ -358,15 +375,46 @@ class Converter:
             f.write(data)
         os.replace(fn + '.part', fn)
 
-    def texture(self, fdid):
-        """Write a Enhanced texture into the HD tree; return Wowee's name for it."""
+    def texture(self, fdid, region=''):
+        """Write a Enhanced texture into the HD tree; return Wowee's name for it.
+
+        Wowee's body compositor places a layer by the words in its name
+        (faceupper, pelvis, torso: character_renderer.cpp regionFor), and the
+        HD names do not always carry them (bloodelfmale_hd_face_7485043), so a
+        body layer is written under its name plus the region's word."""
         rel = self.path_of(fdid)
-        if fdid not in self.written_tex:
+        if region:
+            rel = rel[:-4] + '_' + region + rel[-4:]
+        if (fdid, region) not in self.written_tex:
             d = self.read(fdid)
             check_blp(d, rel)
             self.put(rel, d)
-            self.written_tex.add(fdid)
+            self.written_tex.add((fdid, region))
         return 'HD\\' + rel.replace('/', '\\')
+
+    def retail_first(self, cmid):
+        """Group -> variant the first choice of each retail option sets, for
+        the same ChrModel (options Enhanced does not have: headdress, nose
+        ring...). Groups 0-3 and 7 are the 3.3.5 appearance's."""
+        if self.retail is None:
+            self.retail = Tables(os.path.join(self.args.db2, 'retail'), RETAIL_TABLES, build=None)
+        db = self.retail
+        geo = {g['ID']: g for g in db['ChrCustomizationGeoset']}
+        first = {}
+        by_option = {}
+        for c in db['ChrCustomizationChoice']:
+            o = c['ChrCustomizationOptionID']
+            if o not in by_option or int(c['OrderIndex']) < int(by_option[o]['OrderIndex']):
+                by_option[o] = c
+        firsts = {by_option[o['ID']]['ID'] for o in db['ChrCustomizationOption']
+                  if o['ChrModelID'] == cmid and o['ID'] in by_option}
+        for e in db['ChrCustomizationElement']:
+            if e['ChrCustomizationChoiceID'] in firsts and e['ChrCustomizationGeosetID'] in geo:
+                g = geo[e['ChrCustomizationGeosetID']]
+                grp = int(g['GeosetType'])
+                if grp not in (0, 1, 2, 3, 7):
+                    first[grp] = int(g['GeosetID'])
+        return first
 
     def bone_file(self, fdid):
         """A face's bone adjustments (.bone: BIDA bone ids, BOMT matrices),
@@ -429,7 +477,7 @@ class Converter:
         skin = self.read(sfid[0])
         self.put(rel_dir + base + '.m2', convert_m2(md20, tex_names, eye_name, skin_vertex_count(skin)))
         self.put(rel_dir + base + '00.skin', skin)
-        look += default_geosets(skin, look)
+        look += default_geosets(skin, look, self.retail_first(cmid))
 
         n, o = struct.unpack_from('<II', md20, OFS_SEQUENCES)
         wrote = 0
@@ -466,6 +514,22 @@ class Converter:
         if hair:
             out.append('hairtex ' + hair[0])
         eye_targets = {r['ChrModelTextureTargetID_0'] for r in layers if r['TextureType'] == str(TEX_EYES)}
+        # Body layer target -> the word its region goes by in Wowee
+        # (CharComponentTextureSections: 9, 10 and 11 the head, 12 and 14 the whole
+        # body square, 5 the pelvis, 3 the torso; -1 the whole atlas, which
+        # needs none).
+        region_of = {}
+        for r in layers:
+            if r['TextureType'] != '1':
+                continue
+            mask = int(r['TextureSectionTypeBitMask'])
+            word = {512: 'faceupper', 1024: 'faceupper', 1536: 'faceupper', 2048: 'faceupper',
+                    32: 'pelvis', 8: 'torso', 4096: 'hdbody', 16384: 'hdbody'}.get(mask)
+            if word:
+                region_of[r['ChrModelTextureTargetID_0']] = word
+            elif mask != -1:
+                print('  body layer target %s: section mask %d has no region in Wowee'
+                      % (r['ChrModelTextureTargetID_0'], mask))
 
         # 3.3.5 index -> choice: Enhanced's conversion table, else OrderIndex.
         used = set()
@@ -538,7 +602,7 @@ class Converter:
                 if rel != '0' and rel not in used:
                     continue
                 try:
-                    out.append('tex %s %s %s %s' % (cid, rel, tgt, self.texture(fds[0])))
+                    out.append('tex %s %s %s %s' % (cid, rel, tgt, self.texture(fds[0], region_of.get(tgt, ''))))
                 except KeyError as err:  # a file the build does not carry
                     print('  skipped: %s' % err)
         return out, eye

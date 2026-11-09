@@ -135,11 +135,23 @@ CharacterSectionTextures resolveHdCharacterTextures(const HdCharacterLook& look,
 /// 1 back (the stock defaults, the paper doll reading the set back).
 inline constexpr uint16_t kHdNoHairGeoset = 99;
 
+/// The geoset groups an HD model's appearance owns and the 3.3.5 rules know
+/// nothing of: above 20 (face, eyes, torso, tusks, horns, headdress...), and
+/// 16 (nose ring) and 19 (an undead's bones), which 3.3.5 merely defaults.
+constexpr bool isHdAppearanceGroup(int group) { return group > 20 || group == 16 || group == 19; }
+
 struct HdCharacterGeosets {
     uint16_t hairScalp = 0;  ///< kHdNoHairGeoset for bald; 0 when the table has no hair row
     uint16_t facial100 = 0, facial200 = 0, facial300 = 0;  ///< variants, 0 = none
+    /// One id per isHdAppearanceGroup group the model has: what it shows,
+    /// or variant 0 for none of it. Apply with applyHdExtraGeosets.
     std::vector<uint16_t> extra;
 };
+
+/// Put the HD model's own groups into a geoset set: each replaces whatever
+/// the set had in its group (the 3.3.5 default 1601, say); variant 0 leaves
+/// the group empty.
+void applyHdExtraGeosets(std::unordered_set<uint16_t>& geosets, const std::vector<uint16_t>& extra);
 HdCharacterGeosets resolveHdCharacterGeosets(const HdCharacterLook& look,
                                              const CharacterAppearance& who);
 

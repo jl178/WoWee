@@ -35,8 +35,8 @@ struct CharacterGeosetQuery {
     /// The cloak is worn and shown.
     bool cloakShown = true;
     bool guildTabard = false;
-    /// Geosets in groups the stock rules do not know (above 20), kept as
-    /// given: an HD model's face shape, eyes and torso.
+    /// An HD model's own groups (pipeline/hd_characters.hpp), applied last:
+    /// its face, eyes, torso, horns, or none of a group.
     std::vector<uint16_t> extra;
 };
 

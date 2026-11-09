@@ -184,6 +184,7 @@ PlayerTextureInfo AppearanceComposer::resolvePlayerTextures(pipeline::M2Model& m
         who.hairStyleId = charHairStyleId;
         who.hairColorId = charHairColorId;
         who.facialHairId = facialHairId;
+        playerHdWho_ = who;
         const auto sections = pipeline::resolveHdCharacterTextures(*playerHdLook_, who);
         playerHdBones_.clear();
         for (const auto& a : pipeline::loadHdCharacterBones(*assetManager_, *playerHdLook_, who))
@@ -389,9 +390,9 @@ std::unordered_set<uint16_t> AppearanceComposer::buildDefaultPlayerGeosets(uint8
     }
     // The HD model's own (pipeline/hd_characters.hpp): its beards are meshes,
     // and it has groups 3.3.5 has no option for.
-    std::vector<uint16_t> hdExtra;
+    playerHdExtra_.clear();
     if (playerHdLook_) {
-        pipeline::CharacterAppearance who;
+        pipeline::CharacterAppearance who = playerHdWho_;
         who.hairStyleId = hairStyleId;
         who.facialHairId = facialId;
         const auto hd = pipeline::resolveHdCharacterGeosets(*playerHdLook_, who);
@@ -400,13 +401,13 @@ std::unordered_set<uint16_t> AppearanceComposer::buildDefaultPlayerGeosets(uint8
         facial200 = hd.facial200;
         facial300 = hd.facial300;
         facial1700 = 0;
-        hdExtra = hd.extra;
+        playerHdExtra_ = hd.extra;
     }
 
     std::unordered_set<uint16_t> activeGeosets =
         bareCharacterGeosets(selectedHairScalp, facial100, facial200, facial300, raceId,
                              facial1700);
-    activeGeosets.insert(hdExtra.begin(), hdExtra.end());
+    pipeline::applyHdExtraGeosets(activeGeosets, playerHdExtra_);
 
     return activeGeosets;
 }

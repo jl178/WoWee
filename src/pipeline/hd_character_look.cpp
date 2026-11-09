@@ -162,11 +162,11 @@ HdCharacterGeosets resolveHdCharacterGeosets(const HdCharacterLook& look,
     const auto picked = selectHdCharacterChoices(look, who);
     const std::unordered_set<uint32_t> on(picked.begin(), picked.end());
     HdCharacterGeosets out;
-    // Group -> id for the groups above 20: the defaults, then what the picked
-    // choices say, which wins (variant 0 being "none of this group").
+    // Group -> id for the model's own groups: the defaults, then what the
+    // picked choices say, which wins (variant 0 being "none of this group").
     std::map<uint16_t, uint16_t> extra;
     for (const auto& g : look.geosets) {
-        if (g.choice == 0 && g.id / 100 > 20) extra[static_cast<uint16_t>(g.id / 100)] = g.id;
+        if (g.choice == 0 && isHdAppearanceGroup(g.id / 100)) extra[static_cast<uint16_t>(g.id / 100)] = g.id;
     }
     bool hairSet = false;
     for (const auto& g : look.geosets) {
@@ -182,14 +182,23 @@ HdCharacterGeosets resolveHdCharacterGeosets(const HdCharacterLook& look,
             case 2: out.facial200 = variant; break;
             case 3: out.facial300 = variant; break;
             default:
-                if (group > 20) extra[group] = g.id;
+                if (isHdAppearanceGroup(group)) extra[group] = g.id;
                 break;
         }
     }
-    for (const auto& [group, id] : extra) {
-        if (id % 100 != 0) out.extra.push_back(id);
-    }
+    for (const auto& [group, id] : extra) out.extra.push_back(id);
     return out;
+}
+
+void applyHdExtraGeosets(std::unordered_set<uint16_t>& geosets, const std::vector<uint16_t>& extra) {
+    for (uint16_t id : extra) {
+        const uint16_t group = static_cast<uint16_t>(id / 100);
+        for (auto it = geosets.begin(); it != geosets.end();) {
+            if (*it / 100 == group && *it != 0) it = geosets.erase(it);
+            else ++it;
+        }
+        if (id % 100 != 0) geosets.insert(id);
+    }
 }
 
 }  // namespace pipeline

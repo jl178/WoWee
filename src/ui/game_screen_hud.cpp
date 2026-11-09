@@ -182,7 +182,6 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
         else if (g == 2) gq.facial200 = v;
         else if (g == 3) gq.facial300 = v;
         else if (g == 17) gq.facial1700 = v;
-        else if (g > 20) gq.extra.push_back(id);  // an HD model's own groups
     }
     for (int s = 0; s < game::Inventory::NUM_EQUIP_SLOTS; s++) {
         const auto& slot = inventory.getEquipSlot(static_cast<game::EquipSlot>(s));
@@ -201,6 +200,9 @@ void GameScreen::updateCharacterGeosets(game::Inventory& inventory) {
             gq.deathKnight = static_cast<uint8_t>(ch->characterClass) == 6;
         }
     }
+    // An HD model's own groups, which the bare set above already holds but
+    // cannot say "none" of.
+    if (appearanceComposer_) gq.extra = appearanceComposer_->playerHdExtraGeosets();
     (void)getGeosetGroup; (void)findEquippedDisplayId; (void)hasEquippedType;
     (void)geosetGroup1Field; (void)geosetGroup3Field;
     if (assetManager) geosets = core::buildStockCharacterGeosets(*assetManager, gq);

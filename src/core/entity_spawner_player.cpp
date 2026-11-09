@@ -404,7 +404,10 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     if (hdLook) {
         // The HD model's own hair, beards (meshes) and extra groups.
         pipeline::CharacterAppearance who;
+        who.skinId = look.skinId;
+        who.faceId = look.faceId;
         who.hairStyleId = hairStyleId;
+        who.hairColorId = look.hairColorId;
         who.facialHairId = facialFeatures;
         const auto hd = pipeline::resolveHdCharacterGeosets(*hdLook, who);
         selectedHairScalp = hd.hairScalp > 0 ? hd.hairScalp : 1;
@@ -416,7 +419,7 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     std::unordered_set<uint16_t> activeGeosets = bareGeosetsFor(
         selectedHairScalp,
         hdLook ? &hdFacial : itFacial != facialHairGeosetMap_.end() ? &itFacial->second : nullptr, raceId);
-    activeGeosets.insert(hdExtra.begin(), hdExtra.end());
+    pipeline::applyHdExtraGeosets(activeGeosets, hdExtra);
     if (hdLook) {
         // The face's shape: its .bone adjustments.
         pipeline::CharacterAppearance who;
@@ -585,8 +588,12 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     }
     gq.hairScalp = selectHairScalpGeoset(hairGeosetMap_, st.raceId, st.genderId, hairStyleId);
     if (st.hdLook) {
+        const AppearanceBytes stLook = unpackAppearanceBytes(st.appearanceBytes);
         pipeline::CharacterAppearance who;
+        who.skinId = stLook.skinId;
+        who.faceId = stLook.faceId;
         who.hairStyleId = hairStyleId;
+        who.hairColorId = stLook.hairColorId;
         who.facialHairId = st.facialFeatures;
         const auto hd = pipeline::resolveHdCharacterGeosets(*st.hdLook, who);
         gq.hairScalp = hd.hairScalp > 0 ? hd.hairScalp : 1;
