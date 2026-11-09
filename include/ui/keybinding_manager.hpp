@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <utility>
+#include <vector>
 
 union SDL_Event;
 
@@ -61,6 +62,19 @@ public:
     std::string commandForKey(const std::string& key) const;
     std::string resolveBindingKey(const std::string& key) const;
     std::string resolveCommand(const std::string& key) const;
+
+    /// Override bindings (SetOverrideBinding and its siblings): a binding an
+    /// owner frame lays over a key without touching the saved set, removed
+    /// again with ClearOverrideBindings(owner). A priority override beats an
+    /// ordinary override, which beats the saved binding; among owners of the
+    /// same rank the most recent wins, as in the client. ElvUI's and
+    /// LibActionButton's bar keys and the vehicle bar all work this way.
+    /// An empty command removes this owner's override of the key.
+    void setOverrideBinding(uintptr_t owner, bool priority, const std::string& key,
+                            const std::string& command);
+    void clearOverrideBindings(uintptr_t owner);
+    /// The override in force for a key, or "" when there is none.
+    std::string overrideForKey(const std::string& key) const;
     bool isCommandPressed(const std::string& command, bool repeat = false) const;
     bool isCommandDown(const std::string& command) const;
     static const char* commandForAction(Action action);
@@ -116,6 +130,15 @@ private:
     std::map<std::string, std::set<std::string>> virtualCommands_;
     std::set<std::string> virtualCommandPressed_;
     std::set<std::string> virtualPressQueued_;  ///< scripted presses for the next input frame
+    struct OverrideBinding {
+        uintptr_t owner = 0;
+        bool priority = false;
+        uint64_t order = 0;
+        std::string command;
+    };
+    /// Normalised key -> every owner's override of it.
+    std::map<std::string, std::vector<OverrideBinding>> overrides_;
+    uint64_t overrideOrder_ = 0;
     std::pair<std::string, std::string> resolve(const std::string& key, bool fallback) const;
     bool keyActive(const std::string& key, bool pressed, bool repeat = false) const;
     void initializeDefaults(Device device);

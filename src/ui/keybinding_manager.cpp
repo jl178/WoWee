@@ -412,9 +412,58 @@ bool KeybindingManager::saveBindings(const std::string& path) const {
     if (!out) { LOG_WARNING("Could not write bindings to ", temp.string()); return false; }
     return replaceFile(temp, file);
 }
+void KeybindingManager::setOverrideBinding(uintptr_t owner, bool priority,
+                                           const std::string& requestedKey,
+                                           const std::string& command) {
+    std::string key = requestedKey;
+    if (!normalizeKey(key)) return;
+    auto& list = overrides_[key];
+    list.erase(std::remove_if(list.begin(), list.end(),
+                              [owner](const OverrideBinding& o) { return o.owner == owner; }),
+               list.end());
+    if (!command.empty()) list.push_back({owner, priority, ++overrideOrder_, command});
+    if (list.empty()) overrides_.erase(key);
+}
+
+void KeybindingManager::clearOverrideBindings(uintptr_t owner) {
+    for (auto it = overrides_.begin(); it != overrides_.end();) {
+        auto& list = it->second;
+        list.erase(std::remove_if(list.begin(), list.end(),
+                                  [owner](const OverrideBinding& o) { return o.owner == owner; }),
+                   list.end());
+        it = list.empty() ? overrides_.erase(it) : std::next(it);
+    }
+}
+
+std::string KeybindingManager::overrideForKey(const std::string& requestedKey) const {
+    std::string key = requestedKey;
+    if (!normalizeKey(key)) return {};
+    const auto it = overrides_.find(key);
+    if (it == overrides_.end()) return {};
+    const OverrideBinding* best = nullptr;
+    for (const auto& o : it->second) {
+        if (!best || (o.priority && !best->priority) ||
+            (o.priority == best->priority && o.order > best->order)) {
+            best = &o;
+        }
+    }
+    return best ? best->command : std::string();
+}
+
 std::pair<std::string, std::string> KeybindingManager::resolve(const std::string& requestedKey, bool fallback) const {
     std::string key = requestedKey;
     if (!normalizeKey(key)) return {};
+    // At run time (fallback), an override laid over the key wins over the
+    // saved binding - the chord first, then its base key unless the chord
+    // has a saved binding of its own. The exact lookup the editor and
+    // GetBindingAction use sees only the saved set, as in the client.
+    if (fallback && !overrides_.empty()) {
+        if (const std::string over = overrideForKey(key); !over.empty()) return {key, over};
+        const std::string base = baseKey(key);
+        if (base != key && resolve(key, false).second.empty()) {
+            if (const std::string over = overrideForKey(base); !over.empty()) return {base, over};
+        }
+    }
     const auto& rows = bindings(deviceForKey(key));
     const auto exact = [&](const std::string& identity) -> std::pair<std::string, std::string> {
         for (const auto& [command, slots] : rows)
