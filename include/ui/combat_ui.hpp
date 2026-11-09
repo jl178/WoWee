@@ -54,6 +54,9 @@ public:
 private:
     float combatTextScale_ = 1.0f;
     /// One number over a unit, by the stock world-text rules (0x7e5c30).
+    /// Screen rectangles of the world texts drawn over each unit this frame
+    /// (x0, y0, x1, y1), so one landing with another is stepped clear of it.
+    std::unordered_map<uint64_t, std::vector<ImVec4>> placedWorldText_;
     void drawWorldText(game::GameHandler& gameHandler, const game::CombatTextEntry& entry,
                        std::unordered_map<uint64_t, int>& onUnit, const glm::mat4& viewProj,
                        const rendering::Camera* camera, float screenW, float screenH,

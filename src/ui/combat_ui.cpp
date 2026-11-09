@@ -203,6 +203,26 @@ void CombatUI::drawWorldText(game::GameHandler& gameHandler, const game::CombatT
     float sy = (ndc.y * 0.5f + 0.5f) * screenH - ts.y * 0.5f;
     sx = std::clamp(sx, 0.0f, std::max(0.0f, screenW - ts.x));
     sy = std::clamp(sy, 0.0f, std::max(0.0f, screenH - ts.y));
+    // Two numbers that land together (a white swing and a yellow spell in
+    // the same instant) start at the same point and rose together, one
+    // printed over the other. A number now steps up past any already drawn
+    // over the same unit this frame that it would cover.
+    {
+        auto& placed = placedWorldText_[entry.dstGuid];
+        for (int guard = 0; guard < 8; ++guard) {
+            bool moved = false;
+            for (const ImVec4& r : placed) {
+                const bool overlapX = sx < r.z && sx + ts.x > r.x;
+                const bool overlapY = sy < r.w && sy + ts.y > r.y;
+                if (overlapX && overlapY) {
+                    sy = r.y - ts.y;
+                    moved = true;
+                }
+            }
+            if (!moved) break;
+        }
+        placed.push_back(ImVec4(sx, sy, sx + ts.x, sy + ts.y));
+    }
     const float sh = su::ddcPixels(su::kWorldTextShadowDdc, screenW, screenH) * combatTextScale_;
     ImDrawList* drawList = ImGui::GetBackgroundDrawList();
     drawList->AddText(font, px, ImVec2(std::round(sx + sh), std::round(sy + sh)),
@@ -281,6 +301,22 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler, bool drawIncomin
 
     // At most four texts on a unit at once; a fifth is dropped (0x7e5c30).
     std::unordered_map<uint64_t, int> worldTextOnUnit;
+    placedWorldText_.clear();
+    // The world text first, newest to oldest: a number that lands with
+    // another keeps its place and the older one steps up past it, so the
+    // older stays above as both rise instead of the two trading places.
+    for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
+        const auto& entry = *it;
+        const bool incoming =
+            entry.dstGuid == playerGuid ||
+            (entry.dstGuid == 0 && !entry.isPlayerSource) ||
+            entry.type == game::CombatTextEntry::XP_GAIN ||
+            entry.type == game::CombatTextEntry::HONOR_GAIN ||
+            entry.type == game::CombatTextEntry::PROC_TRIGGER;
+        if (!incoming)
+            drawWorldText(gameHandler, entry, worldTextOnUnit, viewProj, camera, screenW, screenH,
+                          font);
+    }
     for (const auto& entry : entries) {
         const float alpha = 1.0f - (entry.age / game::CombatTextEntry::LIFETIME);
         // Incoming is anything that landed on the player, or that belongs to
@@ -295,11 +331,7 @@ void CombatUI::renderCombatText(game::GameHandler& gameHandler, bool drawIncomin
         // What the player and the player's pet do to other units is the
         // engine's world text (WorldText.cpp), by its own rules; nothing else
         // the player causes is drawn over a unit.
-        if (!incoming) {
-            drawWorldText(gameHandler, entry, worldTextOnUnit, viewProj, camera, screenW, screenH,
-                          font);
-            continue;
-        }
+        if (!incoming) continue;  // drawn below, newest first
         // The fct* switches are the floating text's; the world text over a
         // target was filtered by its own CVars when the line was raised.
         if (incoming && !wanted(entry.type)) continue;

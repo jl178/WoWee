@@ -4425,10 +4425,13 @@ static int lua_HasKey(lua_State* L) { lua_pushboolean(L, 1); return 1; }
 // not tell inside from outside and offered the wrong direction.
 static int lua_IsInLFGDungeon(lua_State* L) {
     auto* gh = getGameHandler(L);
-    // In a finder group and inside an instance, or the queue state saying so.
+    // In a finder dungeon and actually inside the instance. The finder's
+    // "in dungeon" state holds from the moment the group forms, wherever the
+    // player stands - asked alone, it put "Teleport Out" on the minimap eye
+    // of a player still in Dalaran, and there was no way to teleport in.
     const bool finderGroup = gh && gh->isInGroup() && (gh->getPartyData().groupType & 0x0C) != 0;
-    lua_pushboolean(L, gh && (gh->getLfgState() == game::LfgState::InDungeon ||
-                              (finderGroup && gh->isInInstance())) ? 1 : 0);
+    const bool finderDungeon = gh && (gh->getLfgState() == game::LfgState::InDungeon || finderGroup);
+    lua_pushboolean(L, finderDungeon && gh->isInInstance() ? 1 : 0);
     return 1;
 }
 
