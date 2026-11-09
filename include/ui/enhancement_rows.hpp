@@ -899,7 +899,6 @@ struct EnhancementPresetValue {
 };
 inline constexpr EnhancementPresetValue kEnhancedCombatValues[] = {
     {"poseblend", 1.0f},
-    {"hdcharacters", 1.0f},
     {"remotesmoothing", 1.0f},
     {"spellqueue", 400.0f},
     {"swingtimer", 1.0f},

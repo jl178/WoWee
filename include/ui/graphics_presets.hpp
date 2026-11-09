@@ -140,7 +140,6 @@ constexpr rendering::Enhancements enhancedEnhancements() {
     // fades from the drawn pose, smoothed other units, the 400 ms spell
     // queue and the swing timer.
     e.poseBlend = true;
-    e.hdCharacters = true;
     e.remoteSmoothing = true;
     e.spellQueueWindow = 400;
     e.swingTimer = true;
