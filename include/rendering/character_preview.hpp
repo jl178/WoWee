@@ -311,8 +311,6 @@ private:
     bool useFemaleModel_ = false;
     uint8_t hairStyle_ = 0;
     uint8_t facialHair_ = 0;
-    uint8_t skin_ = 0, face_ = 0, hairColor_ = 0;
-    std::vector<uint16_t> hdExtra_;  // the HD model's own geoset groups
     std::string bodySkinPath_;
     /// CharSections' second texture on the skin row: the Skin Extra art an
     /// HD model draws its ears, eyes and mouth from.

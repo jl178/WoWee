@@ -2,7 +2,6 @@
 
 #include "core/helm_visual.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "pipeline/hd_characters.hpp"
 #include "pipeline/dbc_layout.hpp"
 
 namespace wowee {
@@ -83,7 +82,8 @@ std::unordered_set<uint16_t> buildStockCharacterGeosets(pipeline::AssetManager& 
     // spellings so the model draws whichever it carries.
     on.insert(kGeosetBareFeet);
     on.insert(kGeosetBareFeetAlt);
-    pipeline::applyHdExtraGeosets(on, q.extra);
+    for (uint16_t id : q.extra)
+        if (id / 100 > 20) on.insert(id);
     return on;
 }
 

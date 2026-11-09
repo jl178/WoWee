@@ -1424,9 +1424,6 @@ AtlasRegion256 regionFor(const std::string& pathLower) {
     // the reference client's brows (humanmale_hd_eyebrows_*), drawn over the face.
     // Only an HD atlas has them, where the head is the whole right half.
     if (pathLower.find("eyebrows") != std::string::npos) return {.x = 0, .y = 160, .w = 128, .h = 32, .known = true, .head = true};
-    // The HD layout's whole body square (CharComponentTextureSections type 12:
-    // a night elf's markings); tools/hd_characters names such layers so.
-    if (pathLower.find("_hdbody") != std::string::npos) return {.x = 0, .y = 0, .w = 256, .h = 256, .known = true};
     if (pathLower.find("pelvis")    != std::string::npos) return {.x = 128,  .y = 96, .w = 128, .h = 64, .known = true};
     if (pathLower.find("torso")     != std::string::npos) return {.x = 128,   .y = 0, .w = 128, .h = 64, .known = true};
     if (pathLower.find("armupper")  != std::string::npos) return {  .x = 0,   .y = 0, .w = 128, .h = 64, .known = true};

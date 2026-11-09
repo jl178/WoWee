@@ -204,13 +204,10 @@ std::unordered_set<uint16_t> CharacterPreview::buildBaseGeosets() {
     // its feet the other way stood in the portrait without them, and it named
     // the no-cloak panel, which the HD models do not carry.
     uint16_t hairScalp = selectedHairScalp;
-    hdExtra_.clear();
+    std::vector<uint16_t> hdExtra;
     if (hdLook_) {
         // The HD model's own hair, beards (meshes) and extra groups.
         pipeline::CharacterAppearance who;
-        who.skinId = skin_;
-        who.faceId = face_;
-        who.hairColorId = hairColor_;
         who.hairStyleId = static_cast<uint8_t>(hairStyle_);
         who.facialHairId = static_cast<uint8_t>(facialHair_);
         const auto hd = pipeline::resolveHdCharacterGeosets(*hdLook_, who);
@@ -219,12 +216,12 @@ std::unordered_set<uint16_t> CharacterPreview::buildBaseGeosets() {
         facial200 = hd.facial200;
         facial300 = hd.facial300;
         facial1700 = 0;
-        hdExtra_ = hd.extra;
+        hdExtra = hd.extra;
     }
     std::unordered_set<uint16_t> activeGeosets =
         core::bareCharacterGeosets(hairScalp, facial100, facial200, facial300, raceId,
                                    facial1700);
-    pipeline::applyHdExtraGeosets(activeGeosets, hdExtra_);
+    activeGeosets.insert(hdExtra.begin(), hdExtra.end());
 
     return activeGeosets;
 }
@@ -874,9 +871,6 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
     gender_ = gender;
     useFemaleModel_ = useFemaleModel;
     hairStyle_ = hairStyle;
-    skin_ = skin;
-    face_ = face;
-    hairColor_ = hairColor;
     facialHair_ = facialHair;
 
     std::unordered_set<uint16_t> activeGeosets = buildBaseGeosets();
@@ -987,6 +981,7 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
         else if (g == 2) gq.facial200 = v;
         else if (g == 3) gq.facial300 = v;
         else if (g == 17) gq.facial1700 = v;
+        else if (g > 20) gq.extra.push_back(id);  // an HD model's own groups
     }
     for (const auto& it : equipment) {
         if (it.displayModel == 0) continue;
@@ -996,7 +991,6 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
     gq.race = static_cast<uint8_t>(race_);
     gq.gender = static_cast<uint8_t>(gender_);
     gq.helmShown = false;
-    gq.extra = hdExtra_;  // an HD model's own groups
     (void)hasInvType; (void)getGeosetGroup; (void)geosetGroup1Field; (void)geosetGroup3Field;
     geosets = core::buildStockCharacterGeosets(*assetManager_, gq);
 
