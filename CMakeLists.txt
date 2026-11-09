@@ -1561,6 +1561,10 @@ else()
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         target_compile_options(wowee PRIVATE -Wno-odr)
         target_link_options(wowee PRIVATE -Wno-odr)
+        # GCC 16 at -O3 without LTO reports -Wrestrict inside libstdc++'s own
+        # vector copy (stl_uninitialized.h) with impossible ranges near 2^63
+        # - a known false positive that LTO hid by deferring the analysis.
+        target_compile_options(wowee PRIVATE -Wno-restrict)
     endif()
 endif()
 
