@@ -299,6 +299,57 @@ about 19 ms of GPU (8.5 ms at 1251x986, scaled by the pixels; a fullscreen run c
 for shadows that look about like the shadow map's. That is why the row is
 off on integrated GPUs.
 
+## The Enhanced preset's own passes (Iris Xe, 2026-11-10)
+
+Lab server, 1280x540 window, vsync off, `WOWEE_FREEZE_CLOCK=100`, time held
+at noon, the GPU at 1.5 GHz with no build running. Five fixed views (the
+Goldshire inn, the Goldshire crossroads, the Trade District, Crystal Lake,
+the Crossroads in the Barrens), the build before and after taken in turn,
+two runs each, three 5.5 s windows a view; per-pass medians in ms.
+
+| pass | inn | Goldshire | Trade | Crystal Lake | Barrens |
+|---|---|---|---|---|---|
+| final pass (`fxaa`) | 1.59 -> 1.06 | 2.29 -> 1.45 | 1.65 -> 0.91 | 1.49 -> 0.83 | 1.64 -> 0.90 |
+| fill and bounce light (`ambient occlusion`) | 0.51 -> 0 | 0.61 / 0.69 | 0.50 | 0.53 | 0.49 |
+| `culling + composites` (the grass cull) | 0.26 -> 0.17 | 0.23 -> 0.16 | 0.06 | 0.39 -> 0.22 | 0.19 -> 0.13 |
+| frame's GPU | 5.8 -> 5.4 | 11.9 -> 11.8 | 9.2 -> 8.4 | 10.7 -> 9.9 | 8.4 -> 7.5 |
+
+(The Goldshire road and the inn have walking units and a scene pass that
+moves 0.5 ms between runs of the same build; the other three are steady.)
+The Classic preset on the same views, same session: 5.7, 8.9, 11.0, 8.5 and
+8.4 ms, its glow pass 0.27-0.42 ms. Classic's shorter view distance leaves
+it more terrain in the Trade District; elsewhere Enhanced's own passes are
+now about 1-1.5 ms over it, most of that the final pass's FXAA and the
+fill and bounce pass.
+
+What the final pass spent, by taking pieces out of it: FXAA's edge search
+~0.7-0.85, the colour grade ~0.35, the glow's 16-tap blur ~0.25, the bloom
+~0.6 (most of it the 8-bit halo's tone map at nine taps, worked out and
+discarded under the HDR scene). Each change keeps the picture:
+
+- The pixel and its eight neighbours are fetched, not filtered: sober they
+  sit on texel centres, where the bilinear filter returns the texel.
+- The HDR scene's bloom works out only its own half.
+- The grade reads a segment's two ends as one load, one continent's table
+  (the select read both), and nothing where its weight is 0. A table
+  indexed per pixel is a memory read on this GPU, not a register.
+- The glow's blur is bilinear between the quarter-size texels' corners
+  (every tap is half a texel off), so `fxaa_blur.comp` works out the
+  corner sums once a frame (0.09 ms) and the pass takes one tap of them.
+  Their alpha is the brightest texel round each corner, and under the HDR
+  bloom's floor the bloom's taps are skipped (0.18-0.2 ms on its own).
+
+The fill and bounce pass is skipped wholly indoors, where every term of it
+is outdoor light, and the grass cull reads a 32-byte copy of each blade
+instead of the draw's 64-byte one. Screenshots of the five views before and
+after differ by 0.12-0.21 of a level on average where two runs of the old
+build agree with each other (the glow's sums are kept at half precision).
+
+Tried and left: neighbours' luma through quad derivatives (slower, 1.38 ->
+1.58 ms), skipping the water reflection and refraction copy with no water
+surface in the frustum (at the Enhanced view distance some always is), the
+fog inject (already half rate).
+
 ## The enhancement set's budget (2026-11-04)
 
 enhancements-plan.md 3.11 has the tables. In short, what moved the set's
