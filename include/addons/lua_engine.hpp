@@ -323,6 +323,20 @@ public:
     bool loadSavedVariables(const std::string& path);
     bool saveSavedVariables(const std::string& path, const std::vector<std::string>& varNames);
 
+    /// The layout cache (layout-cache.txt in the client): where the player
+    /// put each named frame they moved. Written on the way out for every
+    /// frame that is user-placed and not marked dontSavePosition; read before
+    /// the interface loads, and applied to a movable frame of that name as it
+    /// is built - which is what makes it user-placed again.
+    /// The frame a drag (RegisterForDrag) is under way on, or 0 - IsDragging.
+    [[nodiscard]] uint32_t draggingWidget() const { return draggingWid_; }
+    /// The edit box that has the keyboard, or 0 - GetCurrentKeyBoardFocus.
+    [[nodiscard]] uint32_t focusedWidget() const { return focusedWid_; }
+
+    void loadLayoutCache(const std::string& path);
+    void saveLayoutCache(const std::string& path) const;
+    void applyLayoutCache(uint32_t wid);
+
     // Store addon info in registry for GetAddOnInfo/GetNumAddOns
     void setAddonList(const std::vector<TocFile>& addons);
 
@@ -359,6 +373,11 @@ public:
 
 private:
     lua_State* L_ = nullptr;
+    struct LayoutEntry {
+        float x = 0.0f, y = 0.0f;  ///< TOPLEFT from UIParent's BOTTOMLEFT, frame units
+        float w = 0.0f, h = 0.0f;  ///< kept for a resizable frame
+    };
+    std::unordered_map<std::string, LayoutEntry> layoutCache_;
     /// stepGarbageCollector's state, for the current L_. gcLiveKb_ is the
     /// heap as the last finished cycle left it; 0 until the first call.
     int gcLiveKb_ = 0;

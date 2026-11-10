@@ -128,6 +128,9 @@ private:
     bool loadAddon(const TocFile& addon);
     [[nodiscard]] std::string getSavedVariablesPath(const TocFile& addon) const;
     [[nodiscard]] std::string getSavedVariablesPerCharacterPath(const TocFile& addon) const;
+    /// The layout cache for this character: ~/.wowee/layout-cache.<name>.txt,
+    /// or without a name when none is known.
+    [[nodiscard]] std::string layoutCachePath() const;
     std::string characterName_;
 
     // addonName -> enabled. Absent means enabled (default on).

@@ -7279,6 +7279,8 @@ static int lua_CreateFrame(lua_State* L) {
         lua_pop(L, 1);
     }
 
+    // Built: where the player last put a frame of this name, if they did.
+    if (auto* e = engineFrom(L)) e->applyLayoutCache(widgetIdOf(L, lua_gettop(L)));
     return 1;
 }
 
@@ -7578,7 +7580,14 @@ void LuaEngine::registerCoreAPI() {
     lua_pushcfunction(L_, lua_wowee_setAnimOffset);
     lua_setglobal(L_, "__WoweeSetAnimOffset");
 
-    lua_pushcfunction(L_, lua_WoweeFireOnLoad);
+    // A frame the XML built has its OnLoad run, and is then put where the
+    // player last left it (the layout cache), as CreateFrame does.
+    lua_pushcfunction(L_, [](lua_State* L) -> int {
+        lua_settop(L, 1);
+        lua_WoweeFireOnLoad(L);
+        if (auto* e = engineFrom(L)) e->applyLayoutCache(widgetIdOf(L, 1));
+        return 0;
+    });
     lua_setglobal(L_, "__WoweeFireOnLoad");
 
     lua_pushcfunction(L_, lua_GetMouseFocus);
@@ -14369,12 +14378,90 @@ void LuaEngine::setAddonList(const std::vector<TocFile>& addons) {
     lua_setfield(L_, LUA_REGISTRYINDEX, "wowee_addon_info");
 }
 
+// The layout cache. One line a frame:
+//   <name> <x> <y> <width> <height>
+// x and y are the frame's TOPLEFT from UIParent's BOTTOMLEFT in the frame's
+// own units, which is how the client restores it: a single TOPLEFT anchor on
+// UIParent, the frame user-placed again. The size is the frame's own and is
+// put back only on a resizable frame - a frame the player can only move keeps
+// the size its code gives it.
+void LuaEngine::loadLayoutCache(const std::string& path) {
+    layoutCache_.clear();
+    std::ifstream in(path);
+    if (!in) return;
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream ss(line);
+        std::string name;
+        LayoutEntry e;
+        if (!(ss >> name >> e.x >> e.y >> e.w >> e.h)) continue;
+        if (!std::isfinite(e.x) || !std::isfinite(e.y) || !std::isfinite(e.w) ||
+            !std::isfinite(e.h)) continue;
+        layoutCache_[name] = e;
+    }
+    LOG_INFO("LuaEngine: layout cache has ", layoutCache_.size(), " frames (", path, ")");
+}
+
+void LuaEngine::saveLayoutCache(const std::string& path) const {
+    // What the player placed this session, and what was placed before and is
+    // not in this session's interface at all (an addon disabled for now) -
+    // the client keeps those too rather than forgetting them.
+    std::map<std::string, LayoutEntry> out(layoutCache_.begin(), layoutCache_.end());
+    for (size_t id = 1; id < widgets_.size(); ++id) {
+        const ui::Widget* w = widgets_.get(static_cast<uint32_t>(id));
+        if (!w || w->name.empty() || w->kind != ui::WidgetKind::Frame) continue;
+        if (!w->userMoved) { out.erase(w->name); continue; }
+        if (w->dontSavePosition || w->rectW <= 0.0f || w->rectH <= 0.0f) continue;
+        const float es = w->effScale > 0.0f ? w->effScale : 1.0f;
+        LayoutEntry e;
+        e.x = w->left / es;
+        e.y = (w->bottom + w->rectH) / es;
+        e.w = w->rectW / es;
+        e.h = w->rectH / es;
+        out[w->name] = e;
+    }
+    std::ofstream f(path, std::ios::trunc);
+    if (!f) return;
+    for (const auto& [name, e] : out) {
+        f << name << ' ' << e.x << ' ' << e.y << ' ' << e.w << ' ' << e.h << '\n';
+    }
+}
+
+void LuaEngine::applyLayoutCache(uint32_t wid) {
+    if (layoutCache_.empty() || wid == 0) return;
+    ui::Widget* w = widgets_.get(wid);
+    if (!w || w->name.empty() || !w->movable || w->dontSavePosition) return;
+    auto it = layoutCache_.find(w->name);
+    if (it == layoutCache_.end()) return;
+    const ui::Widget* uiParent = widgets_.findByName("UIParent");
+    if (!uiParent) return;
+    const LayoutEntry& e = it->second;
+    widgets_.clearPoints(wid);
+    w = widgets_.get(wid);
+    ui::Anchor a;
+    a.point = "TOPLEFT";
+    a.relativeTo = uiParent->id;
+    a.relativePoint = "BOTTOMLEFT";
+    a.x = e.x;
+    a.y = e.y;
+    w->anchors.push_back(a);
+    if (w->resizable && e.w > 0.0f && e.h > 0.0f) {
+        widgets_.setWidth(wid, e.w);
+        widgets_.setHeight(wid, e.h);
+    }
+    w = widgets_.get(wid);
+    w->userMoved = true;
+    widgets_.markLayoutDirty();
+}
+
 bool LuaEngine::loadSavedVariables(const std::string& path) {
     if (!L_) return false;
     std::ifstream f(path);
     if (!f.is_open()) return false; // No saved data yet - not an error
     std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     if (content.empty()) return true;
+    // Saved variables are the addon's own globals and carry its taint.
+    taint::SourceLoadScope taintScope(L_, taint::idForAddon(addonContext_));
     int err = luaL_dostring(L_, content.c_str());
     if (err != 0) {
         LOG_WARNING("LuaEngine: error loading saved variables from '", path, "': ",

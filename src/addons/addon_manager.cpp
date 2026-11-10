@@ -388,6 +388,10 @@ std::vector<std::string> AddonManager::deferredAddonGlobals() const {
 }
 
 void AddonManager::loadAllAddons() {
+    // Where the player left the frames they moved, read before anything is
+    // built so each frame finds its place as it is made.
+    luaEngine_.loadLayoutCache(layoutCachePath());
+
     // The original interface, when asked for. Before any addon, because addons
     // are written against a world where FrameXML has already defined its frames
     // and its several thousand functions.
@@ -668,6 +672,11 @@ void AddonManager::saveEnabledState() const {
 
 std::string AddonManager::getSavedVariablesPath(const TocFile& addon) const {
     return addon.basePath + "/" + addon.addonName + ".lua.saved";
+}
+
+std::string AddonManager::layoutCachePath() const {
+    return core::getConfigRoot() + "/layout-cache" +
+           (characterName_.empty() ? std::string() : "." + characterName_) + ".txt";
 }
 
 std::string AddonManager::getSavedVariablesPerCharacterPath(const TocFile& addon) const {
@@ -2064,6 +2073,7 @@ void AddonManager::saveAllSavedVariables() {
     // the way out of the process would write every one of those files from a
     // state that never loaded them.
     if (!addonsLoaded_) return;
+    luaEngine_.saveLayoutCache(layoutCachePath());
     for (const auto& addon : addons_) {
         auto savedVars = addon.getSavedVariables();
         if (!savedVars.empty()) {
