@@ -4107,6 +4107,48 @@ int lua_Region_Show(lua_State* L) {
     }
     return 0;
 }
+/// OnHide for a frame that has just stopped being shown, and for every
+/// frame under it that was shown with it, at once - which is when the client
+/// runs them (CSimpleFrame::Hide). The deferred pass is told it has been
+/// said (reportedVisible), so it does not say it again.
+static void fireOnHideNow(lua_State* L, wowee::ui::WidgetTree* tree, uint32_t rootId) {
+    std::vector<uint32_t> order{rootId};
+    for (size_t i = 0; i < order.size(); ++i) {
+        const auto* w = tree->get(order[i]);
+        if (!w) continue;
+        for (uint32_t c : w->children) {
+            const auto* cw = tree->get(c);
+            if (cw && cw->kind == wowee::ui::WidgetKind::Frame && cw->shown) order.push_back(c);
+        }
+    }
+    for (uint32_t id : order) {
+        auto* w = tree->get(id);
+        if (!w) continue;
+        w->reportedVisible = false;
+        w->onShowFired = false;
+        lua_getglobal(L, "__WoweeFramesByWid");
+        if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
+        lua_rawgeti(L, -1, static_cast<int>(id));
+        lua_remove(L, -2);
+        if (!lua_istable(L, -1)) { lua_pop(L, 1); continue; }
+        const int frame = lua_gettop(L);
+        lua_getfield(L, frame, "__scripts");
+        if (lua_istable(L, -1)) {
+            lua_getfield(L, -1, "OnHide");
+            if (lua_isfunction(L, -1)) {
+                lua_pushvalue(L, frame);
+                if (pcallScript(L, "OnHide", 1, 0) != 0) {
+                    LOG_WARNING("[Lua] OnHide error: ", lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
+                    lua_pop(L, 1);
+                }
+            } else {
+                lua_pop(L, 1);
+            }
+        }
+        lua_settop(L, frame - 1);
+    }
+}
+
 int lua_Region_Hide(lua_State* L) {
     // No OnHide from here, and it is not the asymmetry with Show it looks
     // like. Running it here is what the real client does and it fixes a real
@@ -4125,16 +4167,30 @@ int lua_Region_Hide(lua_State* L) {
     //
     // The vendor and guild bank no longer take the reopen path - see
     // openBagsForTrading - so what is left exposed is the bag keybind.
+    bool hideNow = false;
+    uint32_t hiddenId = 0;
     if (auto* w = widgetOf(L, 1)) {
-        // Counted only where a handler is owed. A frame hidden before anything
-        // was hooked to it owes nothing, and the real client runs nothing
-        // there either. Turtle's transmog timer is CreateFrame, Hide, and only
-        // then SetScript for OnShow, OnHide and OnUpdate: counting that Hide
-        // made the Show which follows the second toggle, Show defers OnShow to
-        // updateVisibility on a second toggle, and updateVisibility fires none
-        // for a frame with no anchors. So the timer ran its OnUpdate against
-        // the startTime its OnShow was going to set. Reported in #132.
-        if (w->shown && frameScriptSet(L, 1, "OnHide") && w->shownToggles < 200) {
+        // A frame that was running - shown, under shown ancestors - stops
+        // running now, and its OnHide (and its shown children's) runs now, as
+        // in the client. Firing it later let a Show in the same breath run
+        // its OnShow first: ElvUI's installer hides its option buttons and
+        // shows the page's, and their OnHide/OnShow handlers lay the others
+        // out, so the order decides where every button ends up.
+        // Not while the client is still building the frame from its XML or a
+        // template: hidden="true" is a property it is made with, not a Hide.
+        hideNow = w->shown && w->kind == wowee::ui::WidgetKind::Frame &&
+                  !taint::constructing() && ancestorsShown(L, w);
+        hiddenId = w->id;
+        // Otherwise counted, only where a handler is owed. A frame hidden
+        // before anything was hooked to it owes nothing, and the real client
+        // runs nothing there either. Turtle's transmog timer is CreateFrame,
+        // Hide, and only then SetScript for OnShow, OnHide and OnUpdate:
+        // counting that Hide made the Show which follows the second toggle,
+        // Show defers OnShow to updateVisibility on a second toggle, and
+        // updateVisibility fires none for a frame with no anchors. So the
+        // timer ran its OnUpdate against the startTime its OnShow was going
+        // to set. Reported in #132.
+        if (!hideNow && w->shown && frameScriptSet(L, 1, "OnHide") && w->shownToggles < 200) {
             ++w->shownToggles;
         }
         if (auto* tree = wowee::addons::getWidgetTree(L)) tree->noteVisibilityCandidate(w->id);
@@ -4168,6 +4224,9 @@ int lua_Region_Hide(lua_State* L) {
         w->shown = false;
     }
     lua_pushboolean(L, 0); lua_setfield(L, 1, "__visible");
+    if (hideNow) {
+        if (auto* tree = wowee::addons::getWidgetTree(L)) fireOnHideNow(L, tree, hiddenId);
+    }
     return 0;
 }
 int lua_Region_IsShown(lua_State* L) {
