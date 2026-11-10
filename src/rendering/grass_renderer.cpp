@@ -127,6 +127,16 @@ bool GrassRenderer::createSourceBuffer() {
     bladeCount_ = 0;
     setObjectName(vkCtx_->getDevice(), VK_OBJECT_TYPE_BUFFER,
                   reinterpret_cast<uint64_t>(sourceBuffer_), "grass source blades");
+    // And the cull's copy of them, at the same capacity (32 MB).
+    const std::vector<GrassCullBladeGPU> emptyCull(kMaxBlades);
+    AllocatedBuffer cullSource = uploadBuffer(*vkCtx_, emptyCull.data(),
+                                              sizeof(GrassCullBladeGPU) * kMaxBlades,
+                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    if (cullSource.buffer == VK_NULL_HANDLE) return false;
+    cullSourceBuffer_ = cullSource.buffer;
+    cullSourceAlloc_ = cullSource.allocation;
+    setObjectName(vkCtx_->getDevice(), VK_OBJECT_TYPE_BUFFER,
+                  reinterpret_cast<uint64_t>(cullSourceBuffer_), "grass cull blades");
 
     // One profile per distinct vegetation mix. Uploaded with a meadow default
     // so a draw before the table is built is green rather than black.
@@ -172,18 +182,23 @@ bool GrassRenderer::setPopulation(const pipeline::GrassBladeSample* blades, size
     }
 
     std::vector<GrassBladeGPU> packed(count);
-    packBlades(blades, count, packed.data());
+    std::vector<GrassCullBladeGPU> cullPacked(count);
+    packBlades(blades, count, packed.data(), cullPacked.data());
 
     // A full buffer is 64 MB; the stage is made once per population.
     const VkDeviceSize bytes = sizeof(GrassBladeGPU) * count;
     if (!uploadIntoBuffer(*vkCtx_, packed.data(), bytes, sourceBuffer_)) return false;
+    if (!uploadIntoBuffer(*vkCtx_, cullPacked.data(), sizeof(GrassCullBladeGPU) * count, cullSourceBuffer_)) {
+        return false;
+    }
 
     bladeCount_ = static_cast<uint32_t>(count);
     framesSincePopulated_ = 0;
     return complete;
 }
 
-void GrassRenderer::packBlades(const pipeline::GrassBladeSample* blades, size_t count, GrassBladeGPU* out) {
+void GrassRenderer::packBlades(const pipeline::GrassBladeSample* blades, size_t count, GrassBladeGPU* out,
+                               GrassCullBladeGPU* cullOut) {
     GrassBladeGPU* packed = out;
     for (size_t i = 0; i < count; ++i) {
         const auto& b = blades[i];
@@ -196,6 +211,8 @@ void GrassRenderer::packBlades(const pipeline::GrassBladeSample* blades, size_t 
         // past any range, so the shaders need no special case.
         float fade = b.fadeDistance > 0.0f ? b.fadeDistance : 1.0e6f;
         packed[i].groundHighlight = glm::vec4(b.groundHighlight, b.submerged ? -fade : fade);
+        cullOut[i].positionHeight = packed[i].positionHeight;
+        cullOut[i].widthFade = glm::vec4(packed[i].facingWidthPhase.y, packed[i].groundHighlight.w, 0.0f, 0.0f);
     }
 }
 
@@ -213,7 +230,8 @@ void GrassRenderer::setPopulationAsync(std::vector<pipeline::GrassBladeSample>&&
     auto p = std::make_unique<PendingPopulation>();
     p->count = static_cast<uint32_t>(count);
     p->bytes = sizeof(GrassBladeGPU) * count;
-    p->staging = createBuffer(vkCtx_->getAllocator(), p->bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    p->cullBytes = sizeof(GrassCullBladeGPU) * count;
+    p->staging = createBuffer(vkCtx_->getAllocator(), p->bytes + p->cullBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                               VMA_MEMORY_USAGE_CPU_ONLY);
     if (p->staging.buffer == VK_NULL_HANDLE) return;
     void* mapped = nullptr;
@@ -224,7 +242,9 @@ void GrassRenderer::setPopulationAsync(std::vector<pipeline::GrassBladeSample>&&
     p->blades = std::move(blades);
     const pipeline::GrassBladeSample* src = p->blades.data();
     auto* dst = static_cast<GrassBladeGPU*>(mapped);
-    p->work = std::async(std::launch::async, [src, count, dst]() { packBlades(src, count, dst); });
+    auto* cullDst = reinterpret_cast<GrassCullBladeGPU*>(static_cast<char*>(mapped) + p->bytes);
+    p->work = std::async(std::launch::async,
+                         [src, count, dst, cullDst]() { packBlades(src, count, dst, cullDst); });
     pending_ = std::move(p);
 }
 
@@ -240,7 +260,9 @@ void GrassRenderer::landPending() {
     vmaUnmapMemory(allocator, pending_->staging.allocation);
     const VkBuffer src = pending_->staging.buffer;
     const VkDeviceSize bytes = pending_->bytes;
+    const VkDeviceSize cullBytes = pending_->cullBytes;
     const VkBuffer dst = sourceBuffer_;
+    const VkBuffer cullDst = cullSourceBuffer_;
     // Batched, not waited on (see setProfiles).
     const bool own = !vkCtx_->isInUploadBatch();
     if (own) vkCtx_->beginUploadBatch();
@@ -248,6 +270,10 @@ void GrassRenderer::landPending() {
         VkBufferCopy region{};
         region.size = bytes;
         vkCmdCopyBuffer(cmd, src, dst, 1, &region);
+        VkBufferCopy cullRegion{};
+        cullRegion.srcOffset = bytes;
+        cullRegion.size = cullBytes;
+        vkCmdCopyBuffer(cmd, src, cullDst, 1, &cullRegion);
     });
     if (own) vkCtx_->endUploadBatch();
     AllocatedBuffer staging = pending_->staging;
@@ -369,7 +395,7 @@ bool GrassRenderer::createCullPipeline() {
         VkDescriptorBufferInfo uboInfo{
             .buffer = cullUniform_[i], .offset = 0, .range = sizeof(GrassCullUniformsGPU)};
         VkDescriptorBufferInfo sourceInfo{
-            .buffer = sourceBuffer_, .offset = 0, .range = VK_WHOLE_SIZE};
+            .buffer = cullSourceBuffer_, .offset = 0, .range = VK_WHOLE_SIZE};
         VkDescriptorBufferInfo visibleInfo{
             .buffer = visibleBuffer_[i], .offset = 0, .range = VK_WHOLE_SIZE};
         VkDescriptorBufferInfo indirectInfo{
@@ -743,6 +769,7 @@ void GrassRenderer::shutdown() {
         drawSet_[i] = VK_NULL_HANDLE;
     }
     destroy(allocator, sourceBuffer_, sourceAlloc_);
+    destroy(allocator, cullSourceBuffer_, cullSourceAlloc_);
     destroy(allocator, indexBuffer_, indexAlloc_);
     destroy(allocator, profileBuffer_, profileAlloc_);
 

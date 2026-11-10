@@ -52,6 +52,29 @@ static_assert(offsetof(GrassBladeGPU, facingWidthPhase) == 16);
 static_assert(offsetof(GrassBladeGPU, groundShadow) == 32);
 static_assert(offsetof(GrassBladeGPU, groundHighlight) == 48);
 
+/// What the compute cull reads of a blade, packed apart from the rest.
+///
+/// Matches `GrassCullBlade` in `assets/shaders/grass_cull.comp.glsl`
+/// (std430). The cull runs over every blade of the window every frame, and
+/// read from GrassBladeGPU each blade cost its whole 64-byte line for the
+/// twenty bytes it looks at; this is the same five numbers in half the
+/// bytes (the Enhanced preset's field, ~175 thousand blades, was ~11 MB a
+/// frame through the Iris Xe's memory).
+///
+/// | offset | field          | copied from                                |
+/// |--------|----------------|--------------------------------------------|
+/// | 0      | positionHeight | GrassBladeGPU::positionHeight              |
+/// | 16     | widthFade.x    | GrassBladeGPU::facingWidthPhase.y (width)  |
+/// | 20     | widthFade.y    | GrassBladeGPU::groundHighlight.w (fade)    |
+struct GrassCullBladeGPU {
+    glm::vec4 positionHeight{};
+    glm::vec4 widthFade{};
+};
+
+static_assert(sizeof(GrassCullBladeGPU) == 32,
+              "GrassCullBladeGPU must be 32 bytes to match the std430 GrassCullBlade");
+static_assert(offsetof(GrassCullBladeGPU, widthFade) == 16);
+
 /// Cull parameters, one per frame in flight.
 ///
 /// Matches `GrassCullUniforms` in `grass_cull.comp.glsl` (std140). Laid out

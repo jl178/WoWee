@@ -13,16 +13,14 @@
 
 layout(local_size_x = 64) in;
 
-// Matches GrassBladeGPU in include/rendering/grass_blade.hpp (std430). All
-// four vec4s must be declared even though the cull only reads the first two:
-// this struct sets the array stride the shader indexes the shared buffer
-// with, and a two-vec4 version read every blade at half its real offset -
-// testing one blade's position and drawing another's.
-struct GrassBlade {
+// Matches GrassCullBladeGPU in include/rendering/grass_blade.hpp (std430):
+// the numbers this pass reads of each blade, in their own buffer, index for
+// index with the draw's GrassBladeGPU. Read from the draw's 64-byte blades,
+// every blade cost a whole cache line for the twenty bytes looked at.
+struct GrassCullBlade {
     vec4 positionHeight;    // xyz = root world position, w = height (yards)
-    vec4 facingWidthPhase;  // x = facing (radians), y = width, z = profile index, w = phase seed
-    vec4 groundShadow;      // unread here; part of the stride
-    vec4 groundHighlight;   // unread here; part of the stride
+    vec4 widthFade;         // x = width (yards), y = the blade's fade distance
+                            // (negative in water), zw unused
 };
 
 layout(std140, set = 0, binding = 0) uniform GrassCullUniforms {
@@ -35,7 +33,7 @@ layout(std140, set = 0, binding = 0) uniform GrassCullUniforms {
 };
 
 layout(std430, set = 0, binding = 1) readonly buffer GrassSource {
-    GrassBlade blades[];
+    GrassCullBlade blades[];
 };
 
 layout(std430, set = 0, binding = 2) writeonly buffer VisibleIndices {
@@ -56,7 +54,7 @@ void main() {
     uint id = gl_GlobalInvocationID.x;
     if (id >= bladeCount) return;
 
-    GrassBlade blade = blades[id];
+    GrassCullBlade blade = blades[id];
     vec3 root = blade.positionHeight.xyz;
     float height = blade.positionHeight.w;
 
@@ -66,11 +64,11 @@ void main() {
     // draw range outside the generated window, and which side of the field
     // was missing followed the camera around.
     //
-    // Each blade also carries its own fade distance (groundHighlight.w, sign
+    // Each blade also carries its own fade distance (widthFade.y, sign
     // borrowed for the submerged flag): its octave level's range, past which
     // the vertex shader has sunk it to nothing - so a blade past its own
     // fade is dead weight the draw need not carry.
-    float fadeDist = abs(blade.groundHighlight.w);
+    float fadeDist = abs(blade.widthFade.y);
     vec3 toCenter = root - rangeCenter.xyz;
     float distSq = dot(toCenter, toCenter);
     if ((debugFlags & 2u) == 0u && distSq > min(rangeCenter.w, fadeDist * fadeDist)) return;
@@ -79,7 +77,7 @@ void main() {
     // cover the blade at full bend, so a blade leaning out of its upright
     // bounds under wind is still tested against the volume it can reach.
     // Z is up: WoWee is Z-up in both canonical and render space.
-    float radius = max(height, blade.facingWidthPhase.y) * 0.75;
+    float radius = max(height, blade.widthFade.x) * 0.75;
     vec3 center = root + vec3(0.0, 0.0, height * 0.5);
     if ((debugFlags & 1u) == 0u) {
         for (int i = 0; i < 6; i++) {

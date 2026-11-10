@@ -119,14 +119,18 @@ private:
     struct PendingPopulation {
         std::future<void> work;
         AllocatedBuffer staging{};
-        VkDeviceSize bytes = 0;
+        VkDeviceSize bytes = 0;      ///< the draw's blades, at the start of staging
+        VkDeviceSize cullBytes = 0;  ///< the cull's, straight after them
         uint32_t count = 0;
         std::vector<pipeline::GrassBladeSample> blades;
     };
     std::unique_ptr<PendingPopulation> pending_;
     void landPending();
     bool createSourceBuffer();
-    static void packBlades(const pipeline::GrassBladeSample* blades, size_t count, GrassBladeGPU* out);
+    /// Each blade twice: whole for the draw (out), and the cull's few
+    /// numbers of it (cullOut, GrassCullBladeGPU).
+    static void packBlades(const pipeline::GrassBladeSample* blades, size_t count, GrassBladeGPU* out,
+                           GrassCullBladeGPU* cullOut);
     bool createPerFrameBuffers();
     bool createCullPipeline();
     bool createDrawPipeline(VkDescriptorSetLayout perFrameLayout);
@@ -144,6 +148,10 @@ private:
     // Shared, written once at load.
     VkBuffer sourceBuffer_ = VK_NULL_HANDLE;
     VmaAllocation sourceAlloc_ = VK_NULL_HANDLE;
+    /// The same blades as the cull reads them (GrassCullBladeGPU), index for
+    /// index with sourceBuffer_.
+    VkBuffer cullSourceBuffer_ = VK_NULL_HANDLE;
+    VmaAllocation cullSourceAlloc_ = VK_NULL_HANDLE;
     VkBuffer profileBuffer_ = VK_NULL_HANDLE;
     VmaAllocation profileAlloc_ = VK_NULL_HANDLE;
     VkBuffer indexBuffer_ = VK_NULL_HANDLE;
