@@ -346,6 +346,17 @@ bool EntityController::extractPlayerAppearance(const FlatFieldMap& fields,
     bool haveBytes0 = readField(ufBytes0, bytes0);
     bool havePbytes = readField(ufPbytes, pbytes);
     bool havePbytes2 = readField(ufPbytes2, pbytes2);
+    // A field the table names but the object does not carry is zero: the
+    // server leaves zero fields out of the update mask. PLAYER_BYTES is zero
+    // for skin 0, face 0, hair 0 and hair colour 0 - the defaults the
+    // character creator starts on - and PLAYER_BYTES_2's low byte for no
+    // facial hair. Treating that as "unknown" sent such a player to the scan
+    // below, which took the first small field it met for the appearance
+    // (skin 25 on a human with skin 0); no such skin exists, and every
+    // PlayerModel of them - ElvUI's player portrait, a target frame on
+    // oneself - drew a bare white figure.
+    if (!havePbytes && ufPbytes != 0xFFFF) { pbytes = 0; havePbytes = true; }
+    if (!havePbytes2 && ufPbytes2 != 0xFFFF) { pbytes2 = 0; havePbytes2 = true; }
 
     // Heuristic fallback: Turtle can run with unusual build numbers; if the JSON table is missing,
     // try to locate plausible packed fields by scanning.
