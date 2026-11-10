@@ -408,11 +408,6 @@ constexpr SettingDesc kSchema[] = {
     {"dpsmeter", "Damage meter", SettingKind::Bool, 0, 0, 0, "HUD", "Trackers",
      "A window of your group's damage, healing, damage taken and deaths,\n"
      "fight by fight. Drag it by its title; click the title for the mode.", "", 0},
-    {"raidframes", "Raid-style group frames", SettingKind::Bool, 0, 0, 0, "HUD", "",
-     "Not stock. Your party or raid as a grid of class-coloured health\n"
-     "bars, in place of the party frames. Drag it by the handle above it;\n"
-     "right-click the handle to lock it.", "", 0, "", "cvar:woweeRaidFrames", "",
-     "if WoweeRaidFrames_Apply then WoweeRaidFrames_Apply() end"},
     {"cooldowntracker", "Cooldown tracker", SettingKind::Bool, 0, 0, 0, "HUD", "",
      "Show your longer cooldowns counting down beside the action bar.", "", 0},
     {"raretracker", "Rare tracker", SettingKind::Bool, 0, 0, 0, "HUD", "",

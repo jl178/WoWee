@@ -1099,10 +1099,8 @@ static void pushCvarDefault(lua_State* L, const std::string& n) {
     // Plates may overlap; "0" is the old never-overlapping layout (0x51d9b0
     // registers it "1").
     else if (n == "nameplateallowoverlap") lua_pushstring(L, "1");
-    // Not stock, both off until asked for: hiding plates behind walls, and
-    // the raid-style group frames (raid_frames_lua.hpp).
+    // Not stock, off until asked for: hiding plates behind walls.
     else if (n == "woweenameplateocclusion") lua_pushstring(L, "0");
-    else if (n == "woweeraidframes") lua_pushstring(L, "0");
     // Spam filtering is on (the checkbox in front of it reads "Disable Spam
     // Filter"), and so is mature language filtering: 0x51D9B0 registers
     // both with "1" (0x51E118), and chat_handler reads them that way.
