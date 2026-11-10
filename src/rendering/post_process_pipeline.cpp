@@ -2049,7 +2049,7 @@ void PostProcessPipeline::renderFXAAPass() {
         hdrScene() ? 1.0f : 0.0f,
         // The HDR scene's tone curve and how much light above 1 the bloom
         // spreads (enhanced_tonemap.hpp).
-        enhanced_tonemap::tuning().knee, enhanced_tonemap::tuning().hdrBloom,
+        toneKnee_ > 0.0f ? toneKnee_ : enhanced_tonemap::tuning().knee, enhanced_tonemap::tuning().hdrBloom,
         // The Enhanced daylight's low-end lift and saturation (0 off).
         hdrScene() ? enhancedExposure_ : 0.0f, hdrScene() ? enhancedSat_ : 0.0f,
         // The Enhanced shade's grey and chroma (1, 1, 1, 1 off).

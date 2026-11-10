@@ -4153,7 +4153,12 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             enhancedTone ? glm::mix(1.0f, enhanced_palette::hdrExposure(), outdoor) : 0.0f,
             enhancedTone ? glm::mix(1.0f, enhanced_palette::hdrSaturation(), outdoor) : 0.0f,
             glm::mix(1.0f, enhanced_palette::hdrShadeChroma(), shadeOn),
-            enhanced_palette::shadeTint(tonelp.ambientColor, shadeOn));
+            enhanced_palette::shadeTint(tonelp.ambientColor, shadeOn),
+            // The softer shoulder goes with the stronger sun: outdoors, by
+            // day, under Enhanced's daylight (enhanced_tonemap::kEnhancedKnee).
+            enhancedTone ? glm::mix(enhanced_tonemap::tuning().knee, enhanced_tonemap::kEnhancedKnee,
+                                   outdoor * enhanced_palette::dayShare(tonelp.sunDir.z))
+                        : 0.0f);
     }
 
     uint32_t frameIdx = vkCtx->getCurrentFrame();

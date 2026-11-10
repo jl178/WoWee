@@ -203,8 +203,11 @@ public:
     /// 0, 0 is off (and they do nothing without the HDR scene). `shade` is
     /// the shade's chroma scale under them (kHdrShadeChroma), 1 as it is,
     /// and `shadeTint` the hue of the grey it keeps (1, 1, 1 none).
+    /// `knee`: the tone curve's knee for the frame (enhanced_tonemap::kKnee,
+    /// or kEnhancedKnee under Enhanced's daylight); 0 keeps the tuning's.
     void setEnhancedTone(float exposure, float saturation, float shade = 1.0f,
-                        const glm::vec3& shadeTint = glm::vec3(1.0f)) {
+                        const glm::vec3& shadeTint = glm::vec3(1.0f), float knee = 0.0f) {
+        toneKnee_ = glm::clamp(knee, 0.0f, 0.95f);
         enhancedExposure_ = glm::max(exposure, 0.0f);
         enhancedSat_ = glm::clamp(saturation, 0.0f, 2.0f);
         enhancedShade_ = glm::clamp(shade, 0.0f, 1.0f);
@@ -238,6 +241,7 @@ private:
     bool gradeKalimdor_ = false;
     float bloom_ = 0.0f;
     float enhancedExposure_ = 0.0f;
+    float toneKnee_ = 0.0f;  ///< 0: enhanced_tonemap::tuning().knee
     float enhancedSat_ = 0.0f;
     float enhancedShade_ = 1.0f;
     glm::vec3 enhancedShadeTint_{1.0f};

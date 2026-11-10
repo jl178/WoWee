@@ -44,6 +44,15 @@ inline float toScene(float d, float knee = kKnee) {
     return knee + (1.0f - knee) * f / (1.0f - f);
 }
 
+/// The knee under Enhanced's daylight, outdoors (renderer, by the indoor
+/// factor): a softer shoulder from half of white. With the sun at kSunLight
+/// the Barrens' noon road reached the old knee's shoulder - 2% of it with a
+/// channel over 0.92, its 99th percentile 0.86 against 0.76 before; from 0.5
+/// it is 0.74 and none over 0.92, and the tree crowns (0.25-0.30), the shade
+/// and the mid-tones below 0.5 are untouched (docs/re/enhanced-lighting.md 2d).
+/// Indoors, at night and without the Enhanced daylight the knee stays kKnee.
+inline constexpr float kEnhancedKnee = 0.5f;
+
 /// The sun's disc and glare, drawn additive over the dome, at this many
 /// times their stock colour: in the 8-bit scene they clipped to a flat disc
 /// at about 1, here they carry the brightness the bloom spreads.
@@ -52,8 +61,12 @@ inline constexpr float kSunGain = 2.5f;
 /// The sun's light on the world by day, as a multiple of Light.dbc's:
 /// Enhanced's LightData F052 (1.0 at night, 1.35-1.5 by day) has the shape
 /// of a sun intensity in its linear pipeline. Scaled in by the sun's height
-/// so the night keeps Light.dbc's moonlight.
-inline constexpr float kSunLight = 1.25f;
+/// so the night keeps Light.dbc's moonlight. 2 (was 1.25 with a x1.3 lift of
+/// every mid-tone in the composite): Enhanced brightens what its sun lights,
+/// not what the sky alone lights - measured against Jered's Goldshire
+/// captures, the crowns' luminance gap +29% -> +16% with the sunlit ground
+/// as bright as before (docs/re/enhanced-lighting.md section 2d).
+inline constexpr float kSunLight = 2.0f;
 
 /// The share of the light above 1 the bloom adds back (times the Bloom row).
 inline constexpr float kHdrBloom = 0.75f;

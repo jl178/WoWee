@@ -9,6 +9,7 @@
 #include "rendering/enhanced_palette.hpp"
 #include "rendering/enhanced_tonemap.hpp"
 #include "rendering/leaf_light.hpp"
+#include "rendering/stock_day_night.hpp"
 #include "ui/graphics_presets.hpp"
 
 #include <cstring>
@@ -338,6 +339,27 @@ TEST_CASE("HDR lighting row: on its page, in the Enhanced preset only", "[enhanc
     for (int i = 0; i < kClassicPresetIndex; ++i) CHECK_FALSE(kGraphicsPresets[i].enh.hdrScene);
 }
 
+TEST_CASE("Enhanced sun: stock bearing, lower noon, earlier dusk", "[enhanced][sun]") {
+    // Wow.exe 1.60.1: the sun's phi table 95 -> 25 -> 95 degrees, theta 45
+    // all day (stock_day_night::kEnhancedSunPhi).
+    const glm::vec3 noon = enhancedSunDirection(1440.0f);
+    CHECK(std::asin(noon.z) * 57.29578f == Catch::Approx(65.0f).margin(1.5f));
+    // Same bearing as the stock sprite at any hour it is up.
+    for (float h : {8.0f, 9.37f, 15.4f, 18.0f}) {
+        const glm::vec3 f = enhancedSunDirection(h * 120.0f);
+        const glm::vec3 st = stockSunDirection(h * 120.0f);
+        CHECK(std::atan2(f.y, f.x) == Catch::Approx(std::atan2(st.y, st.x)).margin(0.01f));
+    }
+    // Up a little before 06:00, down a little before 20:00 (stock 20:30).
+    CHECK(enhancedSunDirection(5.8f * 120.0f).z < 0.0f);
+    CHECK(enhancedSunDirection(6.1f * 120.0f).z > 0.0f);
+    CHECK(enhancedSunDirection(19.8f * 120.0f).z > 0.0f);
+    CHECK(enhancedSunDirection(20.0f * 120.0f).z < 0.0f);
+    CHECK(stockSunDirection(20.0f * 120.0f).z > 0.0f);
+    // 9:22, Jered's capture: about 37 degrees up.
+    CHECK(std::asin(enhancedSunDirection(9.37f * 120.0f).z) * 57.29578f == Catch::Approx(37.2f).margin(1.5f));
+}
+
 TEST_CASE("HDR sun: brighter by day only", "[enhanced]") {
     namespace tm = enhanced_tonemap;
     // Sun below the horizon (its light travels upward): Light.dbc's own.
@@ -346,7 +368,15 @@ TEST_CASE("HDR sun: brighter by day only", "[enhanced]") {
     // High sun: the full gain, which stays modest.
     CHECK(tm::sunLightScale(-0.9f, tm::kSunLight) == Catch::Approx(tm::kSunLight));
     CHECK(tm::kSunLight >= 1.0f);
-    CHECK(tm::kSunLight <= 1.5f);  // Enhanced's F052 tops out at 1.5
+    // Enhanced's F052 (1.5 at most) is a linear multiplier; this one also
+    // stands in for the mid-tone lift it replaced (section 2d).
+    CHECK(tm::kSunLight <= 2.0f);
+    // With it, the softer shoulder under Enhanced's daylight: the identity
+    // below half of white, the Barrens' bright road compressed above it.
+    CHECK(tm::kEnhancedKnee < tm::kKnee);
+    CHECK(tm::kEnhancedKnee >= 0.4f);
+    CHECK(tm::toDisplay(0.45f, tm::kEnhancedKnee) == Catch::Approx(0.45f));
+    CHECK(tm::toDisplay(1.2f, tm::kEnhancedKnee) < tm::toDisplay(1.2f));
 }
 
 TEST_CASE("Enhanced water row: on its page, in the Enhanced preset only, with HD water", "[enhanced][water]") {

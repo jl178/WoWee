@@ -112,8 +112,12 @@ inline float glowScale() {
 /// the lit third read 0.37-0.41 here against Enhanced's 0.44-0.59 at 1; a
 /// straight exposure (1.25-1.4) took the Barrens' noon dirt to a glowing
 /// orange, and a lift of the low end alone greyed the shade.
+/// Now 1 (none): the lift took every mid-tone, the tree crowns lit by the
+/// sky alone with the sunlit road, and left them 29% brighter than
+/// Enhanced's; the sun's own light (enhanced_tonemap::kSunLight) brightens
+/// what the sun reaches instead (docs/re/enhanced-lighting.md section 2d).
 /// WOWEE_ENHANCED_EXPOSURE=<value> overrides it for tuning.
-inline constexpr float kHdrExposure = 1.3f;
+inline constexpr float kHdrExposure = 1.0f;
 inline float hdrExposure() {
     static const float v = [] {
         const char* e = std::getenv("WOWEE_ENHANCED_EXPOSURE");
@@ -129,8 +133,11 @@ inline float hdrExposure() {
 /// live Goldshire 9:22 captures, with kHdrExposure: lit chroma 0.63-0.69
 /// (Enhanced 0.62-0.65), shade luminance 0.20-0.24 (0.21-0.26), lit/shade
 /// 2.14-2.27 (2.07-2.27); docs/re/enhanced-lighting.md section 2c.
-/// WOWEE_ENHANCED_SAT overrides it.
-inline constexpr float kHdrSaturation = 1.35f;
+/// Now 1 (none; the ease to 0.8 at the top stays): with the stronger sun
+/// (section 2d) the sunlit ground reaches Enhanced's chroma (0.70 0.62 0.70
+/// against 0.70 0.63 0.58) without it, and the crowns' chroma gap falls
+/// from +38% to +18%. WOWEE_ENHANCED_SAT overrides it.
+inline constexpr float kHdrSaturation = 1.0f;
 inline float hdrSaturation() {
     static const float v = [] {
         const char* e = std::getenv("WOWEE_ENHANCED_SAT");

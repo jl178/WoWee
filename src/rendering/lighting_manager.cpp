@@ -802,7 +802,11 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     currentParams_ = newParams;
     currentParams_.dayIntensity = dayIntensity;
     currentParams_.nightIntensity = nightIntensity;
-    currentParams_.sunDir = stockSunDirection(timeHalfMinutesExact);
+    // Enhanced's sun climbs to 65 degrees, not 85, and rises and sets
+    // earlier; its bearing and the light's direction are stock
+    // (stock_day_night::kEnhancedSunPhi).
+    currentParams_.sunDir = enhancedActive_ ? enhancedSunDirection(timeHalfMinutesExact)
+                                           : stockSunDirection(timeHalfMinutesExact);
 
     // The sky model list (0x7f3230's last loop), then the night stars the
     // stock client draws wherever no sky model does: Stars.mdx, the

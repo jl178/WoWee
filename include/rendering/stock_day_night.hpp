@@ -136,6 +136,23 @@ inline constexpr std::array<Key, 3> kMoonTheta{{
 
 inline constexpr float kHalfMinutesPerDay = 2880.0f;
 
+/// the reference client's sun sprite phi (Wow.exe 1.60.1.70862, file offset
+/// 0x49059b0, the same {time, radians} layout as 0xd391e0): 95 degrees (five
+/// under the horizon) at 05:30 and 20:30, 25 off the zenith from 11:55 to
+/// 12:05 - lower at noon (65 degrees up against 85), up at 05:58 and down at
+/// 19:54. Its theta (0x4905a50) is 45 degrees all day, as stock, and its
+/// light tables (0x48f7400: theta 225, phi 127 / 110 / 127 / 110) are
+/// byte for byte 0xd390c4 and 0xd390e4: Enhanced moved neither the light nor
+/// the sun's bearing, only how high the sun climbs (docs/re/enhanced-lighting.md
+/// section 2d).
+inline constexpr std::array<Key, 5> kEnhancedSunPhi{{
+    {0.22916667f, 1.6580628f},   // 95 degrees
+    {0.49652779f, 0.43633232f},  // 25 degrees
+    {0.50000000f, 0.43633232f},
+    {0.50347221f, 0.43633232f},
+    {0.85416669f, 1.6580628f},
+}};
+
 }  // namespace stock_day_night
 
 /// The way the world's directional light travels at `timeHalfMinutes`
@@ -154,6 +171,14 @@ inline glm::vec3 stockSunDirection(float timeHalfMinutes) {
     using namespace stock_day_night;
     const float t = timeHalfMinutes / kHalfMinutesPerDay;
     return direction(sample(kSunPhi, t), sample(kSunTheta, t));
+}
+
+/// The unit direction from the eye to the reference client's sun (kEnhancedSunPhi, the
+/// stock bearing), in render coordinates.
+inline glm::vec3 enhancedSunDirection(float timeHalfMinutes) {
+    using namespace stock_day_night;
+    const float t = timeHalfMinutes / kHalfMinutesPerDay;
+    return direction(sample(kEnhancedSunPhi, t), sample(kSunTheta, t));
 }
 
 /// The unit direction from the eye to the White Lady, in render coordinates.

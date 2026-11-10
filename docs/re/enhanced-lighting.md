@@ -277,9 +277,10 @@ And the passes after it, each only under its Enhanced row:
   11.1%). Tried and left: a straight exposure (1.25-1.4) reached Enhanced's
   mean but took the Barrens' dirt to a glowing orange; a lift of the low end
   greyed the shade and flattened the picture; the sun past its F052 (1.7)
-  put 8.5% of the Barrens' road over 0.92. Enhanced's sun also stands
-  elsewhere at 9:22 (east of Goldshire's road; 3.3.5's sun sprite is always
-  north-west), so its sunlit, dappled road cannot be framed identically.
+  put 8.5% of the Barrens' road over 0.92 (with the lift still on).
+  (Superseded by section 2d: the lift and the boost are now 1 and the sun
+  2x; and Enhanced's sun keeps 3.3.5's north-west bearing - the "east of the
+  road" read here was the minimap's character arrow.)
 - The final write is
   dithered (a triangular dither of one level) under the Enhanced rows: the
   shoulder and the grade spread a sky's gradient over a few 8-bit levels,
@@ -299,6 +300,124 @@ zenith sun keeps 7% (58.5% before): there the stock picture itself clips
 red and green over half the screen (Ultra: 47% of pixels with a channel at
 255), and Enhanced's bluer sky makes that clip white rather than yellow.
 The comparison sheets are in the session scratchpad (`ovx/shots/`).
+
+## 2d. The sun's place, and what the sun lights
+
+**Where Enhanced puts the sun.** Read from Wow.exe 1.60.1.70862 (file
+offsets; no DB2 - LightParams' SunPolar/SunAzimuth are 0 on 873 of 882
+profiles, which leaves the engine's own tables). 3.3.5's DayNight tables
+(stock_day_night.hpp) are keyframes of {day fraction, radians}; the same
+layout sits in Enhanced's `.data`:
+
+- 0x48f7400: the **light**'s theta (225 degrees, all day) and phi (127 at
+  midnight and noon, 110 at six) - byte for byte 3.3.5's 0xd390c4/0xd390e4.
+- 0x49059b0: the **sun**'s phi: 95 degrees (five under the horizon) at
+  05:30 and 20:30, 25 off the zenith from 11:55 to 12:05. 3.3.5's runs 100
+  -> 5 -> 100 with the last key at 21:30.
+- 0x4905a50: the sun's theta, 45 degrees at every key - as 3.3.5's.
+- 0x49059e0 / 0x4905a80: the moon's phi (35 at midnight, 100 from 05:00 to
+  21:00), its theta 135 -> 150 -> 165 degrees; 0x4905a10: fades (0 -> 1
+  over 05:15-05:30, 1 -> 0 over 20:30-20:45; 06:00-06:30 / 19:30-20:00).
+
+So there is no latitude, tilt or per-map term and no east-west arc: the
+bearing is fixed in the north-west as in 3.3.5, the light's direction is
+3.3.5's, and what Enhanced changed is how high the sun climbs (65 degrees at
+noon, not 85) and when it rises and sets (05:58 and 19:54, not 06:10 and
+20:30). The tables are not referenced by a direct RIP-relative load in
+`.text` (searched for every disp32 into them), so which one drives the
+shadow map is not proven from code; the captures agree with the stock
+bearing: at 09:23 (092315) the camera looks east-south-east and the fence
+fronts and the character's sides turned toward it are sunlit, the light
+from behind; at 15:23 (enhanced_02) the inn view (the same framing as
+Wowee's yaw 225 one, where the sun stands) looks into the sun. Earlier
+notes here said Enhanced's 9:22 sun stood east of the road; that was the
+character's facing on the minimap, not the camera's.
+
+**Ported** (Enhanced's daylight only): `stock_day_night::kEnhancedSunPhi`,
+`enhancedSunDirection`; `LightingManager` takes the sun's direction from it
+while `enhancedActive_` (the sprite, the leaf light, the haze's phase, the
+shafts, the HDR sun's day weight). The light direction is unchanged.
+
+**What the sun lights.** Split by region, the canopy's gap was the tree
+crowns (foliage pixels in the top third): luminance +29%, 90th percentile
++41%, chroma +38%, blue/luminance -23% against Enhanced, with the grass
+matching. Halving the sun on every M2 moved the crowns by under 0.02:
+they are lit by the sky (ambient) alone, at 0.25-0.30 - inside the band
+the composite's mid-tone lift (kHdrExposure x1.3, section 2c) and chroma
+boost (kHdrSaturation x1.35) act on. Enhanced brightens what its sun
+reaches (F052 is a sun intensity); the lift brightened everything at that
+luminance. So, with the HDR scene under the Enhanced daylight: the lift and
+the boost are 1 (off) and the sun's light by day is 2x Light.dbc's
+(enhanced_tonemap::kSunLight, was 1.25). Tried: sun 1.6 and 1.7 left the
+sunlit ground 22-25% short; 2.0 with the boost kept took the ground's
+chroma +20%.
+
+**And a softer shoulder.** The 2x sun alone took the Barrens' noon road
+into the tone curve's shoulder: paler, its cobbles near white (its ground's
+99th percentile luminance 0.86 against 0.76 before, 2.1% of it with a
+channel over 0.92 against 0.07%) - and the Barrens' sun was already
+"sooo bright" to Jered. Enhanced's own tone curve was not read (its
+`ffxcolorcorrection` is a plain power, and the shader that tone maps its
+linear scene is not among those extracted). Under Enhanced's daylight,
+outdoors and by day the knee moves from 0.8 to 0.5
+(enhanced_tonemap::kEnhancedKnee, eased by the indoor factor and the sun's
+height): the Reinhard shoulder starts at half of white, so what passes it
+is compressed where the old curve left it linear up to 0.8. The crowns
+(0.25-0.30), the shade and every mid-tone below 0.5 keep their values.
+Knee 0.6 left the road's 95th percentile 0.755, above the old build's.
+
+The Barrens' road at noon (lower middle of the view), the old build (the
+commit before this one), the 2x sun alone, and now:
+
+| | before | 2x sun, knee 0.8 | now |
+|---|---|---|---|
+| mean luminance | 0.602 | 0.609 | 0.573 |
+| 95th / 99th pct | 0.720 / 0.757 | 0.827 / 0.862 | 0.717 / 0.739 |
+| a channel over 0.92 | 0.07% | 2.06% | 0.00% |
+| a channel over 0.85 | 73% | 49% | 0.05% |
+| chroma | 0.60 | 0.57 | 0.56 |
+
+(The old road's 73% over 0.85 was its red channel flat near the top - a
+saturated orange sheet; now the cobbles keep their texture.)
+
+Measured (the three matched Goldshire views; gap is Wowee against Enhanced,
+mean of the views; before = the commit before this one, now = Enhanced's
+sun table, the 2x sun, no lift or boost, the 0.5 knee):
+
+| region | Enhanced | before | now |
+|---|---|---|---|
+| crown luminance | 0.25 0.26 0.25 | +26% | +17% |
+| crown 90th pct | 0.31 0.32 0.32 | +40% | +20% |
+| crown chroma | 0.34 0.33 0.38 | +35% | +19% |
+| crown blue / luminance | 0.69 0.71 0.65 | -21% | -13% |
+| canopy / ground luminance | 0.78 0.58 0.86 | +28% | +23% |
+| canopy sd | 0.08 0.09 0.16 | +27% | +10% |
+| ground luminance | 0.36 0.51 0.37 | -17% | -15% |
+| ground chroma | 0.70 0.63 0.58 | -1% | +8% |
+| lit / shade | 1.91 2.26 2.39 | +9% | -6% |
+| all luminance | 0.31 0.38 0.32 | -4% | -4% |
+| world 5th pct | 0.18 0.20 0.17 | -18% | -12% |
+| grass luminance | 0.28 0.31 0.26 | -11% | -20% |
+| grass chroma | 0.29 0.51 0.37 | +2% | -21% |
+| sum over 20 regions | | 421 | 319 |
+
+The grass rows are mostly the measure: they count pixels of grass's hue
+(55-165 degrees), and with the stronger orange sun the lower band's grass
+turns 8-12 degrees toward yellow (82.6 -> 70.8 at the inn, 64.2 -> 53.1 at
+the crossroads, 70.5 -> 62.1 at 15:23), so the yellower half leaves the
+count. The same pixels in both builds: luminance -3%, +1%, +7%; chroma
+-4%, +10%, +8%. What is real is that hue: Enhanced's lower band keeps more
+yellow-green (32%, 23%, 17% of its pixels between 45 and 65 degrees
+against Wowee's 6-8%), and its grass is green where Wowee's is now olive.
+
+Elsewhere: into the sun at 9:22 4.2% of pixels have a channel over 0.92
+(9.4% before; none with every channel over 0.96, 3.4% before); Goldshire
+17:51, Elwynn's forest and the sun-behind view: mean -0.012..+0.012, 5th
+percentile +0.011..+0.015, 95th -0.046..-0.055, lit/shade 1.89-2.02
+(2.22-2.37) - a little flatter at the top. Sheets in the session
+scratchpad: `fgap/sheet_k.png` (the Barrens, the inn and into the sun:
+before | 2x sun, knee 0.8 | now), `fgap/sheet_g.png` (Enhanced | before |
+now), `fgap/sheet_g_regress.png`.
 
 ## 3. Colour grading
 
