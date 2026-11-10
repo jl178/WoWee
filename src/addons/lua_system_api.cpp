@@ -6562,6 +6562,20 @@ void registerSystemLuaAPI(lua_State* L) {
         }},
                 {"RegisterForSave",          lua_ReturnNothing},
                 {"RegisterForSavePerCharacter", lua_ReturnNothing},
+                // Russian name declension. The client asks its word library,
+                // which answers only on a ruRU client (0x76DD40 tests locale
+                // 8); everywhere else there are no sets, and DeclineName
+                // gives its five cases as nil (0x511DD0, 0x511E80).
+                {"GetNumDeclensionSets", [](lua_State* L) -> int {
+            luaL_checkstring(L, 1);
+            lua_pushnumber(L, 0);
+            return 1;
+        }},
+                {"DeclineName", [](lua_State* L) -> int {
+            luaL_checkstring(L, 1);
+            for (int i = 0; i < 5; ++i) lua_pushnil(L);
+            return 5;
+        }},
                 {"RegisterStaticConstants",  lua_ReturnNothing},
                 {"SetChatWindowName",        lua_SetChatWindowName},
                 {"SetupFullscreenScale",     lua_ReturnNothing},
