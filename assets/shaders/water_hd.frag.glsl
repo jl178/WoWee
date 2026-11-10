@@ -180,6 +180,25 @@ float noiseValue(vec2 p) {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
+// The Enhanced path's value noise: the same shape as noiseValue on an
+// arithmetic hash (no sin per corner), as it runs on every water pixel.
+float fwHash(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float fwNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = fwHash(i);
+    float b = fwHash(i + vec2(1.0, 0.0));
+    float c = fwHash(i + vec2(0.0, 1.0));
+    float d = fwHash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
 float cellularFoam(vec2 p, float jitter) {
     vec2 i = floor(p);
     vec2 f = fract(p);
@@ -354,7 +373,8 @@ const float FW_BEND = 2.0;
 // shading turns into roughness: far water gets a wider, softer sun path
 // instead of sparkling noise.
 // Returns the slope (xy), the summed height (z) and the amplitude sum (w).
-const int FW_WAVES = 16;
+const int FW_WAVES = 12;
+const int FW_WAVES_CANAL = 8;
 const float FW_TWO_PI = 6.2831853;
 
 vec4 fwWaveSum(vec2 p, vec2 bend, float time, vec2 dpx, vec2 dpy, float waveClass, out float subVar) {
@@ -362,7 +382,10 @@ vec4 fwWaveSum(vec2 p, vec2 bend, float time, vec2 dpx, vec2 dpy, float waveClas
     // wave above the spectrum's peak, and Phillips' L = wind^2 / g (yards).
     float lMin = FW_LAKE_LMIN, lMax = FW_LAKE_LMAX, steep = FW_LAKE_STEEP, windL = FW_LAKE_WINDL;  // lakes, rivers: wind 3-4
     if (waveClass > 0.5 && waveClass < 1.5) { lMin = 1.5; lMax = 64.0; steep = 0.07; windL = 2.6; }  // sea: winds 2-6
-    if (waveClass > 1.5) { lMin = 0.5; lMax = 23.0; steep = 0.06; windL = 3.7; }                    // canals: wind 6
+    int waves = FW_WAVES;
+    // The canals: wind 6 over one 46-yard tile; narrow water seen close, at
+    // a grazing angle almost everywhere - fewer, sparser waves.
+    if (waveClass > 1.5) { lMin = 0.7; lMax = 23.0; steep = 0.06; windL = 3.7; waves = FW_WAVES_CANAL; }
     vec2 slope = vec2(0.0);
     float h = 0.0;
     float wsum = 0.0;
@@ -371,8 +394,10 @@ vec4 fwWaveSum(vec2 p, vec2 bend, float time, vec2 dpx, vec2 dpy, float waveClas
     // (so the loop needs no pow): the wavelength, the frequency (deep
     // water, sqrt(g k)), the short-wave tilt and Phillips' exponent
     // (-0.5 / (k L)^2, which goes as lambda^2) all scale per step.
-    float ratio = pow(lMin / lMax, 1.0 / float(FW_WAVES - 1));
+    float ratio = pow(lMin / lMax, 1.0 / float(waves - 1));
     float lambda = lMax;
+    float k = FW_TWO_PI / lMax;
+    float kStep = 1.0 / ratio;
     float w = 0.8 * sqrt(9.8 * FW_TWO_PI / lMax);
     float wStep = inversesqrt(ratio);
     float tilt = 1.0;
@@ -386,8 +411,21 @@ vec4 fwWaveSum(vec2 p, vec2 bend, float time, vec2 dpx, vec2 dpy, float waveClas
     const float GA_C = -0.7373688, GA_S = 0.6754903;  // cos, sin of 2.39996
     vec2 dir = vec2(0.6, -0.8);
     float phase0 = 4.461;
-    for (int i = 0; i < FW_WAVES; ++i) {
-        float k = FW_TWO_PI / lambda;
+    // The narrowest any wave's footprint can be, whatever its direction
+    // (|dpx.d| + |dpy.d| is least where d is square to one of them): once
+    // the waves are shorter than twice that, every one left is filtered out
+    // and only its slope variance remains, summed in closed form (the tilt
+    // falls geometrically, the cut-off is ~1 for short waves). Far water
+    // stops after a few waves.
+    float fpMin = abs(dpx.x * dpy.y - dpx.y * dpy.x) / max(max(length(dpx), length(dpy)), 1e-6);
+    const float CROSS_MEAN2 = 0.75;  // mean of the spread weight squared
+    for (int i = 0; i < waves; ++i) {
+        if (fpMin * 2.0 >= lambda) {
+            float q = tiltStep * tiltStep;
+            float left = float(waves - i);
+            subVar += 0.5 * steep * steep * tilt * tilt * CROSS_MEAN2 * (1.0 - pow(q, left)) / max(1.0 - q, 1e-4);
+            break;
+        }
         float amp = steep * exp(cutExp) * tilt * (FW_CROSS + (1.0 - FW_CROSS) * abs(dot(dir, wind)));
         // A wave smaller than about two pixels is only noise: its slope goes
         // to the roughness instead. Measured along its own direction (how
@@ -402,9 +440,14 @@ vec4 fwWaveSum(vec2 p, vec2 bend, float time, vec2 dpx, vec2 dpy, float waveClas
         // FFT sea's do instead of running on as straight lines.
         float arg = k * dot(dir, p) - w * time + phase0 + FW_TWO_PI * FW_BEND * dot(dir, bend);
         slope += dir * (amp * cos(arg));
-        h += amp / k * sin(arg);
-        wsum += amp / k;
+        // The height (for the colour) is the long waves': a short wave's
+        // height is amp / k, a few hundredths of the longest's.
+        if (i < 5) {
+            h += amp / k * sin(arg);
+            wsum += amp / k;
+        }
         lambda *= ratio;
+        k *= kStep;
         w *= wStep;
         tilt *= tiltStep;
         cutExp *= cutStep;
@@ -419,7 +462,7 @@ vec4 fwWaveSum(vec2 p, vec2 bend, float time, vec2 dpx, vec2 dpy, float waveClas
 vec4 fwSurfaceNormal(vec2 p, vec2 flow, float time, float dist, float waveClass, out float subVar) {
     vec2 dpx = dFdx(p), dpy = dFdy(p);
     // A gentle warp so the crests are not straight lines.
-    vec2 warp = vec2(noiseValue(p * 0.11 + 3.1), noiseValue(p * 0.11 - 7.7)) - 0.5;
+    vec2 warp = vec2(fwNoise(p * 0.11 + 3.1), fwNoise(p * 0.11 - 7.7)) - 0.5;
     vec2 q = p + warp * 2.4;
     vec2 bend = warp;  // the same noise bends each wave's phase (no second pair)
     vec4 wv;
@@ -452,6 +495,11 @@ const float FW_BODY_AMB = 0.58;
 const float FW_ALBEDO_SAT = 0.15;
 const vec3 FW_SURROUND_TINT = vec3(0.85, 1.0, 0.85);
 const float FW_BODY_SUN = 0.05;
+// The share of the view-depth difference the absorption sees (see
+// docs/re/enhanced-water.md 4: Enhanced's lake bed shows through more water
+// near the shore than its constants over our depth copy give).
+const float FW_CLARITY = 0.7;
+const vec3 FW_SHALLOW_TINT = vec3(0.8, 1.6, 1.05);
 // How far the ripples' height moves the body between Color_2 and Color_1.
 const float FW_CREST_COLOUR = 0.3;
 const float FW_SURROUND_LIGHT = 0.6;
@@ -459,6 +507,9 @@ const float FW_SURROUND_SHARE = 0.75;
 const float FW_ENV_SAT = 0.1;
 // How much of the stand-in's edge is the ragged skyline (lakes, canals).
 const float FW_SKYLINE = 0.6;
+// The stand-in's brightness between the trees and under the tallest.
+const float FW_TREE_GAP = 1.0;
+const float FW_TREE_SHADE = 0.8;
 const vec3 FW_BODY_TINT = vec3(0.95, 1.05, 0.97);
 // The mirrored sky as a grey, a touch green, and dimmer than Light.dbc's
 // rings (Enhanced's far lake reads 0.86 of ours in luma).
@@ -480,55 +531,50 @@ float fwFoamPattern(vec2 p) {
 
 // Enhanced's reflectionMode 2: screen-space reflections over its probe. The
 // reflected ray is marched through the scene's depth copy (the scene before
-// the water, so the water never hides what it mirrors) in steps that grow
-// with distance, refined on the first crossing, and the scene's colour read
-// there: the shore, the trees and an island stand in the lake, broken up by
-// the ripples. Returns the colour and its weight (0 = no hit; then the probe
-// stand-in shows). Projected through the copy's own camera, as
-// historyLookup does.
-const int FW_SSR_STEPS = 10;
-const float FW_SSR_MIN_F = 0.03;
+// the water, so the water never hides what it mirrors) in six steps that
+// double each time (to ~60 yards), and on the first crossing the hit is put
+// between the last two points by their depth differences (a secant, no
+// further taps) and the scene's colour read there: the shore, the trees and
+// an island stand in the lake, broken up by the ripples. Returns the colour
+// and its weight (0 = no hit; then the probe stand-in shows). Projected
+// through the copy's own camera, as historyLookup does; the ray's clip
+// position is linear in its length, so each step is four multiply-adds.
+const int FW_SSR_STEPS = 6;
+const float FW_SSR_MIN_F = 0.035;
 vec4 fwScreenReflection(vec3 P, vec3 R, vec2 screenUV0, float near, float far) {
     vec4 c0 = projection * (view * vec4(P, 1.0));
     vec4 h0 = historyViewProj * vec4(P, 1.0);
     if (c0.w <= 1e-4 || h0.w <= 1e-4) return vec4(0.0);
+    vec4 hR = historyViewProj * vec4(R, 0.0);
     vec2 ndcC = c0.xy / c0.w;
     float ySign = abs(screenUV0.y - (ndcC.y * 0.5 + 0.5)) <= abs(screenUV0.y - (0.5 - ndcC.y * 0.5)) ? 1.0 : -1.0;
     vec2 ndcH0 = h0.xy / h0.w;
     vec2 uvH0 = screenUV0 + vec2(ndcH0.x - ndcC.x, (ndcH0.y - ndcC.y) * ySign) * 0.5;
-    float stepLen = 0.8;
-    float tPrev = 0.0;
+    float stepLen = 1.0;
     float t = 0.0;
+    float bPrev = -1.0;
     for (int i = 0; i < FW_SSR_STEPS; ++i) {
         t += stepLen;
-        stepLen *= 1.55;
-        vec4 hc = historyViewProj * vec4(P + R * t, 1.0);
+        vec4 hc = h0 + hR * t;
         if (hc.w <= 1e-3) return vec4(0.0);
-        vec2 ndc = hc.xy / hc.w;
-        vec2 uv = uvH0 + vec2(ndc.x - ndcH0.x, (ndc.y - ndcH0.y) * ySign) * 0.5;
+        vec2 uv = uvH0 + vec2(hc.x / hc.w - ndcH0.x, (hc.y / hc.w - ndcH0.y) * ySign) * 0.5;
         if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return vec4(0.0);
-        float sceneLin = linearizeDepth(textureLod(SceneDepth, uv, 0.0).r, near, far);
-        float behind = hc.w - sceneLin;
+        float behind = hc.w - linearizeDepth(textureLod(SceneDepth, uv, 0.0).r, near, far);
         if (behind > 0.0) {
             // Crossed a surface: thick enough to be the thing in the way
-            // (not a thin post the ray skipped past)? Refine between the
-            // last two points.
+            // (not a thin post the ray skipped past)?
             if (behind > max(2.0, stepLen * 1.5)) return vec4(0.0);
-            float a = tPrev, b = t;
-            for (int j = 0; j < 3; ++j) {
-                float m = 0.5 * (a + b);
-                vec4 hm = historyViewProj * vec4(P + R * m, 1.0);
-                vec2 um = uvH0 + vec2(hm.x / hm.w - ndcH0.x, (hm.y / hm.w - ndcH0.y) * ySign) * 0.5;
-                float sl = linearizeDepth(textureLod(SceneDepth, um, 0.0).r, near, far);
-                if (hm.w > sl) { b = m; uv = um; } else { a = m; }
-            }
+            float tHit = t - stepLen * behind / max(behind - bPrev, 1e-4);
+            vec4 hh = h0 + hR * tHit;
+            uv = uvH0 + vec2(hh.x / hh.w - ndcH0.x, (hh.y / hh.w - ndcH0.y) * ySign) * 0.5;
             // Fade toward the copy's edges and at the march's reach.
             vec2 e = smoothstep(vec2(0.0), vec2(0.06), uv) * smoothstep(vec2(1.0), vec2(0.94), uv);
-            float reach = 1.0 - smoothstep(float(FW_SSR_STEPS - 3), float(FW_SSR_STEPS), float(i));
-            vec3 col = textureLod(SceneColor, uv * hdParams.zw, 0.0).rgb;
+            float reach = i < FW_SSR_STEPS - 1 ? 1.0 : 0.5;
+            vec3 col = textureLod(SceneColor, clamp(uv, vec2(0.0), vec2(1.0)) * hdParams.zw, 0.0).rgb;
             return vec4(col, e.x * e.y * reach);
         }
-        tPrev = t;
+        bPrev = behind;
+        stepLen *= 2.0;
     }
     return vec4(0.0);
 }
@@ -587,9 +633,15 @@ void main() {
     bool composeBed = false;
     vec3 bedColor = vec3(0.0);
     vec3 fwBedT = vec3(1.0);  // Enhanced: the bed's share through the water
-    // Outside the per-pixel branch, so its texture derivatives are sound
-    // (hdParams is the same for every pixel).
-    bool fw = hdParams.x > 1.5;
+    // Enhanced's mode is its own build of this file (water_fw.frag.spv,
+    // ENHANCED_WATER; the renderer binds it when hdParams.x is 2): each build
+    // carries only its own path, so neither pays the other's registers - one
+    // shader holding both ran the HD water slower whenever Enhanced's grew.
+#ifdef ENHANCED_WATER
+    const bool fw = true;
+#else
+    const bool fw = false;
+#endif
     // Enhanced: rivers flow. 3.3.5 has no flow data, but a river's sheet
     // slopes downhill; its gradient gives the flow's direction and speed.
     // (Derivatives here, in uniform control flow.)
@@ -665,7 +717,7 @@ void main() {
             }
             // Absorption over the depth; the scene is display-encoded, so the
             // transmittance is taken to that encoding.
-            vec3 T = pow(exp(-t * L.absorb * L.density), vec3(1.0 / 2.2));
+            vec3 T = pow(exp(-t * FW_CLARITY * L.absorb * L.density), vec3(1.0 / 2.2));
 
             // The light: Enhanced's sun term is gated by the sun's height
             // (smoothstep of (sin elevation + 0.1) * 5) and enters through
@@ -714,7 +766,10 @@ void main() {
             // Enhanced's go ochre, then olive, then grey-teal (the capture's
             // shallows read 102 80 50). The bed still loses blue first.
             float veil = 1.0 - dot(T, vec3(0.3, 0.55, 0.15));
-            vec3 bodyF = albedo * veil * inLight;
+            // Thin water over the bed reads olive in Enhanced's shallows
+            // (G over R from a yard or two out); the veil starts in that
+            // green and turns to the deep body's grey-teal as it thickens.
+            vec3 bodyF = albedo * veil * inLight * mix(FW_SHALLOW_TINT, vec3(1.0), veil);
 
             // Reflection: EnvBRDFApprox at F0 0.02 of the environment -
             // Light.dbc's sky by the ring rule, or the planar sky pass.
@@ -746,6 +801,7 @@ void main() {
             // haze. Stand-in: toward the horizon the mirrored sky goes to the
             // fog colour, darkened as the land under it.
             float lowR = 1.0 - smoothstep(0.03, 0.6, R.z);
+            float treeShade = 1.0;
             if (!isOcean) {
                 // Round a lake or a canal the surroundings stand to uneven
                 // heights (trees, banks, roofs): a ragged skyline by the
@@ -753,11 +809,16 @@ void main() {
                 // into streaks of shore and sky as Enhanced's probe does,
                 // instead of one smooth fade. The sea's horizon stays open.
                 vec2 az = normalize(R.xy + vec2(1e-4));
-                float n = noiseValue(az * 5.0 + 1.7) * 0.65 + noiseValue(az * 13.0 - 4.1) * 0.35;
+                float n = fwNoise(az * 5.0 + 1.7) * 0.65 + fwNoise(az * 13.0 - 4.1) * 0.35;
                 float skyline = mix(0.06, 0.5, n);
                 lowR = mix(lowR, 1.0 - smoothstep(skyline - 0.04, skyline + 0.04, R.z), FW_SKYLINE);
+                // Where the skyline stands tall the probe holds trees, darker
+                // than the haze between them: streaks of shade in the far
+                // water (the capture's far lake reads 82 99 99, the plain
+                // stand-in 88 106 101).
+                treeShade = mix(FW_TREE_GAP, FW_TREE_SHADE, n);
             }
-            vec3 surround = mix(fogColor.rgb, amb, 0.4) * FW_SURROUND_TINT * FW_SURROUND_LIGHT;
+            vec3 surround = mix(fogColor.rgb, amb, 0.4) * FW_SURROUND_TINT * FW_SURROUND_LIGHT * treeShade;
             env = mix(env, surround, lowR * FW_SURROUND_SHARE);
             // Enhanced's mirrored sky is a grey-blue: its probe is relit in
             // its linear light and graded; Light.dbc's sky rings are bluer.

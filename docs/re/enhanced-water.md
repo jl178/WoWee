@@ -162,7 +162,9 @@ above:
   absorption, density and colours (table above, Float_0 red): ocean (terrain
   ocean, LiquidType 2 family) -> 1250, exterior WMO water -> 1344, all other
   water -> the lake row. `t` is the view-depth difference from the scene's
-  depth copy, as Enhanced's. The scene is display-encoded, so `T` is taken to
+  depth copy, as Enhanced's, taken at 0.7 for the absorption (Enhanced's bed
+  shows through more water near the shore than its constants over our depth
+  copy give; section 4). The scene is display-encoded, so `T` is taken to
   that encoding (`T^(1/2.2)`). The body's brightness and hue were set
   numerically against the capture (section 4): the colours keep 15% of their
   saturation, the sky light that reaches into the water is Light.dbc's
@@ -174,7 +176,9 @@ above:
   block), since the stock light stays up all night. The body veils in over
   the depth as one weight, `1 - T . (0.3, 0.55, 0.15)`, not per channel:
   per channel the body's blue came in within a yard over a red-brown bed and
-  the shallows went mauve (86 63 65 against Enhanced's ochre 102 80 50). The
+  the shallows went mauve (86 63 65 against Enhanced's ochre 102 80 50). Thin
+  veil starts olive (x 0.8 1.6 1.05, fading to the deep tint as the veil
+  thickens), as Enhanced's shallows turn from ochre to olive. The
   wave height moves the colour between Color_2 and Color_1 by 0.3 of its
   swing (at full swing it drew the long waves as broad light and dark bands,
   the largest share of the ripple contrast, twice the capture's).
@@ -185,9 +189,10 @@ above:
   6 - a Phillips spectrum that peaks at waves of a few yards. Enhanced has no
   ripple texture: `LiquidTypeXTexture` gives its PBR liquids only the six
   foam maps, so every ripple is the FFT's (no scrolled detail normals).
-  Wowee sums sixteen directional waves analytically (slopes and height, no
+  Wowee sums twelve directional waves analytically (eight in the canals;
+  slopes, and the height from the five longest, no
   texture, so no tile repeats): wavelengths spaced geometrically over
-  0.35-8 yd (lakes), 1.5-64 yd (sea), 0.5-23 yd (canals), each weighted by
+  0.35-8 yd (lakes), 1.5-64 yd (sea), 0.7-23 yd (canals), each weighted by
   the root of Phillips' cut-off `exp(-1 / (k L)^2)` (L = wind^2 / g: 0.5 yd
   lakes, 2.6 sea, 3.7 canals) and by `(lambda / lMax)^0.5` (the short waves
   faint, as an FFT sea's damped small waves are), at 0.8 strength across the
@@ -197,7 +202,10 @@ above:
   noise (2 cycles across it) so the crests break up after a few
   wavelengths. A wave is faded out where it is under two pixels measured
   along its own direction (so waves seen side-on at a grazing angle stay),
-  and its slope variance goes to the roughness as Enhanced's prepass does
+  and its slope variance goes to the roughness as Enhanced's prepass does;
+  once the waves are shorter than twice the narrowest footprint any
+  direction can have, the rest are skipped and their variance added in
+  closed form, so far water runs a few waves only
   (`roughness = 0.013 + sqrt(sqrt(variance / 2))`, at least 0.06; it widens
   the sun path and lowers the environment Fresnel far off). In rivers the
   field is carried down the flow (below). The stock lake_a/ocean_h frames
@@ -213,14 +221,24 @@ above:
   the fog colour and the ambient, green-tinted, at 0.6 brightness - the shore,
   trees and haze; round lakes and canals (not the sea) its edge is a ragged
   skyline by the reflected ray's bearing (value noise, 0.06-0.5 of the
-  zenith), so the ripples break the mirror into streaks of shore and sky.
+  zenith), so the ripples break the mirror into streaks of shore and sky,
+  and darker (x 0.8) where the skyline stands tall - the trees of
+  Enhanced's probe.
   The sky part is graded to grey (tint 0.81 0.83 0.86). Over that, Enhanced's
   SSR (`reflectionMode 2`): the reflected ray marched through the scene's
-  depth copy (10 steps growing x1.55 to ~110 yd, 3 refining), the scene's
-  colour where it crosses something, faded at the copy's edges - islands,
-  posts, bridges, the player stand in the water. Marched only where the
-  Fresnel is over 0.03 (looking down near the camera the mirror does not
-  show). No probe cube.
+  depth copy (6 steps doubling to ~60 yd; the hit put between the last two
+  by their depth differences, no refining taps), the scene's colour where it
+  crosses something, faded at the copy's edges - islands, posts, bridges,
+  the player stand in the water. Marched only where the Fresnel is over
+  0.035 (looking down near the camera the mirror does not show). No probe
+  cube.
+- **Its own shader build**: `water_hd.frag` built twice, plain
+  (`water_hd.frag.spv`, HD water) and with `ENHANCED_WATER`
+  (`water_fw.frag.spv`, this row), the renderer binding one or the other.
+  With both paths in one shader the Iris Xe allocated registers for the
+  larger, so growing Enhanced's path made HD water slower too, and cutting
+  Enhanced's work (fewer waves, a shorter march) changed nothing measurable;
+  unrolling the march made both slower.
 - **Sun and moon**: GGX (alpha max(0.05, roughness^2)) with Schlick at the half vector, the
   shadow tap; in the HDR scene up to 6 (it blooms), else 1.2. By night the
   path is the moon's, taken opposite the sun, at 0.35 of the night light
@@ -297,21 +315,45 @@ regions, the far lake still 5-6 brighter (it mirrors a stand-in, not the
 trees), the shallows ochre (93 65 51 against 102 80 50) where they were
 mauve (86 63 65).
 
-Not closed: Enhanced's far lake carries dark streaks of the mirrored trees
-(its probe cube); the SSR finds the island, the reeds and the player but
-not trees off the top of the screen, and the stand-in's ragged skyline only
-imitates them. Enhanced's water is also clearer near the shore (its bed
-shapes show under a yard or two more water than ours).
+**The shore, the far lake and the cost (second pass).** The shore by a
+transect: from the waterline right of the player out into the lake
+(capture from (650,272), ours from (635,282), both reaching water 24 px
+in), 14 px patches every 8 px for 112 px, mean |rgb difference| to the
+capture and the bed's detail (luma std after a sigma-3 high-pass) as a
+share of the capture's. Enhanced's bed shows ochre, then olive (77 77 59
+at 48 px), then grey-teal at ~80 px; ours went grey within ~16 px. With the
+absorption taken over 0.7 of the depth difference and the thin veil
+starting olive: |rgb diff| 6.7 -> 3.9, bed detail 0.53 -> 1.01 of the
+capture's, the deep regions' colour unchanged (colour score 0.037). At
+0.5 of the depth the bed showed through the deep water too (our bed is
+redder than Enhanced's) and the colour score went to 0.063.
 
-**Cost of the ripple and reflection work** (same method as below, three
-8 s pairs a place; another agent's client shared the Iris Xe throughout, so
-the HD-water reference itself wandered 1.3-2.2 ms between runs and only the
-paired differences mean anything): over HD water the row now costs about
-+0.4 to +0.65 ms at the Crystal Lake shore and +0.8 to +1.1 ms where the
-canal fills the view, against +0.0 to +0.06 and +0.13 to +0.18 for
-89942de in the same conditions; the SSR is about a quarter of it, the
-sixteen waves and their filtering the rest. Enhanced-preset only; at
-2560x1080 expect about four times that on this GPU.
+The far lake (region (575,50)-(750,100)) is what the probe stand-in shows
+- the SSR finds nothing there - so the excess was the stand-in's: darker
+under the tall parts of its skyline (x 0.8) it reads 86 102 97 against
+Enhanced's 82 99 99 (was 88 105 101); at x 0.55 the whole lake went 5 too
+dark and lost ripple contrast. Ripple score with everything: 0.176 (mid
+0.19, fine 0.08, wl x 0.26, wl y 0.18), first pass 0.197.
+
+Cost, 1280x540, Iris Xe, the `water` GPU pass in Enhanced mode and with
+the row off (HD water), medians of three 8 s windows, no other client on
+the GPU except where noted:
+
+| Build | Crystal Lake: HD / Enhanced | Canal: HD / Enhanced |
+|---|---|---|
+| 89942de (one shader) | 1.29 / 1.31 | 1.80 / 1.88-2.00 |
+| first pass, 1906857 (one shader) | 1.52 / 2.13 | 1.46 / 2.29 |
+| now (two builds) | 1.00 / 1.36 | 1.05 / 1.83 (a second client for part) |
+
+Enhanced water is back to what 89942de cost at the lake and below it in the
+canal, ~0.5-0.8 ms under the first pass; HD water got 0.3-0.75 ms cheaper
+by not carrying Enhanced's path. Over HD water the row is +0.36 (lake) and
++0.78 (canal), the canal being the march (~0.3: grazing water, the mirror
+everywhere) and eight waves (~0.3). Measured on the way (canal, Enhanced's
+build): flat water and no march +0.10 over HD, the waves alone +0.41.
+The GPU's own pace wandered by up to a third between runs (whole-frame
+GPU time 10.4-14.4 ms for the same view), so only figures from one run
+compare closely; the deltas above are each from a single run.
 
 **Cost** (lab server, Iris Xe, 1280x540, Enhanced preset at noon, the row off
 (HD water) and on in turn, four 8 s pairs a place, `WOWEE_FRAME_PROFILE=1`,

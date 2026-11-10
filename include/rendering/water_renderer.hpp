@@ -235,7 +235,7 @@ public:
     /// liquid, its reflection and highlight, foam at the shore, rocks and in
     /// flowing rivers. Needs the HD pipelines; the renderer turns those on
     /// with it.
-    void setEnhancedWater(bool on) { enhancedWater_ = on; }
+    void setEnhancedWater(bool on);
     /// Sunlight under water (E15, water_caustics.hpp): the row, which keeps
     /// the caustics pipelines (made on first use, let go when it goes off),
     /// and each frame its strength by the sun's height, 0 at night. While the

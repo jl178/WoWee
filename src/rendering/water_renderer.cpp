@@ -401,14 +401,17 @@ void WaterRenderer::setCausticsEnabled(bool on) {
 // HD water: water.vert with water_hd.frag, everything else the water's own -
 // layout, vertex format, depth tested and not written, alpha blended. Where
 // the colour copy holds the scene the shader composes the bed itself and
-// writes alpha 1; elsewhere it blends as the stock water does.
+// writes alpha 1; elsewhere it blends as the stock water does. "Water (WoW
+// Enhanced)" is the same source built with ENHANCED_WATER (water_fw.frag.spv),
+// so each pipeline carries only its own path.
 VkPipeline WaterRenderer::buildHdPipeline(VkRenderPass pass, VkSampleCountFlagBits samples) {
     if (!vkCtx || !pipelineLayout || pass == VK_NULL_HANDLE) return VK_NULL_HANDLE;
     VkDevice device = vkCtx->getDevice();
     VkShaderModule vertShader, fragShader;
+    const char* fragPath = enhancedWater_ ? "assets/shaders/water_fw.frag.spv" : "assets/shaders/water_hd.frag.spv";
     if (!vertShader.loadFromFile(device, "assets/shaders/water.vert.spv") ||
-        !fragShader.loadFromFile(device, "assets/shaders/water_hd.frag.spv")) {
-        LOG_WARNING("WaterRenderer: water_hd.frag.spv missing - the stock water instead");
+        !fragShader.loadFromFile(device, fragPath)) {
+        LOG_WARNING("WaterRenderer: ", fragPath, " missing - the stock water instead");
         vertShader.destroy();
         fragShader.destroy();
         return VK_NULL_HANDLE;
@@ -443,6 +446,15 @@ VkPipeline WaterRenderer::buildHdPipeline(VkRenderPass pass, VkSampleCountFlagBi
 
 void WaterRenderer::destroyHdPipelines(bool deferred) {
     destroyPipelinePair(hdPipeline_, hd1xPipeline_, deferred);
+}
+
+void WaterRenderer::setEnhancedWater(bool on) {
+    if (on == enhancedWater_) return;
+    enhancedWater_ = on;
+    // The other build of water_hd.frag from the next frame; the old
+    // pipelines go once no frame in flight can still be drawing with them.
+    hdBuildFailed_ = false;
+    destroyHdPipelines(true);
 }
 
 void WaterRenderer::setHdWater(bool on) {

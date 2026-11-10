@@ -314,8 +314,15 @@ TEST_CASE("Enhanced water: water_hd.frag carries LiquidType 1.60.1's columns", "
     CHECK(src.find("vec3(0x9b, 0xbf, 0xec)") != std::string::npos);
     CHECK(src.find("vec3(0x48, 0xaa, 0xb0)") != std::string::npos);
     CHECK(src.find("vec3(0x1b, 0xb2, 0xe6)") != std::string::npos);
-    // Enhanced's mode is hdParams.x 2; HD water alone stays 1.
-    CHECK(src.find("bool fw = hdParams.x > 1.5;") != std::string::npos);
+    // Enhanced's mode is its own build of the file (ENHANCED_WATER), so HD
+    // water alone compiles none of it.
+    CHECK(src.find("#ifdef ENHANCED_WATER\n    const bool fw = true;") != std::string::npos);
+    CHECK(src.find("    const bool fw = false;") != std::string::npos);
+    std::ifstream cm(std::string(WOWEE_SOURCE_DIR) + "/CMakeLists.txt");
+    REQUIRE(cm.good());
+    std::stringstream cms;
+    cms << cm.rdbuf();
+    CHECK(cms.str().find("water_hd.frag.glsl|water_fw.frag.spv|-DENHANCED_WATER") != std::string::npos);
 }
 
 TEST_CASE("Sun through leaves: its row, the Enhanced preset, the shader bit", "[enhanced]") {
