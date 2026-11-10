@@ -17,8 +17,10 @@
 // The script gets five extra globals, and only while the variable is set:
 //   WoweeDebug_Log(...)            a line in the log, prefixed [luatest]
 //   WoweeDebug_Screenshot(path)    a PNG of the next finished frame
-//   WoweeDebug_PushKey(name, down) a key event through the SDL queue, so it
-//                                  takes the same path as a real press
+//   WoweeDebug_PushKey(name, down [, mods])
+//                                  a key event through the SDL queue, so it
+//                                  takes the same path as a real press;
+//                                  mods is "SHIFT", "CTRL-SHIFT" and so on
 //   WoweeDebug_Mouse(frame, button, down [, fx, fy])
 //                                  a mouse button event at a point inside a
 //                                  frame, through the same queue
@@ -166,7 +168,16 @@ int luaDebugPushKey(lua_State* L) {
     ev.key.key = SDL_GetKeyFromScancode(sc, SDL_KMOD_NONE, false);
     ev.key.down = down;
     ev.key.repeat = false;
-    ev.key.mod = SDL_KMOD_NONE;
+    // Held modifiers, as the event carries them: a chord such as SHIFT-DOWN
+    // resolves from the event's own mod, not from the keyboard state.
+    SDL_Keymod mod = SDL_KMOD_NONE;
+    if (const char* mods = lua_tostring(L, 3)) {
+        const std::string m = mods;
+        if (m.find("SHIFT") != std::string::npos) mod |= SDL_KMOD_LSHIFT;
+        if (m.find("CTRL") != std::string::npos) mod |= SDL_KMOD_LCTRL;
+        if (m.find("ALT") != std::string::npos) mod |= SDL_KMOD_LALT;
+    }
+    ev.key.mod = mod;
     ev.key.windowID = gWindowId;
     SDL_PushEvent(&ev);
     // Held as well. Movement reads the keyboard state (Input::update), which
