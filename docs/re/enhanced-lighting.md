@@ -471,6 +471,117 @@ The constants were set side by side against Enhanced's Goldshire afternoon
 (section 9). Not ported: the cubic slice spacing, several layers, the
 height fades' per-zone values, and the phase table - data not decoded.
 
+## 5b. The air: Enhanced's global fog layer, decoded
+
+What lifts Enhanced's dark tones from about twenty yards out (section 9,
+gap 6) is not its distance fog. Read from the shaders and the data:
+
+**The distance fog** (`PSFog`, 14 float4 per fog, read by
+`material3_mesh_ps`/`material3_wmo_ps` for every lit pixel, permutation 26
+of 5446721): two paths, picked by row 1.x. The legacy one is
+`T = saturate(((row1.y - d) * row1.z) ^ row1.w)` - 3.3.5's curve, end,
+1/(end - start) and power. The new one is exponential,
+`T = exp(-row4.x * max(d - row0.x - row0.w, 0))` with a height fog
+(a plane, row 2, faded by row 3.w, cubic coefficients in rows 9-11), the
+colour lerped from row 6 to row 13 (EndFogColor) by distance and a sun
+fog colour toward row 8's direction. Which path and every row are filled on
+the CPU from LightData's fog columns; Enhanced's outdoor keys leave
+FogDensity, the height fog, MainFogStart/End, EndFogColor and SunFogColor
+at 0 (Elwynn's LightParams 7748 on every key) and set only FogEnd (18000
+at noon, a single key without one at 8:00) and FogScaler (0.08-0.25). So
+the distance fog starts thousands of yards out: none of it near the camera.
+
+**The global fog layers** (`volumefogglobalfog.bls`, 6674334, all eight
+permutations the same core; `GlobalFogParams`, nine float4 a layer from
+cbuffer row 23): per froxel at depth z and per layer,
+
+    coverage   = saturate((z - start) / sliceThickness)        row+0.y start
+    t          = saturate(max(z - start, 0) / row18.x)
+    depth      = coverage * sliceThickness * density            row+0.z density
+                 * (1 + k1 * t^k0)                              row+8.xy
+               * upper fade saturate(exp2( k*log2e*(h - upperH))) (flag 64, row+2.xy)
+               * lower fade saturate(exp2(-k*log2e*(h - lowerH))) (flag 128, row+2.zw)
+    inscatter += (emissive + scatter * phase(cos) * intensity) * depth
+                                     row+1.xyz emissive, row+5.xyz scatter,
+                                     row+1.w intensity, row+0.w the phase row
+    phase LUT u = 1 - (0.5 - 0.5 cos)^(1/3)
+
+The layer's values come from **LightParams' new columns**: field 031 is
+0.001 on 370 of 882 profiles and 0.002 on one, and on all but three of
+them field 035 is 1 (0 on 508 profiles that have no 031) - a switch and a
+density per yard. Field 037 (0.7 or 0.8 on 856) has the spread of an
+anisotropy and 036 (1, 8, 16...) of the distance curve's exponent; they are
+not used here. Of the 112 Enhanced profiles the 3.3.5 lights link to, 108
+carry the layer at 0.001/yd (Elwynn's 7748 among them).
+
+Its colour was the open question. LightData field 055 (a Enhanced-only
+colour, set on 527 keys of 44 profiles, every one with field 035 on) is
+pale green-grey at Elwynn's 8:00 (`#b6cbb0`), white-blue at noon, rose at
+dusk: it reads like an air colour. Tried as the layer's light it measured
+worse: the added light came out yellow (red and green +0.046, blue +0.018
+on the inn view) once the HDR mid-tone lift and chroma (section 2c) had
+taken the brighter canopy, and the canopy's blue fell. The light's fog
+colour (SkyFogColor, channel 7, Enhanced's own `#73a29d` at 8:00, cool
+blue-green) closed the floor and raised the canopy's blue. So 055 is left
+unread; the layer scatters the fog colour.
+
+**Ported** (the "Sun haze (the reference client)" row, Enhanced preset only):
+`tools/enhanced_light_gen.py` writes `WFL2` tables - `WFL1` plus each
+profile's density (field 031 where field 035 is on); `enhanced_lights::parse`
+reads both, a `WFL1` table meaning no air. `LightingManager` carries it as
+`LightingParams::airDensity`, blended between lights like the rest, 0 on
+3.3.5's own profiles, under water and outside Enhanced's daylight. The haze
+pass (`enhanced_haze.frag`) takes it in its spare push vec4 and lays the fog
+colour's light over every opaque pixel, `T = exp(-od)` with the density
+thinning with height as the haze's own (220-yard scale above the ground
+under the player), from the camera out, thinned by weather as the haze is,
+outdoors only and not on the sky (the dome has its fog band). The haze,
+farther (it starts 120 yards out), composites behind it. One more `exp` in a
+pass that already runs. Regenerate the local table with the command in
+section 2b's tools line (`enhanced_light_gen.py --dbc ... --enhanced ...
+--out <data>/override/wowee/enhanced_lights.bin`); a client older than this
+refuses a `WFL2` table and falls back to the averaged trend, so the two go
+together.
+
+Measured (the three matched Goldshire views; one build, the `WFL1` table
+then the `WFL2`; gap is Wowee against Enhanced, mean over the views):
+
+| region | Enhanced | no air | air | gap no air | gap air |
+|---|---|---|---|---|---|
+| world 5th pct luminance | 0.18 0.20 0.17 | 0.14 0.17 0.12 | 0.15 0.19 0.12 | -24% | -18% |
+| foliage 10th pct luminance | 0.21 0.20 0.19 | 0.17 0.17 0.12 | 0.22 0.21 0.13 | -24% | -6% |
+| far band 5th pct | 0.18 0.20 0.17 | 0.13 0.21 0.11 | 0.15 0.23 0.12 | -18% | -12% |
+| canopy blue / luminance | 0.72 0.67 0.70 | 0.61 0.43 0.71 | 0.63 0.48 0.71 | -17% | -13% |
+| lit / shade | 1.91 2.26 2.39 | 2.50 2.28 2.63 | 2.39 2.17 2.51 | +14% | +9% |
+| all luminance | 0.31 0.38 0.32 | 0.31 0.35 0.27 | 0.33 0.37 0.28 | -7% | -4% |
+| foliage 90th pct luminance | 0.33 0.35 0.33 | 0.42 0.46 0.34 | 0.47 0.50 0.37 | +21% | +33% |
+| canopy / ground luminance | 0.78 0.58 0.86 | 0.84 0.95 0.73 | 0.91 1.02 0.78 | +19% | +28% |
+| foliage chroma | 0.34 0.36 0.40 | 0.43 0.49 0.39 | 0.45 0.50 0.42 | +19% | +24% |
+
+The floor closes by a quarter to three quarters; what it costs is the lit
+canopy, which was already too bright for Enhanced's and takes the veil's
+light on top (then the HDR mid-tone lift and chroma). Over all fifteen
+measured regions the summed gap moves 313 -> 310: the air is Enhanced's, the
+canopy's brightness is a separate gap. Elsewhere (Goldshire 17:51, the
+Barrens at noon, Elwynn's forest at 10:00, Goldshire with the sun behind)
+the frame's mean rises 0.005-0.015, its 5th percentile 0.010-0.018, its
+contrast (sd) falls 0.001-0.005. Sheets in the session scratchpad:
+`fgap/sheet_c.png` (Enhanced | no air | air).
+
+**The far canopy's colour.** Enhanced's far trees read green-grey where
+Wowee's read warm yellow. By screen band (foliage pixels; top = the near
+crowns, far = the tree line), red and green to luminance are the same in
+both - 1.02 : 1.03 in Enhanced, 1.01-1.03 : 1.03-1.04 in Wowee - so it is
+not the leaf textures or a tint, which would move red against green. What
+differs is blue alone: 0.71-0.78 of luminance in Enhanced's near crowns
+against 0.53-0.55 in Wowee's, 0.65-0.74 against 0.62-0.66 at the tree
+line. The air takes the tree line's blue up by 0.02-0.04 and the near
+crowns' by 0.01-0.04; most of the rest is at twenty yards, too near for
+any air - the leaves' own light: Enhanced's are lit more by the sky's blue
+ambient than by its orange morning sun, which at Goldshire 9:22 stands
+elsewhere in Enhanced (section 2c) and leaves the camera-facing leaves in
+the shade.
+
 ## 6. Global illumination ("Secondary Lighting")
 
 Enhanced-era shaders with no names in the community listfile
@@ -929,19 +1040,10 @@ What still separates the two pictures, largest first:
    With the far field the Enhanced preset does too (low detail past 1900);
    what is left is the light data's own fog, which in 3.3.5 ends short of
    1900 in most zones (Enhanced's own keyframes, section 2b, are thinner).
-6. The mid-distance veil (measured after section 6d, the largest gap left
-   at the matched Goldshire views): Enhanced's darkest tones are lifted from
-   about 20 yards out - world 5th percentile 0.17-0.20 against 0.11-0.17,
-   the canopy's 10th 0.19-0.21 against 0.12-0.17 - while the near road's
-   matches, and the lift is a cool grey (canopy blue/luminance 0.67-0.72
-   against 0.43-0.72). The sun haze cannot give it as it stands: from 15
-   yards at 0.004/yd (18x) its light is the fog colour and the forward-
-   scattered sun, orange at 9:22, and the canopy went more saturated
-   (foliage chroma +43%) and yellower (blue -37%), not greyer; the froxel
-   mist at 2.6x lifts the floor to Enhanced's but in the sun's colour too.
-   What it needs is sky-coloured in-scattering near the camera, which is
-   what Enhanced's global fog layers inject (section 5) - their values are
-   still not decoded.
+6. The mid-distance veil: ported as the air (section 5b), Enhanced's global
+   fog layer at its own density, scattering the fog colour. The floor's
+   gap is -18% (was -24%); what is left of the veil's blue in the near
+   crowns is the leaves' light, not air.
 
 ## 9b. The HDR/linear path ("HDR lighting (the reference client)")
 

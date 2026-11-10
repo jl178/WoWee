@@ -20,10 +20,16 @@
 /// none.
 ///
 /// File layout, all little-endian 32-bit words:
-///   "WFL1", keyCount, profileCount, linkCount
+///   "WFL2", keyCount, profileCount, linkCount
 ///   keyCount     x { time, color[18] (0x00RRGGBB), value[4] (float) }
-///   profileCount x { enhancedParamsId, firstKey, keyCount, colorMask, floatMask }
+///   profileCount x { enhancedParamsId, firstKey, keyCount, colorMask, floatMask,
+///                    airDensity (float) }
 ///   linkCount    x { lightId, slot, profile }
+/// "WFL1" is the same without airDensity (no air: 0).
+///
+/// The air is Enhanced's global fog layer (docs/re/enhanced-lighting.md
+/// section 5b): its density per yard is LightParams field 031 where the
+/// profile turns the layer on (field 035).
 /// No renderer includes.
 
 #include <cstdint>
@@ -78,6 +84,7 @@ struct Profile {
     uint32_t keyCount = 0;
     uint32_t colorMask = 0;        ///< bit c: Enhanced authors colour channel c
     uint32_t floatMask = 0;        ///< bit f: Enhanced authors float channel f
+    float airDensity = 0.0f;       ///< the global fog layer's density per yard, 0 = off
 };
 
 struct Link {
@@ -104,12 +111,15 @@ inline bool parse(const std::vector<uint8_t>& data, Table& out) {
         pos += 4;
         return true;
     };
-    if (data.size() < 16 || std::memcmp(data.data(), "WFL1", 4) != 0) return false;
+    if (data.size() < 16) return false;
+    const bool v2 = std::memcmp(data.data(), "WFL2", 4) == 0;
+    if (!v2 && std::memcmp(data.data(), "WFL1", 4) != 0) return false;
     pos = 4;
     uint32_t nKeys = 0, nProfiles = 0, nLinks = 0;
     if (!word(nKeys) || !word(nProfiles) || !word(nLinks)) return false;
+    const uint64_t air = v2 ? 1 : 0;
     const uint64_t expected = 16 + uint64_t(nKeys) * (1 + kColorChannels + kFloatChannels) * 4 +
-                              uint64_t(nProfiles) * 5 * 4 + uint64_t(nLinks) * 3 * 4;
+                              uint64_t(nProfiles) * (5 + air) * 4 + uint64_t(nLinks) * 3 * 4;
     if (expected != data.size()) return false;
     Table t;
     t.keys.resize(nKeys);
@@ -130,6 +140,12 @@ inline bool parse(const std::vector<uint8_t>& data, Table& out) {
         word(p.keyCount);
         word(p.colorMask);
         word(p.floatMask);
+        if (v2) {
+            uint32_t w = 0;
+            word(w);
+            std::memcpy(&p.airDensity, &w, 4);
+            if (!(p.airDensity >= 0.0f && p.airDensity < 1.0f)) return false;
+        }
         if (p.keyCount == 0 || p.keyCount > kMaxKeys ||
             uint64_t(p.firstKey) + p.keyCount > nKeys) {
             return false;

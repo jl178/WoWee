@@ -208,7 +208,23 @@ def match(w, flights, zones):
     return next(l for l in same_map if l["id"] == best), share
 
 
+# Enhanced's global fog layer (docs/re/enhanced-lighting.md section 5b): the
+# density per yard in LightParams field 031 where field 035 turns the layer
+# on. It scatters the light's fog colour (SkyFogColor, already channel 7).
+AIR_ON = "Field_1_60_1_69876_035"
+AIR_DENSITY = "Field_12_0_1_65617_031"
+
+
+def air_densities(fdir):
+    out = {}
+    for r in csv.DictReader(open(f"{fdir}/LightParams.csv")):
+        on = float(r.get(AIR_ON) or 0) != 0.0
+        out[int(r["ID"])] = float(r.get(AIR_DENSITY) or 0) if on else 0.0
+    return out
+
+
 def enhanced_profiles(fdir, wanted):
+    density = air_densities(fdir)
     keys = {}
     for r in csv.DictReader(open(f"{fdir}/LightData.csv")):
         p = int(r["LightParamID"])
@@ -227,7 +243,7 @@ def enhanced_profiles(fdir, wanted):
             if any(float(r[col] or 0) != 0.0 for r in rows):
                 float_mask |= 1 << ch
         profiles[p] = dict(
-            color_mask=color_mask, float_mask=float_mask,
+            color_mask=color_mask, float_mask=float_mask, air_density=density.get(p, 0.0),
             keys=[dict(time=int(r["Time"] or 0) % 2880,
                        colors=[int(float(r[c] or 0)) & 0xFFFFFF for c in COLOR_COLUMNS],
                        floats=[float(r[c] or 0) for c in FLOAT_COLUMNS]) for r in rows])
@@ -303,7 +319,7 @@ def bound_ambient(profiles):
 
 
 # The file: little-endian 32-bit words (see include/rendering/enhanced_lights.hpp).
-MAGIC = b"WFL1"
+MAGIC = b"WFL2"
 
 
 def write_table(path, order, profiles, links):
@@ -311,14 +327,15 @@ def write_table(path, order, profiles, links):
     keys, profs = [], []
     for p in order:
         pr = profiles[p]
-        profs.append((p, len(keys), len(pr["keys"]), pr["color_mask"], pr["float_mask"]))
+        profs.append((p, len(keys), len(pr["keys"]), pr["color_mask"], pr["float_mask"],
+                      pr["air_density"]))
         keys.extend(pr["keys"])
     out = bytearray(MAGIC)
     out += struct.pack("<III", len(keys), len(profs), len(links))
     for k in keys:
         out += struct.pack("<I18I4f", k["time"], *k["colors"], *k["floats"])
     for pr in profs:
-        out += struct.pack("<5I", *pr)
+        out += struct.pack("<5If", *pr)
     for lid, slot, p in links:
         out += struct.pack("<3I", lid, slot, index[p])
     with open(path, "wb") as fh:

@@ -264,6 +264,43 @@ TEST_CASE("Enhanced lights: the table file round-trips and refuses bad input", "
     CHECK_FALSE(fl::parse(std::vector<uint8_t>(good.begin(), good.end() - 4), t));
 }
 
+TEST_CASE("Enhanced lights: WFL2 carries the air's density", "[enhanced]") {
+    namespace fl = enhanced_lights;
+    // The WFL1 fixture with a density after the profile.
+    const std::vector<uint8_t> v1 = enhancedLightsFixture();
+    std::vector<uint32_t> w(v1.size() / 4);
+    std::memcpy(w.data(), v1.data(), v1.size());
+    const size_t keyWords = 1 + fl::kColorChannels + fl::kFloatChannels;
+    const size_t profileAt = 4 + 2 * keyWords;
+    std::vector<uint32_t> out(w.begin(), w.begin() + profileAt + 5);
+    out[0] = 0x324c4657u;  // "WFL2"
+    const float density = 0.001f;
+    uint32_t bits = 0;
+    std::memcpy(&bits, &density, 4);
+    out.push_back(bits);
+    out.insert(out.end(), w.begin() + profileAt + 5, w.end());
+    std::vector<uint8_t> bytes(out.size() * 4);
+    std::memcpy(bytes.data(), out.data(), bytes.size());
+
+    fl::Table t;
+    REQUIRE(fl::parse(bytes, t));
+    CHECK(t.keys[1].color[0] == 0xa0b0c0u);
+    CHECK(t.profiles[0].airDensity == Catch::Approx(0.001f));
+    CHECK(t.links[0].lightId == 7);
+    // A WFL1 file has no air; a negative density, or the WFL1 size under the
+    // WFL2 magic, is refused.
+    REQUIRE(fl::parse(v1, t));
+    CHECK(t.profiles[0].airDensity == 0.0f);
+    const float bad = -1.0f;
+    std::memcpy(&bits, &bad, 4);
+    std::vector<uint8_t> broken = bytes;
+    std::memcpy(broken.data() + (profileAt + 5) * 4, &bits, 4);
+    CHECK_FALSE(fl::parse(broken, t));
+    std::vector<uint8_t> mislabelled = v1;
+    std::memcpy(mislabelled.data(), "WFL2", 4);
+    CHECK_FALSE(fl::parse(mislabelled, t));
+}
+
 TEST_CASE("HDR tone curve: the 8-bit picture below the knee, no clip above", "[enhanced]") {
     namespace tm = enhanced_tonemap;
     // Below the knee, exactly what the 8-bit scene showed.

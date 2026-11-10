@@ -68,6 +68,7 @@ void forEachBlended(Params& a, const LightingParams& b, F&& f) {
     f(a.oceanDeepAlpha, b.oceanDeepAlpha);
     f(a.shadowOpacity, b.shadowOpacity);
     f(a.glow, b.glow);
+    f(a.airDensity, b.airDensity);
 }
 
 }  // namespace
@@ -296,6 +297,8 @@ void LightingManager::loadEnhancedProfiles(pipeline::AssetManager* assetManager)
                 ++band.numKeyframes;
             }
         }
+        // The air (enhanced_lights.hpp), Enhanced's global fog layer.
+        profile.airDensity = src.airDensity;
         enhancedProfiles_[link.lightId * 8u + link.slot] = profile;
     }
     LOG_INFO("Enhanced light keyframes: ", enhancedProfiles_.size(), " light slots from wowee/enhanced_lights.bin");
@@ -1080,6 +1083,8 @@ LightingParams LightingManager::sampleLightParams(const LightParamsProfile* prof
     params.oceanShallowAlpha = profile->oceanShallowAlpha;
     params.oceanDeepAlpha = profile->oceanDeepAlpha;
     params.glow = profile->glow;
+    // Enhanced's air (0 on 3.3.5's own profiles).
+    params.airDensity = profile->airDensity;
     // The dome's dawn and dusk highlight strength (horizonGlow is what the
     // sky reads it from; blended between lights like the other floats).
     params.horizonGlow = profile->highlightSky;

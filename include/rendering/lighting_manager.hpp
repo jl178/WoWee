@@ -84,6 +84,11 @@ struct LightingParams {
     float waterDeepAlpha = 1.0f;
     float oceanShallowAlpha = 0.75f;
     float oceanDeepAlpha = 1.0f;
+
+    /// Enhanced's global fog layer, the "air" (docs/re/enhanced-lighting.md
+    /// 5b): its density per yard at the ground, 0 outside Enhanced's
+    /// daylight. It scatters the fog colour. Read by the sun haze pass.
+    float airDensity = 0.0f;
 };
 
 /** Apply any authored ambience that must remain stable regardless of world time. */
@@ -253,6 +258,10 @@ struct LightParamsProfile {
     };
 
     FloatBand floatBands[FLOAT_CHANNEL_COUNT];
+
+    /// Enhanced's global fog layer (enhanced_lights.hpp; Enhanced profiles only):
+    /// the air's density per yard (0: none).
+    float airDensity = 0.0f;
 };
 
 /**

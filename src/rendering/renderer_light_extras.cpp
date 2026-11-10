@@ -9,6 +9,7 @@
 #include "rendering/m2_renderer.hpp"
 #include "rendering/terrain_manager.hpp"
 #include "rendering/contact_shadow_pass.hpp"
+#include "rendering/lighting_manager.hpp"
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/weather.hpp"
@@ -166,7 +167,11 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
         const float wx = weather ? glm::clamp(weather->getIntensity(), 0.0f, 1.0f) : 0.0f;
         // Flag 8: the HDR scene, where the haze's light may pass 1.3.
         const int hazeFlags = vkCtx->isHdrScene() ? 8 : 0;
-        if (sunHaze_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.8f * wx, hazeFlags)) {
+        // Enhanced's air (its global fog layer, docs/re/enhanced-lighting.md
+        // 5b): its density per yard, 0 outside Enhanced's daylight.
+        glm::vec4 air(0.0f);
+        if (lightingManager) air.w = lightingManager->getLightingParams().airDensity;
+        if (sunHaze_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.8f * wx, hazeFlags, air)) {
             vkCtx->gpuMark(cmd, "sun haze");
         }
     }

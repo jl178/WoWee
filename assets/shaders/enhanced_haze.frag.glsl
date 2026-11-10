@@ -42,6 +42,7 @@ layout(set = 1, binding = 0) uniform sampler2D uSceneDepth;
 layout(push_constant) uniform Push {
     mat4 invViewProj;  // clip -> world, this frame's
     vec4 target;       // xy the render extent, z strength (0..2; weather thins it), w flags (4 debug, 8 HDR scene)
+    vec4 air;          // Enhanced's air: a its density per yard at the ground (0 = none); rgb unused
 } pc;
 
 layout(location = 0) out vec4 outColor;
@@ -81,17 +82,39 @@ void main() {
     if (len < 1e-3) discard;
     v /= len;
     float L = d >= 1.0 ? kSkyDistance : len;
+    float h0 = playerPos.z;
+    float strength = clamp(pc.target.z, 0.0, 2.0);
+    // Indoors the outdoor air stays outside.
+    float outdoors = 1.0 - clamp(shadowParams.w, 0.0, 1.0);
+
+    // Enhanced's air: its global fog layer (volumefogglobalfog.bls; the
+    // layer's density from LightParams, docs/re/enhanced-lighting.md 5b) -
+    // the fog colour's light taken in from the camera out, thinning with
+    // height as the haze below. Not on the sky, whose dome carries its own
+    // fog band.
+    float airT = 1.0;
+    vec3 airLight = vec3(0.0);
+    if (pc.air.a > 0.0 && d < 1.0) {
+        float baseA = pc.air.a * exp(-(cam.z - h0) / kHeightScale);
+        float kA = v.z / kHeightScale;
+        float odA = abs(kA) < 1e-5 ? baseA * len : baseA * (1.0 - exp(-kA * len)) / kA;
+        airT = mix(1.0, exp(-odA * strength), outdoors);
+        airLight = fogColor.rgb * (1.0 - airT);
+    }
+
     float run = max(L - kStart, 0.0);
-    if (run <= 0.0) discard;
+    if (run <= 0.0) {
+        if (airT >= 0.999) discard;
+        outColor = vec4(airLight, airT);
+        return;
+    }
     // The ramp: the first kRamp yards past the start count at a growing
     // share, as if the start were soft (half of them, in all).
     run = run > kRamp ? run - 0.5 * kRamp : 0.5 * run * run / kRamp;
 
-    float h0 = playerPos.z;
     float base = kDensity * exp(-(cam.z + v.z * kStart - h0) / kHeightScale);
     float k = v.z / kHeightScale;
     float depthOD = abs(k) < 1e-5 ? base * run : base * (1.0 - exp(-k * run)) / k;
-    float strength = clamp(pc.target.z, 0.0, 2.0);
     float T = exp(-depthOD * strength);
 
     vec3 travel = normalize(lightDir.xyz);
@@ -119,13 +142,14 @@ void main() {
     float over = max(top - knee, 0.0);
     float eased = min(top, knee) + over * (maxLight - knee) / (maxLight - knee + over);
     light *= eased / top;
-    // Indoors the outdoor air stays outside.
-    float outdoors = 1.0 - clamp(shadowParams.w, 0.0, 1.0);
     float a = mix(1.0, T, outdoors);
-    if (a >= 0.999) discard;
+    // The haze is the farther of the two (it starts kStart out): what
+    // reaches the eye is the haze's light through the air, and the air's own.
+    float total = a * airT;
+    if (total >= 0.999) discard;
     if ((int(pc.target.w + 0.5) & 4) != 0) {
-        outColor = vec4(vec3(1.0 - a), 0.0);   // WOWEE_CONTACT_SHADOW_DEBUG: how much air
+        outColor = vec4(vec3(1.0 - total), 0.0);   // WOWEE_CONTACT_SHADOW_DEBUG: how much air
         return;
     }
-    outColor = vec4(light * (1.0 - a), a);
+    outColor = vec4(light * (1.0 - a) * airT + airLight, total);
 }
