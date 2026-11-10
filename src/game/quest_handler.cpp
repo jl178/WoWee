@@ -1508,6 +1508,8 @@ void QuestHandler::registerOpcodes(DispatchTable& table) {
             }
         }
         packet.skipAll();
+        // The answer to QueryQuestsCompleted: GetQuestsCompleted has it now.
+        if (owner_.addonEventCallbackRef()) owner_.addonEventCallbackRef()("QUEST_QUERY_COMPLETE", {});
     };
 }
 

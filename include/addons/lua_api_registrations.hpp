@@ -26,6 +26,7 @@ void registerMacroBindingLuaAPI(lua_State* L);
 void registerBattlefieldLuaAPI(lua_State* L);
 /// The QuestPOI functions over the world map (lua_quest_api.cpp).
 void registerQuestPoiLuaAPI(lua_State* L);
+void registerStockMoreLuaAPI(lua_State* L);
 
 /// The shaded quest areas WorldMapBlobFrame shows, as polygons in fractions of
 /// the frame (0,0 top-left). Empty when nothing is selected or the map shows

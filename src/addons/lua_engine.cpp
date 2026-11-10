@@ -6138,6 +6138,77 @@ int lua_ColorSelect_GetColorRGB(lua_State* L) {
     return 3;
 }
 
+/// ColorSelect:SetColorHSV(h, s, v) - the same colour by hue (degrees),
+/// saturation and value, which is what the wheel and the bar move. Answered
+/// through SetColorRGB, so OnColorSelect fires exactly as it does for that;
+/// the HSV is kept as given rather than recomputed, so a grey keeps its hue.
+int lua_ColorSelect_SetColorHSV(lua_State* L) {
+    auto* w = widgetOf(L, 1);
+    if (!w) return 0;
+    float hsv[3] = {static_cast<float>(luaL_optnumber(L, 2, 0.0)),
+                    static_cast<float>(luaL_optnumber(L, 3, 0.0)),
+                    static_cast<float>(luaL_optnumber(L, 4, 1.0))};
+    float rgb[3];
+    wowee::ui::hsvToRgb(hsv, rgb);
+    lua_settop(L, 1);
+    for (float c : rgb) lua_pushnumber(L, c);
+    lua_ColorSelect_SetColorRGB(L);
+    if (auto* again = widgetOf(L, 1)) {
+        for (int i = 0; i < 3; ++i) again->pickerHSV[i] = hsv[i];
+    }
+    return 0;
+}
+int lua_ColorSelect_GetColorHSV(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    static const float kDefault[3] = {0.0f, 0.0f, 1.0f};
+    for (int i = 0; i < 3; ++i) lua_pushnumber(L, w ? w->pickerHSV[i] : kDefault[i]);
+    return 3;
+}
+
+/// The four parts' getters: the region given that part (SetColorWheelTexture
+/// and its three siblings, or the XML elements of the same names).
+static int colorPartOf(lua_State* L, wowee::ui::Widget::ColorRole role) {
+    auto* tree = wowee::addons::getWidgetTree(L);
+    const auto* w = tree ? tree->get(widgetIdOf(L, 1)) : nullptr;
+    if (!w) { lua_pushnil(L); return 1; }
+    for (uint32_t id : w->children) {
+        const auto* c = tree->get(id);
+        if (!c || c->colorRole != role) continue;
+        lua_getglobal(L, "__WoweeRegionsByWid");
+        if (lua_istable(L, -1)) {
+            lua_rawgeti(L, -1, static_cast<int>(id));
+            lua_remove(L, -2);
+            return 1;
+        }
+        lua_pop(L, 1);
+        break;
+    }
+    lua_pushnil(L);
+    return 1;
+}
+int lua_ColorSelect_GetColorWheelTexture(lua_State* L) {
+    return colorPartOf(L, wowee::ui::Widget::ColorRole::Wheel);
+}
+int lua_ColorSelect_GetColorWheelThumbTexture(lua_State* L) {
+    return colorPartOf(L, wowee::ui::Widget::ColorRole::WheelThumb);
+}
+int lua_ColorSelect_GetColorValueTexture(lua_State* L) {
+    return colorPartOf(L, wowee::ui::Widget::ColorRole::Value);
+}
+int lua_ColorSelect_GetColorValueThumbTexture(lua_State* L) {
+    return colorPartOf(L, wowee::ui::Widget::ColorRole::ValueThumb);
+}
+
+/// Region:IsDragging() - whether a drag the frame registered for is under
+/// way on it now (OnDragStart has run, OnDragStop has not).
+int lua_Region_IsDragging(lua_State* L) {
+    LuaEngine* e = engineFrom(L);
+    const uint32_t id = widgetIdOf(L, 1);
+    if (e && id != 0 && e->draggingWidget() == id) lua_pushboolean(L, 1);
+    else lua_pushnil(L);
+    return 1;
+}
+
 /// SetCooldown(start, duration) - both on GetTime's clock. A zero duration is
 /// how FrameXML clears one, and it must read as nothing running rather than as
 /// a sweep that never finishes.
@@ -7755,6 +7826,7 @@ void LuaEngine::registerCoreAPI() {
     // for client data it cannot read (worldmap::fallback), and its QuestPOI set.
     worldmap::registerWorldMapLuaAPI(L_);
     registerQuestPoiLuaAPI(L_);
+    registerStockMoreLuaAPI(L_);
 
     // WoW aliases
     lua_getglobal(L_, "string");
@@ -7959,6 +8031,13 @@ void LuaEngine::registerCoreAPI() {
         {"GetInputLanguage", lua_EditBox_GetInputLanguage},
         {"SetColorRGB",     lua_ColorSelect_SetColorRGB},
         {"GetColorRGB",     lua_ColorSelect_GetColorRGB},
+        {"SetColorHSV",     lua_ColorSelect_SetColorHSV},
+        {"IsDragging",      lua_Region_IsDragging},
+        {"GetColorHSV",     lua_ColorSelect_GetColorHSV},
+        {"GetColorWheelTexture",      lua_ColorSelect_GetColorWheelTexture},
+        {"GetColorWheelThumbTexture", lua_ColorSelect_GetColorWheelThumbTexture},
+        {"GetColorValueTexture",      lua_ColorSelect_GetColorValueTexture},
+        {"GetColorValueThumbTexture", lua_ColorSelect_GetColorValueThumbTexture},
         {"GetFontObject",   lua_FontString_GetFontObject},
         {"SetMinimumWidth", lua_Frame_SetMinimumWidth},
         {"GetMinimumWidth", lua_Frame_GetMinimumWidth},
@@ -8529,6 +8608,10 @@ void LuaEngine::registerCoreAPI() {
         "    if self.OnFinished then self:OnFinished() end\n"
         "end\n"
         "function groupMeta:Pause() self.paused = true end\n"
+        // For the rest of the animation API, defined with the path and
+        // scale-origin helpers in the chunk after this one.
+        "__WoweeAnimMeta = animMeta\n"
+        "__WoweeAnimGroupMeta = groupMeta\n"
         "function groupMeta:Resume() self.paused = nil end\n"
 
         // Stop every group on this frame at once. A frame method rather than a
@@ -8599,10 +8682,21 @@ void LuaEngine::registerCoreAPI() {
         "                    elseif a.kind == 'Translation' then\n"
         "                        dx = dx + (a.offsetX or 0) * p\n"
         "                        dy = dy + (a.offsetY or 0) * p\n"
+        "                    elseif a.kind == 'Path' then\n"
+        "                        local px, py = __WoweePathPoint(a, p)\n"
+        "                        dx = dx + px\n"
+        "                        dy = dy + py\n"
         "                    elseif a.kind == 'Scale' then\n"
         "                        local sx = a.scaleX\n"
         "                        if sx and g.parent then\n"
-        "                            g.parent:SetScale(1 + (sx - 1) * p)\n"
+        "                            local s = 1 + (sx - 1) * p\n"
+        "                            g.parent:SetScale(s)\n"
+        // About its origin (SetOrigin; the centre by default): the frame
+        // is moved so that point stays where it was at the start, rather
+        // than growing away from its anchor.
+        "                            local ox, oy = __WoweeScaleOriginShift(a, g.parent, s)\n"
+        "                            dx = dx + ox\n"
+        "                            dy = dy + oy\n"
         "                        end\n"
         "                    end\n"
         "                end\n"
@@ -8681,6 +8775,234 @@ void LuaEngine::registerCoreAPI() {
         // the consolidated buff tooltip never knew the mouse had left it; and
         // the hybrid scroll frames could not tell they were being hovered.
     );
+
+    // The rest of the animation API (CAnimation 0x00AC18E0, CAnimationGroup
+    // 0x00AC1AB8, CRotation 0x00AC19F0, CPath 0x00AC1A74 and its control
+    // points): state the client keeps and answers, path animations through
+    // their control points, and a scale about its origin.
+    bootstrap(
+        "local animMeta, groupMeta = __WoweeAnimMeta, __WoweeAnimGroupMeta\n"
+        "__WoweeAnimMeta, __WoweeAnimGroupMeta = nil, nil\n"
+        "local animScripts = {OnLoad=1, OnPlay=1, OnPaused=1, OnStop=1, OnFinished=1, OnUpdate=1}\n"
+        "local groupScripts = {OnLoad=1, OnPlay=1, OnPaused=1, OnStop=1, OnFinished=1, OnUpdate=1, OnLoop=1}\n"
+        "function animMeta:SetRadians(r) self.degrees = (r or 0) * 180 / math.pi end\n"
+        "function animMeta:GetRadians() return (self.degrees or 0) * math.pi / 180 end\n"
+        "function animMeta:IsDone() return self.finished == true end\n"
+        "function animMeta:IsPaused() return self.group ~= nil and self.group.paused == true end\n"
+        "function animMeta:IsStopped() return not (self.group and self.group.isPlaying) and not self.finished end\n"
+        "function animMeta:GetEndDelay() return self.endDelay or 0 end\n"
+        "function animMeta:SetSmoothProgress(p) self.progress = p or 0 end\n"
+        "function animMeta:GetProgressWithDelay()\n"
+        "    local total = (self.startDelay or 0) + (self.duration or 0) + (self.endDelay or 0)\n"
+        "    if total <= 0 then return self.progress or 0 end\n"
+        "    local t = (self.elapsed or 0) / total\n"
+        "    if t > 1 then t = 1 end\n"
+        "    return t\n"
+        "end\n"
+        "function animMeta:SetMaxFramerate(f) self.maxFramerate = f or 0 end\n"
+        "function animMeta:GetMaxFramerate() return self.maxFramerate or 0 end\n"
+        "function animMeta:HasScript(k) return animScripts[k] ~= nil end\n"
+        "function animMeta:IsObjectType(t)\n"
+        "    t = type(t) == 'string' and t:lower() or ''\n"
+        "    return t == 'animation' or t == (self.kind or 'Animation'):lower()\n"
+        "end\n"
+        // A path: control points made on it, each an offset from where the
+        // region started, walked in order - straight between them, or through
+        // them on a curve when the curve is SMOOTH.
+        "local cpMeta = {}\n"
+        "cpMeta.__index = cpMeta\n"
+        "function cpMeta:SetOffset(x, y) self.x, self.y = x or 0, y or 0 end\n"
+        "function cpMeta:GetOffset() return self.x or 0, self.y or 0 end\n"
+        "function cpMeta:SetOrder(o) self.order = o or 0; if self.path then self.path.__sorted = nil end end\n"
+        "function cpMeta:GetOrder() return self.order or 0 end\n"
+        "function cpMeta:GetParent() return self.path end\n"
+        "function cpMeta:SetParent(p) self.path = p end\n"
+        "function cpMeta:GetRegionParent() return self.path and self.path:GetRegionParent() end\n"
+        "function cpMeta:GetName() return self.name end\n"
+        "function cpMeta:GetObjectType() return 'ControlPoint' end\n"
+        "function cpMeta:IsObjectType(t) return type(t) == 'string' and t:lower() == 'controlpoint' end\n"
+        "function animMeta:CreateControlPoint(name, template, order)\n"
+        "    self.controlPoints = self.controlPoints or {}\n"
+        "    local cp = setmetatable({path = self, name = name, order = order or (#self.controlPoints + 1), x = 0, y = 0}, cpMeta)\n"
+        "    table.insert(self.controlPoints, cp)\n"
+        "    self.__sorted = nil\n"
+        "    if name then _G[name] = cp end\n"
+        "    return cp\n"
+        "end\n"
+        "local function sortedPoints(a)\n"
+        "    if a.__sorted then return a.__sorted end\n"
+        "    local list = {}\n"
+        "    for i, cp in ipairs(a.controlPoints or {}) do list[i] = cp end\n"
+        "    table.sort(list, function(l, r) return (l.order or 0) < (r.order or 0) end)\n"
+        "    a.__sorted = list\n"
+        "    return list\n"
+        "end\n"
+        "function animMeta:GetControlPoints() return unpack(sortedPoints(self)) end\n"
+        "function animMeta:SetCurve(c) self.curve = c end\n"
+        "function animMeta:GetCurve() return self.curve or 'NONE' end\n"
+        "function animMeta:GetMaxOrder()\n"
+        "    local m = 0\n"
+        "    for _, cp in ipairs(self.controlPoints or {}) do if (cp.order or 0) > m then m = cp.order end end\n"
+        "    return m\n"
+        "end\n"
+        "function __WoweePathPoint(a, p)\n"
+        "    local cps = sortedPoints(a)\n"
+        "    local n = #cps\n"
+        "    if n == 0 then return 0, 0 end\n"
+        "    local pts = {{0, 0}}\n"
+        "    for i = 1, n do pts[i + 1] = {cps[i].x or 0, cps[i].y or 0} end\n"
+        "    local segs = #pts - 1\n"
+        "    local f = p * segs\n"
+        "    local i = math.floor(f)\n"
+        "    if i >= segs then return pts[#pts][1], pts[#pts][2] end\n"
+        "    local t = f - i\n"
+        "    local p1, p2 = pts[i + 1], pts[i + 2]\n"
+        "    if (a.curve or 'NONE') ~= 'SMOOTH' then\n"
+        "        return p1[1] + (p2[1] - p1[1]) * t, p1[2] + (p2[2] - p1[2]) * t\n"
+        "    end\n"
+        "    local p0, p3 = pts[i] or p1, pts[i + 3] or p2\n"
+        "    local t2, t3 = t * t, t * t * t\n"
+        "    local function cr(a0, a1, a2, a3)\n"
+        "        return 0.5 * ((2 * a1) + (-a0 + a2) * t + (2 * a0 - 5 * a1 + 4 * a2 - a3) * t2 + (-a0 + 3 * a1 - 3 * a2 + a3) * t3)\n"
+        "    end\n"
+        "    return cr(p0[1], p1[1], p2[1], p3[1]), cr(p0[2], p1[2], p2[2], p3[2])\n"
+        "end\n"
+        // Scale about the origin. With the frame's first anchor at a fixed
+        // point R, its origin sits at R + s*K in screen terms (K: the anchor
+        // offset, the distance from the anchored point to the origin, and the
+        // origin's own offset, all in the frame's units). Holding that point
+        // where it was at scale 1 takes an extra offset of K*(1/s - 1).
+        "local fractions = {TOPLEFT={0,1}, TOP={0.5,1}, TOPRIGHT={1,1}, LEFT={0,0.5}, CENTER={0.5,0.5},\n"
+        "    RIGHT={1,0.5}, BOTTOMLEFT={0,0}, BOTTOM={0.5,0}, BOTTOMRIGHT={1,0}}\n"
+        "function __WoweeScaleOriginShift(a, region, s)\n"
+        "    if not s or s <= 0 or not region.GetPoint then return 0, 0 end\n"
+        "    local point, _, _, offX, offY = region:GetPoint(1)\n"
+        "    if not point then return 0, 0 end\n"
+        "    local w, h = region:GetWidth() or 0, region:GetHeight() or 0\n"
+        "    local fa = fractions[point] or fractions.CENTER\n"
+        "    local fo = fractions[a.originPoint or 'CENTER'] or fractions.CENTER\n"
+        "    local kx = (offX or 0) + (fo[1] - fa[1]) * w + (a.originX or 0)\n"
+        "    local ky = (offY or 0) + (fo[2] - fa[2]) * h + (a.originY or 0)\n"
+        "    local k = 1 / s - 1\n"
+        "    return kx * k, ky * k\n"
+        "end\n"
+        "function groupMeta:GetProgress()\n"
+        "    local total, done = self:GetDuration(), 0\n"
+        "    if total <= 0 then return self.isPlaying and 0 or 1 end\n"
+        "    for _, a in ipairs(self.animations) do\n"
+        "        local e = a.elapsed or 0\n"
+        "        if e > done then done = e end\n"
+        "    end\n"
+        "    local p = done / total\n"
+        "    if p > 1 then p = 1 end\n"
+        "    return p\n"
+        "end\n"
+        "function groupMeta:IsPaused() return self.paused == true end\n"
+        "function groupMeta:IsPendingFinish() return self.pendingFinish == true end\n"
+        "function groupMeta:GetLoopState()\n"
+        "    if not self.isPlaying then return 'NONE' end\n"
+        "    return self.reversed and 'REVERSE' or 'FORWARD'\n"
+        "end\n"
+        "function groupMeta:GetMaxOrder()\n"
+        "    local m = 0\n"
+        "    for _, a in ipairs(self.animations) do if (a.order or 1) > m then m = a.order or 1 end end\n"
+        "    return m\n"
+        "end\n"
+        "function groupMeta:SetInitialOffset(x, y) self.initialX, self.initialY = x or 0, y or 0 end\n"
+        "function groupMeta:GetInitialOffset() return self.initialX or 0, self.initialY or 0 end\n"
+        "function groupMeta:HasScript(k) return groupScripts[k] ~= nil end\n"
+        "function groupMeta:GetObjectType() return 'AnimationGroup' end\n"
+        "function groupMeta:IsObjectType(t) return type(t) == 'string' and t:lower() == 'animationgroup' end\n"
+        "function groupMeta:GetName() return self.name end\n"
+        "function groupMeta:GetRegionParent() return self.parent end\n"
+        // The name a group was made with, which CreateAnimationGroup keeps
+        // only as a global; GetName answers it.
+        "local create = __WoweeCreateAnimationGroup\n"
+        "function __WoweeCreateAnimationGroup(self, name, ...)\n"
+        "    local g = create(self, name, ...)\n"
+        "    g.name = name\n"
+        "    return g\n"
+        "end\n"
+        "__WoweeFrameMT.CreateAnimationGroup = __WoweeCreateAnimationGroup\n");
+
+    // Widget methods the client has and this did not, each the state the
+    // client keeps behind it (method tables audited against Wow.exe's).
+    bootstrap(
+        "local mt = __WoweeFrameMT\n"
+        "local function define(name, fn) if rawget(mt, name) == nil then mt[name] = fn end end\n"
+        // Region: the animation groups made on it, in the order made.
+        "define('GetAnimationGroups', function(self)\n"
+        "    local g = rawget(self, '__animGroups')\n"
+        "    if g then return unpack(g) end\n"
+        "end)\n"
+        // Frame: the title region (CreateTitleRegion), and joystick input,
+        // which no frame here receives but which is the frame's to set.
+        "define('GetTitleRegion', function(self) return rawget(self, '__titleRegion') end)\n"
+        "define('CreateTitleRegion', function(self)\n"
+        "    local r = rawget(self, '__titleRegion')\n"
+        "    if not r then\n"
+        "        r = self:CreateTexture(nil, 'ARTWORK')\n"
+        "        rawset(self, '__titleRegion', r)\n"
+        "    end\n"
+        "    return r\n"
+        "end)\n"
+        "define('EnableJoystick', function(self, on) rawset(self, '__joystick', on and true or false) end)\n"
+        "define('IsJoystickEnabled', function(self) if rawget(self, '__joystick') then return 1 end end)\n"
+        // Font instances (edit boxes, message frames, HTML): indented
+        // wrapping, and the justification they were given.
+        "define('SetIndentedWordWrap', function(self, on) rawset(self, '__indentedWordWrap', on and true or false) end)\n"
+        "define('GetIndentedWordWrap', function(self) if rawget(self, '__indentedWordWrap') then return 1 end end)\n"
+        "for _, axis in ipairs({'H', 'V'}) do\n"
+        "    local set = rawget(mt, 'SetJustify' .. axis)\n"
+        "    local key = '__justify' .. axis\n"
+        "    if set then\n"
+        "        mt['SetJustify' .. axis] = function(self, v, ...)\n"
+        "            rawset(self, key, v)\n"
+        "            return set(self, v, ...)\n"
+        "        end\n"
+        "    end\n"
+        "    define('GetJustify' .. axis, function(self)\n"
+        "        return rawget(self, key) or (axis == 'H' and 'LEFT' or 'MIDDLE')\n"
+        "    end)\n"
+        "end\n"
+        // Edit box: whether invisible letters (colour codes, links) count
+        // toward its limit, and the input method's composition, which no
+        // box here is ever in.
+        "define('SetCountInvisibleLetters', function(self, on) rawset(self, '__countInvisible', on and true or false) end)\n"
+        "define('IsCountInvisibleLetters', function(self) if rawget(self, '__countInvisible') then return 1 end end)\n"
+        "define('IsInIMECompositionMode', function() return nil end)\n"
+        // Scrolling message frame: how many lines fit, and the line the
+        // newest message is on.
+        "define('GetNumLinesDisplayed', function(self)\n"
+        "    local n = self.GetNumMessages and self:GetNumMessages() or 0\n"
+        "    local _, size = self.GetFont and self:GetFont()\n"
+        "    local h = self:GetHeight() or 0\n"
+        "    size = (size and size > 0) and size or 12\n"
+        "    local fits = math.floor(h / size)\n"
+        "    if fits < n then return fits end\n"
+        "    return n\n"
+        "end)\n"
+        "define('GetCurrentLine', function(self)\n"
+        "    local n = self.GetNumMessages and self:GetNumMessages() or 0\n"
+        "    if n > 0 then return n - 1 end\n"
+        "    return 0\n"
+        "end)\n"
+        // SimpleHTML: the format a hyperlink is written with.
+        "define('SetHyperlinkFormat', function(self, f) rawset(self, '__hyperlinkFormat', f) end)\n"
+        "define('GetHyperlinkFormat', function(self) return rawget(self, '__hyperlinkFormat') or '|H%s|h%s|h' end)\n"
+        // Minimap: the art its blips and arrows are drawn with.
+        "for _, n in ipairs({'IconTexture', 'BlipTexture', 'ClassBlipTexture', 'POIArrowTexture',\n"
+        "                    'StaticPOIArrowTexture', 'CorpsePOIArrowTexture', 'PlayerTexture'}) do\n"
+        "    local key = '__minimap' .. n\n"
+        "    define('Set' .. n, function(self, path) rawset(self, key, path) end)\n"
+        "end\n"
+        // QuestPOIFrame: how its blobs are drawn - smoothed, merged within a
+        // threshold, with so many spline points.
+        "define('EnableSmoothing', function(self, on) rawset(self, '__poiSmoothing', on and true or false) end)\n"
+        "define('EnableMerging', function(self, on) rawset(self, '__poiMerging', on and true or false) end)\n"
+        "define('SetMergeThreshold', function(self, t) rawset(self, '__poiMergeThreshold', t) end)\n"
+        "define('SetNumSplinePoints', function(self, n) rawset(self, '__poiSplinePoints', n) end)\n"
+        "define('UpdateQuestPOI', function() end)\n");
 
     // Button art, which XML declares as <NormalTexture>, <HighlightTexture>,
     // <ButtonText> and so on. The catch-all below would answer these with a
