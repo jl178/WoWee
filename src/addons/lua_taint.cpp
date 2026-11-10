@@ -34,19 +34,10 @@ LuaEngine* engineOf(lua_State* L) {
     return e;
 }
 
+// A secure handle's surrogate carries only [0], the frame's userdata; read
+// raw, so a frame over an addon's prototype frame is still itself.
 uint32_t widgetIdAt(lua_State* L, int index) {
-    if (!lua_istable(L, index)) return 0;
-    lua_getfield(L, index, "__wid");
-    auto id = static_cast<uint32_t>(lua_tointeger(L, -1));
-    lua_pop(L, 1);
-    if (id == 0) {
-        // A secure handle's surrogate carries only [0], the frame's userdata.
-        lua_rawgeti(L, index, 0);
-        if (lua_type(L, -1) == LUA_TLIGHTUSERDATA)
-            id = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(lua_touserdata(L, -1)));
-        lua_pop(L, 1);
-    }
-    return id;
+    return frameWidgetId(L, index);
 }
 
 /// The interface is told, as the client tells it (0x00513530): the taint to

@@ -1967,11 +1967,7 @@ static int lua_GetInventoryItemCooldown(lua_State* L) {
 static int lua_SetPortraitTexture(lua_State* L) {
     auto* tree = getWidgetTree(L);
     if (!tree || !lua_istable(L, 1)) return 0;
-    // The widget id the frame table carries. widgetIdOf lives in lua_engine.cpp
-    // and is not declared anywhere this file can see it.
-    lua_getfield(L, 1, "__wid");
-    const uint32_t id = static_cast<uint32_t>(lua_tointeger(L, -1));
-    lua_pop(L, 1);
+    const uint32_t id = frameWidgetId(L, 1);
     if (id == 0) return 0;
 
     std::string unit(luaL_optstring(L, 2, ""));

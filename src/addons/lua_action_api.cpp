@@ -2757,16 +2757,7 @@ WOWEE_MOVE_COMMAND_PAIR(TurnRightStart, TurnRightStop, "TURNRIGHT")
 static uintptr_t overrideOwner(lua_State* L) {
     // The widget a frame (or a secure handle's stand-in for it) names, so the
     // same frame is the same owner however it is reached.
-    if (lua_istable(L, 1)) {
-        lua_getfield(L, 1, "__wid");
-        const auto id = static_cast<uintptr_t>(lua_tointeger(L, -1));
-        lua_pop(L, 1);
-        if (id) return id;
-        lua_rawgeti(L, 1, 0);
-        const void* ud = lua_type(L, -1) == LUA_TLIGHTUSERDATA ? lua_touserdata(L, -1) : nullptr;
-        lua_pop(L, 1);
-        if (ud) return reinterpret_cast<uintptr_t>(ud);
-    }
+    if (const uint32_t id = frameWidgetId(L, 1)) return id;
     return reinterpret_cast<uintptr_t>(lua_topointer(L, 1));
 }
 static int setOverride(lua_State* L, const std::string& command) {

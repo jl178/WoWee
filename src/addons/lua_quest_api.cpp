@@ -2032,9 +2032,7 @@ static int lua_SetPetStablePaperdoll(lua_State* L) {
     if (!gh || !tree || !lua_istable(L, 1)) {
         return luaL_error(L, "Usage: SetPetStablePaperdoll(characterModel)");
     }
-    lua_getfield(L, 1, "__wid");
-    const uint32_t id = static_cast<uint32_t>(lua_tointeger(L, -1));
-    lua_pop(L, 1);
+    const uint32_t id = frameWidgetId(L, 1);
     auto* w = tree->get(id);
     if (!w) return 0;
     const int slot = selectedStableSlot(gh);

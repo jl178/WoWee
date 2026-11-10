@@ -7436,11 +7436,7 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"SetTaxiMap", [](lua_State* L) -> int {
             auto* tree = getWidgetTree(L);
             if (!tree || !lua_istable(L, 1)) return 0;
-            // The widget id the frame table carries, read the same way
-            // SetPortraitTexture reads it - widgetIdOf is not visible here.
-            lua_getfield(L, 1, "__wid");
-            const uint32_t id = static_cast<uint32_t>(lua_tointeger(L, -1));
-            lua_pop(L, 1);
+            const uint32_t id = frameWidgetId(L, 1);
             if (id == 0) return 0;
             auto* w = tree->get(id);
             if (!w) return 0;

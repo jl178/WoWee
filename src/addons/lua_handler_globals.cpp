@@ -175,7 +175,8 @@ int pcallScriptInner(lua_State* L, const char* script, int nargs, int errfunc) {
 
 int lua_WoweeFireOnLoad(lua_State* L) {
     if (!lua_istable(L, 1)) return 0;
-    lua_getfield(L, 1, "__scripts");
+    lua_pushstring(L, "__scripts");       // its own, not a prototype frame's
+    lua_rawget(L, 1);
     if (!lua_istable(L, -1)) { lua_pop(L, 1); return 0; }
     lua_getfield(L, -1, "OnLoad");
     if (!lua_isfunction(L, -1)) { lua_pop(L, 2); return 0; }

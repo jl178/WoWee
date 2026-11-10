@@ -584,9 +584,7 @@ static int lua_WoweeTryOn(lua_State* L) {
     auto* gh = getGameHandler(L);
     auto* tree = getWidgetTree(L);
     if (!gh || !tree || !lua_istable(L, 1)) return 0;
-    lua_getfield(L, 1, "__wid");
-    const uint32_t id = static_cast<uint32_t>(lua_tointeger(L, -1));
-    lua_pop(L, 1);
+    const uint32_t id = frameWidgetId(L, 1);
     auto* w = tree->get(id);
     if (!w) return 0;
 
@@ -614,9 +612,7 @@ static int lua_WoweeTryOn(lua_State* L) {
 static int lua_WoweeSetModelCreature(lua_State* L) {
     auto* tree = getWidgetTree(L);
     if (!tree || !lua_istable(L, 1)) return 0;
-    lua_getfield(L, 1, "__wid");
-    const uint32_t id = static_cast<uint32_t>(lua_tointeger(L, -1));
-    lua_pop(L, 1);
+    const uint32_t id = frameWidgetId(L, 1);
     if (auto* w = tree->get(id)) {
         w->modelDisplayId = static_cast<uint32_t>(luaL_optnumber(L, 2, 0));
     }
@@ -627,9 +623,7 @@ static int lua_WoweeSetModelCreature(lua_State* L) {
 static int lua_WoweeUndress(lua_State* L) {
     auto* tree = getWidgetTree(L);
     if (!tree || !lua_istable(L, 1)) return 0;
-    lua_getfield(L, 1, "__wid");
-    const uint32_t id = static_cast<uint32_t>(lua_tointeger(L, -1));
-    lua_pop(L, 1);
+    const uint32_t id = frameWidgetId(L, 1);
     if (auto* w = tree->get(id)) w->tryOnItems.clear();
     return 0;
 }

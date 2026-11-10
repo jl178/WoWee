@@ -310,6 +310,71 @@ inline wowee::ui::WidgetTree* getWidgetTree(lua_State* L) {
     return t;
 }
 
+// ---- A frame table's own fields ----
+//
+// A frame is a table that carries __wid (and [0], its userdata) itself. Two
+// other tables reach a frame's methods and must not be mistaken for some
+// other frame:
+//
+//  - the surrogate restrictedframes.lua builds for a secure handle,
+//    { [0] = frame[0], [1] = frame } with the frame's metatable, which carries
+//    nothing else of the frame's;
+//  - a frame whose metatable is an addon's, with __index on a prototype frame:
+//    LibActionButton does setmetatable(CreateFrame(...), {__index = Generic})
+//    where Generic is a CheckButton of its own.
+//
+// Reading __wid with lua_getfield followed __index to the prototype on the
+// second kind of surrogate, so every LibActionButton handle named Generic:
+// not explicitly protected, so GetFrameHandle(button, true) was nil and a
+// header's ChildUpdate never reached the buttons - every ElvUI bar stayed on
+// page 1. The client keys a frame by its own [0] alone, so these read raw.
+inline uint32_t frameWidgetId(lua_State* L, int index) {
+    if (!lua_istable(L, index)) return 0;
+    const int abs = index > 0 ? index : lua_gettop(L) + index + 1;
+    lua_pushstring(L, "__wid");
+    lua_rawget(L, abs);
+    auto id = static_cast<uint32_t>(lua_tointeger(L, -1));
+    lua_pop(L, 1);
+    if (id == 0) {
+        lua_rawgeti(L, abs, 0);
+        if (lua_type(L, -1) == LUA_TLIGHTUSERDATA)
+            id = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(lua_touserdata(L, -1)));
+        lua_pop(L, 1);
+    }
+    return id;
+}
+
+// Push the frame's own field `key` (its scripts, events, name, font string):
+// raw from the table, or from the frame a surrogate stands for. nil when the
+// value is not a table or the frame has no such field.
+inline void pushFrameField(lua_State* L, int index, const char* key) {
+    if (!lua_istable(L, index)) { lua_pushnil(L); return; }
+    const int abs = index > 0 ? index : lua_gettop(L) + index + 1;
+    lua_pushstring(L, key);
+    lua_rawget(L, abs);
+    if (!lua_isnil(L, -1)) return;
+    lua_pushstring(L, "__wid");
+    lua_rawget(L, abs);
+    const bool own = !lua_isnil(L, -1);
+    lua_pop(L, 1);
+    if (own) return;  // the frame itself, without that field: nil
+    const uint32_t id = frameWidgetId(L, abs);
+    if (id == 0) return;
+    lua_pop(L, 1);
+    lua_getfield(L, LUA_GLOBALSINDEX, "__WoweeFramesByWid");
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); lua_pushnil(L); return; }
+    lua_pushinteger(L, static_cast<lua_Integer>(id));
+    lua_rawget(L, -2);
+    if (lua_istable(L, -1)) {
+        lua_pushstring(L, key);
+        lua_rawget(L, -2);
+    } else {
+        lua_pushnil(L);
+    }
+    lua_replace(L, -3);
+    lua_pop(L, 1);
+}
+
 // ---- Retrieve LuaServices pointer stored in Lua registry ----
 inline LuaServices* getLuaServices(lua_State* L) {
     lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_services");

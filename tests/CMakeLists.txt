@@ -456,6 +456,21 @@ wowee_test_link_glm(test_lua_arg_coercion)
 add_test(NAME lua_arg_coercion COMMAND test_lua_arg_coercion)
 register_test_target(test_lua_arg_coercion)
 
+# ── test_lua_frame_fields ───────────────────────────────────
+# A frame table's own widget and fields, read raw: a frame over an addon's
+# prototype frame (LibActionButton's buttons), and the surrogate a secure
+# handle stands in with, are the frame - not the prototype.
+add_executable(test_lua_frame_fields
+    test_lua_frame_fields.cpp
+)
+target_include_directories(test_lua_frame_fields PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_lua_frame_fields SYSTEM PRIVATE
+    ${TEST_SYSTEM_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR}/extern/lua-5.1.5/src)
+target_link_libraries(test_lua_frame_fields PRIVATE catch2_main lua51)
+wowee_test_link_glm(test_lua_frame_fields)
+add_test(NAME lua_frame_fields COMMAND test_lua_frame_fields)
+register_test_target(test_lua_frame_fields)
+
 # ── framexml_emit ────────────────────────────────────────────
 # Not a test: a one-file dump of what the emitter produces, for answering
 # questions about emitted Lua without starting the client.

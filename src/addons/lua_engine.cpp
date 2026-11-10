@@ -140,7 +140,7 @@ static int lua_Frame_IsEventRegistered(lua_State* L) {
     luaL_checktype(L, 1, LUA_TTABLE);
     const char* eventName = luaL_optstring(L, 2, nullptr);
     if (!eventName || !*eventName) { lua_pushboolean(L, 0); return 1; }
-    lua_getfield(L, 1, "__events");
+    pushFrameField(L, 1, "__events");
     if (!lua_istable(L, -1)) { lua_pop(L, 1); lua_pushboolean(L, 0); return 1; }
     lua_getfield(L, -1, eventName);
     const bool on = lua_toboolean(L, -1) != 0;
@@ -154,7 +154,7 @@ static int lua_Frame_RegisterEvent(lua_State* L) {
     const char* eventName = luaL_checkstring(L, 2);
 
     // Get frame's registered events table (create if needed)
-    lua_getfield(L, 1, "__events");
+    pushFrameField(L, 1, "__events");
     if (lua_isnil(L, -1)) {
         lua_pop(L, 1);
         lua_newtable(L);
@@ -246,7 +246,7 @@ static int lua_Frame_UnregisterAllEvents(lua_State* L) {
         lua_rawset(L, -3);
     }
     lua_pop(L, 1);
-    lua_getfield(L, 1, "__events");
+    pushFrameField(L, 1, "__events");
     if (!lua_istable(L, -1)) { lua_pop(L, 1); return 0; }
     // Collected first: unregistering rewrites this table, and a traversal that
     // is being written to is undefined.
@@ -274,7 +274,7 @@ static int lua_Frame_UnregisterEvent(lua_State* L) {
     const char* eventName = luaL_checkstring(L, 2);
 
     // Remove from frame's own events
-    lua_getfield(L, 1, "__events");
+    pushFrameField(L, 1, "__events");
     if (lua_istable(L, -1)) {
         lua_pushnil(L);
         lua_setfield(L, -2, eventName);
@@ -320,7 +320,7 @@ static int lua_Frame_SetScript(lua_State* L) {
     luaL_checktype(L, 1, LUA_TTABLE);
     const char* scriptType = luaL_checkstring(L, 2);
     // arg 3 can be function or nil
-    lua_getfield(L, 1, "__scripts");
+    pushFrameField(L, 1, "__scripts");
     if (lua_isnil(L, -1)) {
         lua_pop(L, 1);
         lua_newtable(L);
@@ -365,7 +365,7 @@ static int lua_Frame_SetScript(lua_State* L) {
 static int lua_Frame_GetScript(lua_State* L) {
     luaL_checktype(L, 1, LUA_TTABLE);
     const char* scriptType = luaL_checkstring(L, 2);
-    lua_getfield(L, 1, "__scripts");
+    pushFrameField(L, 1, "__scripts");
     if (lua_istable(L, -1)) {
         lua_getfield(L, -1, scriptType);
     } else {
@@ -377,7 +377,7 @@ static int lua_Frame_GetScript(lua_State* L) {
 // Frame method: frame:GetName()
 static int lua_Frame_GetName(lua_State* L) {
     luaL_checktype(L, 1, LUA_TTABLE);
-    lua_getfield(L, 1, "__name");
+    pushFrameField(L, 1, "__name");
     return 1;
 }
 
@@ -392,24 +392,14 @@ static int lua_Frame_GetName(lua_State* L) {
 
 namespace {
 
+// [0] is the widget's own userdata, as in the real client. A table that
+// carries only that - the "surrogate" restrictedframes.lua builds for a secure
+// frame handle, { [0] = frame[0], [1] = frame } with the frame's metatable - is
+// the same widget, and every method called on it has to act on the frame.
+// Read raw (see frameWidgetId): never the widget of a prototype frame behind
+// an addon's __index.
 uint32_t widgetIdOf(lua_State* L, int index) {
-    if (!lua_istable(L, index)) return 0;
-    lua_getfield(L, index, "__wid");
-    uint32_t id = static_cast<uint32_t>(lua_tointeger(L, -1));
-    lua_pop(L, 1);
-    if (id == 0) {
-        // [0] is the widget's own userdata, as in the real client. A table
-        // that carries only that - the "surrogate" restrictedframes.lua builds
-        // for a secure frame handle, { [0] = frame[0], [1] = frame } with the
-        // frame's metatable - is the same widget, and every method called on
-        // it has to act on the frame.
-        lua_rawgeti(L, index, 0);
-        if (lua_type(L, -1) == LUA_TLIGHTUSERDATA) {
-            id = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(lua_touserdata(L, -1)));
-        }
-        lua_pop(L, 1);
-    }
-    return id;
+    return wowee::addons::frameWidgetId(L, index);
 }
 
 /// Stamp a newly made widget table with [0], the userdata that names its
@@ -654,9 +644,7 @@ static wowee::ui::Widget* fillBarOf(lua_State* L, const wowee::ui::Widget* tex) 
 /// __WoweeSetClientDrawn(widget, flag) - see Widget::clientDrawn.
 static int lua_WoweeSetClientDrawn(lua_State* L) {
     if (auto* tree = wowee::addons::getWidgetTree(L)) {
-        lua_getfield(L, 1, "__wid");
-        const auto id = static_cast<uint32_t>(lua_tointeger(L, -1));
-        lua_pop(L, 1);
+        const auto id = wowee::addons::frameWidgetId(L, 1);
         if (auto* w = tree->get(id)) w->clientDrawn = lua_toboolean(L, 2) != 0;
     }
     return 0;
@@ -1148,7 +1136,7 @@ const wowee::ui::Widget* textWidgetOf(lua_State* L, int index) {
     if (!w || w->kind == wowee::ui::WidgetKind::FontString) return w;
     auto* tree = wowee::addons::getWidgetTree(L);
     if (!tree) return w;
-    lua_getfield(L, index, "__fontString");
+    pushFrameField(L, index, "__fontString");
     const wowee::ui::Widget* fs =
         lua_istable(L, -1) ? tree->get(widgetIdOf(L, lua_gettop(L))) : nullptr;
     lua_pop(L, 1);
@@ -1628,7 +1616,7 @@ static void callScriptOnTable(lua_State* L, int tableIdx, const char* script,
     // Positive indices only, which is all any caller here has: lua_absindex
     // is 5.2 and this is 5.1.
     const int abs = tableIdx;
-    lua_getfield(L, abs, "__scripts");
+    pushFrameField(L, abs, "__scripts");
     if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
     lua_getfield(L, -1, script);
     if (!lua_isfunction(L, -1)) { lua_pop(L, 2); return; }
@@ -4081,7 +4069,7 @@ int lua_Button_Enable(lua_State* L) {
     auto* w = widgetOf(L, 1);
     if (!w || w->enabled) return 0;
     w->enabled = true;
-    lua_getfield(L, 1, "__scripts");
+    pushFrameField(L, 1, "__scripts");
     if (lua_istable(L, -1)) {
         lua_getfield(L, -1, "OnEnable");
         if (lua_isfunction(L, -1)) {
@@ -4098,7 +4086,7 @@ int lua_Button_Disable(lua_State* L) {
     auto* w = widgetOf(L, 1);
     if (!w || !w->enabled) return 0;
     w->enabled = false;
-    lua_getfield(L, 1, "__scripts");
+    pushFrameField(L, 1, "__scripts");
     if (lua_istable(L, -1)) {
         lua_getfield(L, -1, "OnDisable");
         if (lua_isfunction(L, -1)) {
@@ -4134,7 +4122,7 @@ int lua_Button_IsEnabled(lua_State* L) {
 /// bag buttons' item animation and nothing else.
 static void queueAnimFinished(lua_State* L, int frameIndex) {
     const int abs = frameIndex > 0 ? frameIndex : lua_gettop(L) + frameIndex + 1;
-    lua_getfield(L, abs, "__scripts");
+    pushFrameField(L, abs, "__scripts");
     if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
     lua_getfield(L, -1, "OnAnimFinished");
     const bool has = lua_isfunction(L, -1);
@@ -4172,7 +4160,7 @@ static bool ancestorsShown(lua_State* L, const wowee::ui::Widget* w) {
 /// going round by widget id the way LuaEngine::frameHasScript has to.
 static bool frameScriptSet(lua_State* L, int frameIndex, const char* name) {
     const int abs = frameIndex > 0 ? frameIndex : lua_gettop(L) + frameIndex + 1;
-    lua_getfield(L, abs, "__scripts");
+    pushFrameField(L, abs, "__scripts");
     if (!lua_istable(L, -1)) { lua_pop(L, 1); return false; }
     lua_getfield(L, -1, name);
     const bool has = lua_isfunction(L, -1);
@@ -4209,7 +4197,7 @@ static void runFrameScriptById(lua_State* L, uint32_t id, const char* script) {
     lua_remove(L, -2);
     if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
     const int frame = lua_gettop(L);
-    lua_getfield(L, frame, "__scripts");
+    pushFrameField(L, frame, "__scripts");
     if (lua_istable(L, -1)) {
         lua_getfield(L, -1, script);
         if (lua_isfunction(L, -1)) {
@@ -4839,7 +4827,7 @@ int lua_FontString_GetTextColor(lua_State* L) {
     wowee::ui::Widget* w = widgetOf(L, 1);
     // A button colours the label it holds, exactly as the setter does.
     if (w && w->kind != wowee::ui::WidgetKind::FontString && tree) {
-        lua_getfield(L, 1, "__fontString");
+        pushFrameField(L, 1, "__fontString");
         if (lua_istable(L, -1)) {
             if (auto* fs = tree->get(widgetIdOf(L, lua_gettop(L)))) w = fs;
         }
@@ -4870,7 +4858,7 @@ int lua_FontString_SetTextColor(lua_State* L) {
     auto* tree = wowee::addons::getWidgetTree(L);
     wowee::ui::Widget* w = widgetOf(L, 1);
     if (w && w->kind != wowee::ui::WidgetKind::FontString && tree) {
-        lua_getfield(L, 1, "__fontString");
+        pushFrameField(L, 1, "__fontString");
         if (lua_istable(L, -1)) {
             if (auto* fs = tree->get(widgetIdOf(L, lua_gettop(L)))) w = fs;
         }
@@ -5041,7 +5029,7 @@ static int lua_WoweeApplyFontRaw(lua_State* L) {
     auto* tree = wowee::addons::getWidgetTree(L);
     wowee::ui::Widget* w = widgetOf(L, 1);
     if (w && w->kind != wowee::ui::WidgetKind::FontString && tree) {
-        lua_getfield(L, 1, "__fontString");
+        pushFrameField(L, 1, "__fontString");
         if (lua_istable(L, -1)) {
             if (auto* fs = tree->get(widgetIdOf(L, lua_gettop(L)))) w = fs;
         }
@@ -5096,7 +5084,7 @@ int lua_FontString_SetFontObject(lua_State* L) {
     auto* tree = wowee::addons::getWidgetTree(L);
     wowee::ui::Widget* w = widgetOf(L, 1);
     if (w && w->kind != wowee::ui::WidgetKind::FontString && tree) {
-        lua_getfield(L, 1, "__fontString");
+        pushFrameField(L, 1, "__fontString");
         if (lua_istable(L, -1)) {
             if (auto* fs = tree->get(widgetIdOf(L, lua_gettop(L)))) w = fs;
         }
@@ -5208,7 +5196,7 @@ int lua_Frame_SetNormalFontObject(lua_State* L) {
     // client does not have, ahead of every region the button's template
     // declares, and addons that find a part of a button by its position in
     // GetRegions() found this instead.
-    lua_getfield(L, 1, "__fontString");
+    pushFrameField(L, 1, "__fontString");
     if (!lua_istable(L, -1)) {
         lua_pop(L, 1);
         return 0;
@@ -6101,7 +6089,7 @@ int lua_StatusBar_SetValue(lua_State* L) {
     // every update - which also stops a handler that sets its own bar from
     // recurring.
     if (changed) {
-        lua_getfield(L, 1, "__scripts");
+        pushFrameField(L, 1, "__scripts");
         if (lua_istable(L, -1)) {
             lua_getfield(L, -1, "OnValueChanged");
             if (lua_isfunction(L, -1)) {
@@ -6150,7 +6138,7 @@ int lua_ColorSelect_SetColorRGB(lua_State* L) {
     if (w->pickerHSV[1] <= 0.0f) w->pickerHSV[0] = hueBefore;
     if (!changed) return 0;
 
-    lua_getfield(L, 1, "__scripts");
+    pushFrameField(L, 1, "__scripts");
     if (lua_istable(L, -1)) {
         lua_getfield(L, -1, "OnColorSelect");
         if (lua_isfunction(L, -1)) {
@@ -8799,7 +8787,8 @@ void LuaEngine::registerCoreAPI() {
         // right-clicking would have stopped opening a menu, with nothing to
         // say why.
         "function mt:HookScript(scriptType, fn)\n"
-        "    local orig = self.__scripts and self.__scripts[scriptType]\n"
+        "    local sc = rawget(self, '__scripts')\n"
+        "    local orig = sc and sc[scriptType]\n"
         "    if orig then\n"
         "        self:SetScript(scriptType, function(...) orig(...); fn(...) end)\n"
         "    else\n"
@@ -9123,7 +9112,8 @@ void LuaEngine::registerCoreAPI() {
         "    local at = rawget(self, '__attributes')\n"
         "    if not at then at = {}; rawset(self, '__attributes', at) end\n"
         "    at[name] = value\n"
-        "    local handler = self.__scripts and self.__scripts.OnAttributeChanged\n"
+        "    local sc = rawget(self, '__scripts')\n"
+        "    local handler = sc and sc.OnAttributeChanged\n"
         "    if handler then handler(self, name, value) end\n"
         "end\n"
         // IsProtected is the client's rule now (WidgetTree::isProtected,
@@ -9231,7 +9221,8 @@ void LuaEngine::registerCoreAPI() {
         // box and dispatched by nothing until now.
         "    if self.__isEditBox then\n"
         "        __WoweeEditSetText(self, text)\n"
-        "        local h = self.__scripts and self.__scripts.OnTextSet\n"
+        "        local sc = rawget(self, '__scripts')\n"
+        "        local h = sc and sc.OnTextSet\n"
         "        if h then h(self) end\n"
         "        return\n"
         "    end\n"
