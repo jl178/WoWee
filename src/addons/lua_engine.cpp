@@ -1119,6 +1119,26 @@ int lua_Region_GetTextHeight(lua_State* L) {
     return 1;
 }
 
+/// A frame's or texture's width or height as GetWidth/GetHeight answer it
+/// (CScriptRegion, 0x0049D3B0 and its height twin): the size it was given with
+/// SetWidth/SetHeight/SetSize or <Size> when it has one - even where two
+/// anchors stretch it to some other size on screen - and only otherwise the
+/// size the layout gave it. A true second argument asks for the given size
+/// alone, zero when there is none.
+///
+/// The other way round, the drawn size first, fed a stretched frame's span
+/// back into everything that sizes itself from it.
+static float regionExtent(lua_State* L, const wowee::ui::Widget* w, float es, bool wide) {
+    if (!w) return 0.0f;
+    const float given = wide ? w->width : w->height;
+    const float drawn = wide ? w->rectW : w->rectH;
+    if (w->kind == wowee::ui::WidgetKind::FontString) {
+        return drawn > 0.0f ? drawn / es : given;
+    }
+    if (given > 0.0f || (lua_gettop(L) >= 2 && lua_toboolean(L, 2))) return given;
+    return drawn / es;
+}
+
 int lua_Region_GetWidth(lua_State* L) {
     const auto* w = measuredWidgetOf(L, 1);
     // In the frame's own units, which is what WoW reports: the laid-out rect
@@ -1175,7 +1195,7 @@ int lua_Region_GetWidth(lua_State* L) {
         lua_pushnumber(L, measureTextWidth(L, *w));
         return 1;
     }
-    lua_pushnumber(L, w ? (w->rectW > 0.0f ? w->rectW / es : w->width) : 0.0);
+    lua_pushnumber(L, regionExtent(L, w, es, true));
     return 1;
 }
 int lua_Region_GetHeight(lua_State* L) {
@@ -1200,7 +1220,7 @@ int lua_Region_GetHeight(lua_State* L) {
         lua_pushnumber(L, fontStringTextHeight(L, *w));
         return 1;
     }
-    lua_pushnumber(L, w ? (w->rectH > 0.0f ? w->rectH / es : w->height) : 0.0);
+    lua_pushnumber(L, regionExtent(L, w, es, false));
     return 1;
 }
 // The four edges, in the same coordinates the tree lays out in: origin at the
@@ -5103,9 +5123,15 @@ int lua_FontString_GetShadowOffset(lua_State* L) {
 /// answers, from the same measurement GetWidth and GetHeight make. It was a
 /// no-op, and ElvUI sizes each unit frame's mover with mover:Size(frame:GetSize()).
 int lua_Region_GetSize(lua_State* L) {
+    // Each measured on its own: GetHeight reads a second argument (the given
+    // size alone), and the width pushed before it would be taken for one.
     lua_settop(L, 1);
     lua_Region_GetWidth(L);    // self, width
-    lua_Region_GetHeight(L);   // self, width, height - both read argument 1
+    const lua_Number width = lua_tonumber(L, -1);
+    lua_settop(L, 1);
+    lua_Region_GetHeight(L);   // self, height
+    lua_pushnumber(L, width);
+    lua_insert(L, -2);         // self, width, height
     return 2;
 }
 
