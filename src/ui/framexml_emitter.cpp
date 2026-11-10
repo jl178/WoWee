@@ -1351,6 +1351,10 @@ struct Emitter {
         if (node.attr("movable")) {
             line(var + ":SetMovable(" + (node.attrBool("movable") ? "true" : "false") + ")");
         }
+        if (node.attr("dontSavePosition")) {
+            line(var + ":SetDontSavePosition(" +
+                 (node.attrBool("dontSavePosition") ? "true" : "false") + ")");
+        }
         // What an edit box was declared to be. Every one of these has had a
         // method and a field behind it all along and no way to reach them from
         // the XML, so a box came out with whatever the defaults were.

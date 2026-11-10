@@ -5448,6 +5448,46 @@ int lua_Frame_SetUserPlaced(lua_State* L) {
     if (auto* w = widgetOf(L, 1)) w->userMoved = lua_toboolean(L, 2) != 0;
     return 0;
 }
+/// Frame:GetBoundsRect() - left, bottom, width, height of the smallest
+/// rectangle holding the frame and everything shown inside it (its regions
+/// and child frames), in the frame's own units; nothing for a frame that has
+/// no rect. A frame method in the client (0x0049E700), which DBM's options
+/// size its rows by.
+int lua_Frame_GetBoundsRect(lua_State* L) {
+    auto* tree = wowee::addons::getWidgetTree(L);
+    const auto* w = measuredWidgetOf(L, 1);
+    if (!tree || !w || w->rectW <= 0.0f || w->rectH <= 0.0f) return 0;
+    float l = w->left, b = w->bottom, r = w->left + w->rectW, t = w->bottom + w->rectH;
+    std::vector<uint32_t> stack(w->children.begin(), w->children.end());
+    while (!stack.empty()) {
+        const uint32_t id = stack.back();
+        stack.pop_back();
+        const auto* c = tree->get(id);
+        if (!c || !c->visible) continue;
+        if (c->rectW > 0.0f && c->rectH > 0.0f) {
+            l = std::min(l, c->left);
+            b = std::min(b, c->bottom);
+            r = std::max(r, c->left + c->rectW);
+            t = std::max(t, c->bottom + c->rectH);
+        }
+        stack.insert(stack.end(), c->children.begin(), c->children.end());
+    }
+    const float es = w->effScale > 0.0f ? w->effScale : 1.0f;
+    lua_pushnumber(L, l / es);
+    lua_pushnumber(L, b / es);
+    lua_pushnumber(L, (r - l) / es);
+    lua_pushnumber(L, (t - b) / es);
+    return 4;
+}
+int lua_Frame_SetDontSavePosition(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) w->dontSavePosition = lua_toboolean(L, 2) != 0;
+    return 0;
+}
+int lua_Frame_GetDontSavePosition(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushboolean(L, w && w->dontSavePosition);
+    return 1;
+}
 int lua_Frame_IsUserPlaced(lua_State* L) {
     const auto* w = widgetOf(L, 1);
     lua_pushboolean(L, w && w->userMoved);
@@ -6185,6 +6225,13 @@ int lua_EditBox_SetCursorPosition(lua_State* L) {
     // selection left behind would swallow the next character typed, somewhere
     // far from whatever set it.
     w->hasSelection = false;
+    // A caret moved is a cursor change, told at once: ScriptErrorsFrame sets
+    // its text, puts the caret at 0 and expects ScrollingEdit_OnCursorChanged
+    // to have recorded where it is before it next runs
+    // ScrollingEdit_OnTextChanged. Without it every second error report
+    // raised inside the error frame itself, which reported that error, and
+    // so on until the C stack ran out.
+    if (auto* engine = engineFrom(L)) engine->noteCursorMoved(w->id);
     return 0;
 }
 int lua_EditBox_GetCursorPosition(lua_State* L) {
@@ -7804,6 +7851,9 @@ void LuaEngine::registerCoreAPI() {
         {"SetHitRectInsets",      lua_Frame_SetHitRectInsets},
         {"GetHitRectInsets",      lua_Frame_GetHitRectInsets},
         {"SetUserPlaced",         lua_Frame_SetUserPlaced},
+        {"SetDontSavePosition",   lua_Frame_SetDontSavePosition},
+        {"GetBoundsRect",         lua_Frame_GetBoundsRect},
+        {"GetDontSavePosition",   lua_Frame_GetDontSavePosition},
         {"IsUserPlaced",          lua_Frame_IsUserPlaced},
         {"EnableKeyboard",        lua_Frame_EnableKeyboard},
         {"IsKeyboardEnabled",     lua_Frame_IsKeyboardEnabled},
@@ -8089,6 +8139,14 @@ void LuaEngine::registerCoreAPI() {
         "function animMeta:SetSmoothing(s) self.smoothing = s end\n"
         "function animMeta:SetScale(x, y) self.scaleX, self.scaleY = x, y end\n"
         "function animMeta:SetDegrees(d) self.degrees = d end\n"
+        "function animMeta:GetDegrees() return self.degrees or 0 end\n"
+        "function animMeta:GetScale() return self.scaleX or 1, self.scaleY or 1 end\n"
+        // The point a Scale or Rotation animation turns about. Kept and
+        // answered; the scale itself is applied to the frame as a whole (see
+        // the Scale step below), which grows it from its anchor rather than
+        // from this point.
+        "function animMeta:SetOrigin(point, x, y) self.originPoint, self.originX, self.originY = point or 'CENTER', x or 0, y or 0 end\n"
+        "function animMeta:GetOrigin() return self.originPoint or 'CENTER', self.originX or 0, self.originY or 0 end\n"
         "function animMeta:GetProgress() return self.progress or 0 end\n"
         // The same progress with the animation's own easing applied, which is
         // what anything driving a value off an animation actually wants.
@@ -8119,6 +8177,16 @@ void LuaEngine::registerCoreAPI() {
         "end\n"
         "function animMeta:GetElapsed() return self.elapsed or 0 end\n"
         "function animMeta:SetParent(p) self.parent = p end\n"
+        // An animation's parent is its group, as the client answers it. A
+        // timer built on an animation (Questie's C_Timer, and every addon
+        // that copied it) reaches the group through this to loop and play it.
+        "function animMeta:GetParent() return self.group end\n"
+        "function animMeta:GetObjectType() return self.kind or 'Animation' end\n"
+        "function animMeta:GetName() return self.name end\n"
+        "function animMeta:HookScript(k, f)\n"
+        "    local old = self[k]\n"
+        "    if old then self[k] = function(...) old(...) f(...) end else self[k] = f end\n"
+        "end\n"
         "function animMeta:GetRegionParent() return self.group and self.group.parent end\n"
         "function animMeta:SetTarget(t) self.target = t end\n"
         "function animMeta:IsDelaying() return (self.elapsed or 0) < (self.startDelay or 0) end\n"
@@ -8142,7 +8210,7 @@ void LuaEngine::registerCoreAPI() {
         "local groupMeta = {}\n"
         "groupMeta.__index = groupMeta\n"
         "function groupMeta:CreateAnimation(kind, name)\n"
-        "    local a = setmetatable({kind = kind or 'Alpha', group = self,\n"
+        "    local a = setmetatable({kind = kind or 'Animation', name = name, group = self,\n"
         "                            duration = 0, order = 1, startDelay = 0}, animMeta)\n"
         "    table.insert(self.animations, a)\n"
         "    if name then _G[name] = a end\n"
@@ -9241,48 +9309,30 @@ void LuaEngine::registerCoreAPI() {
         "end\n"
     );
 
-    // LibStub - universal library version management used by Ace3 and virtually all addon libs.
-    // This is the standard WoW LibStub implementation that addons embed/expect globally.
+    // GetItemIcon(item) - the item's icon, which GetItemInfo also answers;
+    // LibActionButton draws an item on a bar with it.
+    // GetFramesRegisteredForEvent(event) - every frame listening for it, the
+    // list the dispatcher itself walks.
     bootstrap(
-        // rawget, so the missing-API fallback cannot answer this. Read through
-        // the metatable, "LibStub or {}" is never nil - it is the fallback
-        // object - and the shim then hangs its tables off that instead of a
-        // fresh one, so every library registering against it dies indexing a
-        // field that was never really there.
-        "local LibStub = rawget(_G, 'LibStub') or {}\n"
-        "LibStub.libs = LibStub.libs or {}\n"
-        "LibStub.minors = LibStub.minors or {}\n"
-        // The version of LibStub itself, which every copy of the real one tests
-        // before deciding whether to replace what is already there:
-        //
-        //     if not LibStub or LibStub.minor < LIBSTUB_MINOR then
-        //
-        // Absent, that compared nil with a number and raised - on line 6 of the
-        // first file of the first embedded library, so every Ace3 addon died
-        // before it began. Two is what the published LibStub is, and matching
-        // it means an addon carrying its own copy keeps this one, which is the
-        // instance every library here has already registered against.
-        "LibStub.minor = LibStub.minor or 2\n"
-        "function LibStub:NewLibrary(major, minor)\n"
-        "    assert(type(major) == 'string', 'LibStub:NewLibrary: bad argument #1 (string expected)')\n"
-        "    minor = assert(tonumber(minor or (type(minor) == 'string' and minor:match('(%d+)'))), 'LibStub:NewLibrary: bad argument #2 (number expected)')\n"
-        "    local oldMinor = self.minors[major]\n"
-        "    if oldMinor and oldMinor >= minor then return nil end\n"
-        "    local lib = self.libs[major] or {}\n"
-        "    self.libs[major] = lib\n"
-        "    self.minors[major] = minor\n"
-        "    return lib, oldMinor\n"
+        "function GetItemIcon(item)\n"
+        "    if item == nil then return nil end\n"
+        "    return (select(10, GetItemInfo(item)))\n"
         "end\n"
-        "function LibStub:GetLibrary(major, silent)\n"
-        "    if not self.libs[major] and not silent then\n"
-        "        error('Cannot find a library instance of \"' .. tostring(major) .. '\".')\n"
-        "    end\n"
-        "    return self.libs[major], self.minors[major]\n"
+        "function GetFramesRegisteredForEvent(event)\n"
+        "    local list = rawget(_G, '__WoweeFrameEvents')\n"
+        "    list = list and list[event]\n"
+        "    if not list then return end\n"
+        "    return unpack(list)\n"
         "end\n"
-        "function LibStub:IterateLibraries() return pairs(self.libs) end\n"
-        "setmetatable(LibStub, { __call = LibStub.GetLibrary })\n"
-        "_G['LibStub'] = LibStub\n"
     );
+
+    // No LibStub here either. The client has none: every addon that uses it
+    // ships LibStub.lua and loads it first, and the first copy loaded is the
+    // one every library registers against. A built-in one stood in front of
+    // them and was not the same code - it refused a minor version given as
+    // an SVN keyword string ("$Revision: 1234 $", which the real one reads
+    // the number out of), so Skada's libraries never registered and the
+    // addon died in its first file.
 
     // No CallbackHandler-1.0 here. There was one, registered at the newest
     // minor version so that every addon's own embedded copy stood down in its

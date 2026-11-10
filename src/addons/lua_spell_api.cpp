@@ -144,6 +144,55 @@ static uint32_t rangeSpellArg(lua_State* L, game::GameHandler* gh, int& argsUsed
     return highestKnownRankByName(gh, name);
 }
 
+/// The spell named by the arguments of GetSpellCount, IsAttackSpell and
+/// IsConsumableSpell: (bookIndex, "spell"|"pet"), a name, or a spell id given
+/// alone - the form LibActionButton uses for every spell on a bar.
+static uint32_t spellArgOrId(lua_State* L, game::GameHandler* gh) {
+    if (lua_type(L, 1) == LUA_TNUMBER && lua_type(L, 2) != LUA_TSTRING) {
+        return static_cast<uint32_t>(lua_tonumber(L, 1));
+    }
+    int used = 0;
+    return rangeSpellArg(L, gh, used);
+}
+
+/// GetSpellCount(spell) - how many casts the bags hold reagents for (the
+/// client's 0x00540DF0, through the count 0x7FFA30 makes): the least, over
+/// the spell's reagents, of carried / needed; 0 for a spell that takes none.
+static int lua_GetSpellCount(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const uint32_t spellId = gh ? spellArgOrId(L, gh) : 0;
+    bool hasReagents = false;
+    const uint32_t casts = spellId ? gh->spellReagentCasts(spellId, hasReagents) : 0;
+    lua_pushnumber(L, hasReagents ? casts : 0);
+    return 1;
+}
+
+/// IsConsumableSpell(spell) - 1 when the spell uses up a reagent, which is
+/// what puts a count on its action button (0x5A9360).
+static int lua_IsConsumableSpell(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const uint32_t spellId = gh ? spellArgOrId(L, gh) : 0;
+    bool hasReagents = false;
+    if (spellId) gh->spellReagentCasts(spellId, hasReagents);
+    if (!hasReagents) return luaReturnNil(L);
+    lua_pushnumber(L, 1);
+    return 1;
+}
+
+/// IsAttackSpell(spell) - 1 for a spell whose first effect is ATTACK (78) -
+/// the melee swing - which is what the client tests (0x00541420, Spell.dbc
+/// Effect[0]). Action bars flash such a button while auto-attack is on.
+static int lua_IsAttackSpell(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const uint32_t spellId = gh ? spellArgOrId(L, gh) : 0;
+    auto* sh = gh ? gh->getSpellHandler() : nullptr;
+    if (!spellId || !sh) return luaReturnNil(L);
+    const auto cols = sh->tradeSpellColumns(spellId);
+    if (!cols || cols->effect[0] != 78) return luaReturnNil(L);
+    lua_pushnumber(L, 1);
+    return 1;
+}
+
 /// SpellHasRange(index, "bookType") or SpellHasRange("name") -> 1 or nil.
 /// Whether the spell has a range at all - a self-only spell (a shout, an
 /// armour buff) does not, and range indicators skip it. LibSpellRange and
@@ -1656,6 +1705,9 @@ void registerSpellLuaAPI(lua_State* L) {
                 {"GetSpellTexture",   lua_GetSpellTexture},
                 {"GetSpellLink",         lua_GetSpellLink},
                 {"IsUsableSpell",        lua_IsUsableSpell},
+                {"GetSpellCount",        lua_GetSpellCount},
+                {"IsConsumableSpell",    lua_IsConsumableSpell},
+                {"IsAttackSpell",        lua_IsAttackSpell},
                 {"CancelUnitBuff",      lua_CancelUnitBuff},
                 {"HasTarget",         lua_HasTarget},
                 {"TargetUnit",        lua_TargetUnit},

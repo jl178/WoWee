@@ -208,6 +208,10 @@ private:
     bool eventListenersReported_ = false;
     int  eventReportFrames_ = 0;
 public:
+    /// The caret of an edit box has moved: tell the box (OnCursorChanged),
+    /// now rather than with the next text change. SetCursorPosition is such a
+    /// move in the client.
+    void noteCursorMoved(uint32_t wid) { fireCursorChanged(wid); }
 
     /// Typed text, one UTF-8 chunk as the platform reports it.
     void dispatchText(const char* utf8);

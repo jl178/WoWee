@@ -239,6 +239,25 @@ static int lua_UnitIsDead(lua_State* L) {
     return 1;
 }
 
+/// UnitIsFeignDeath(unit) - true for a member of the player's group who is
+/// feigning death: the client asks only of party and raid members, and reads
+/// UNIT_DYNAMIC_FLAGS' dead bit (0x20), which feigning sets while the health
+/// stays up (0x0060F3D0).
+static int lua_UnitIsFeignDeath(lua_State* L) {
+    const char* uid = luaL_optstring(L, 1, "player");
+    auto* gh = getGameHandler(L);
+    auto* unit = resolveUnit(L, uid);
+    std::string uidStr(uid);
+    toLowerInPlace(uidStr);
+    const uint64_t guid = gh ? resolveUnitGuid(gh, uidStr) : 0;
+    const bool grouped = guid != 0 && findPartyMember(gh, guid) != nullptr;
+    if (unit && grouped && (unit->getDynamicFlags() & 0x20) != 0 && unit->getHealth() > 0) {
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    return luaReturnNil(L);
+}
+
 static int lua_UnitClass(lua_State* L) {
     const char* uid = luaL_optstring(L, 1, "player");
     auto* gh = getGameHandler(L);
@@ -2703,6 +2722,7 @@ void registerUnitLuaAPI(lua_State* L) {
                 {"UnitLevel",     lua_UnitLevel},
                 {"UnitExists",    lua_UnitExists},
                 {"UnitIsDead",    lua_UnitIsDead},
+                {"UnitIsFeignDeath", lua_UnitIsFeignDeath},
                 // UnitUsingVehicle(unit) - in a vehicle's seat or on the way
                 // into or out of one (passenger state != 0, 0x6134A0).
                 {"UnitUsingVehicle", [](lua_State* L) -> int {

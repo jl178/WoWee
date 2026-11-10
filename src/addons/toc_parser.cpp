@@ -150,9 +150,23 @@ std::optional<TocFile> parseTocFile(const std::string& tocPath) {
     toc.addonName = canonicalAddonName(toc.addonName);
 
     std::string line;
+    bool firstLine = true;
     while (std::getline(f, line)) {
         // Strip trailing CR (Windows line endings)
         if (!line.empty() && line.back() == '\r') line.pop_back();
+        // And a UTF-8 byte order mark in front of the first line, which
+        // editors on Windows write and the client reads past. Left in, the
+        // first directive - nearly always ## Interface - was not a directive
+        // at all, and Atlas, MogIt and PallyPower read as having no interface
+        // version.
+        if (firstLine) {
+            firstLine = false;
+            if (line.size() >= 3 && static_cast<unsigned char>(line[0]) == 0xEF &&
+                static_cast<unsigned char>(line[1]) == 0xBB &&
+                static_cast<unsigned char>(line[2]) == 0xBF) {
+                line.erase(0, 3);
+            }
+        }
 
         // Skip empty lines
         if (line.empty()) continue;

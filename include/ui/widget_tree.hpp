@@ -204,6 +204,10 @@ struct Widget {
     /// point turns that into two constraints on one axis - which sizes the
     /// frame from them and opens a bag with no width.
     bool userMoved = false;
+    /// SetDontSavePosition / the XML's dontSavePosition: a frame whose
+    /// placement is not to be written to the layout cache when the player
+    /// moves it.
+    bool dontSavePosition = false;
     /// Made while the stock interface was loading - FrameXML or one of the
     /// Blizzard_ addons - rather than by a third-party addon. The ultrawide
     /// HUD (setHudAspect) moves only these.

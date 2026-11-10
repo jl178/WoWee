@@ -59,10 +59,25 @@ bool AddonManager::initialize(game::GameHandler* gameHandler, const LuaServices&
                               std::tolower(static_cast<unsigned char>(y));
                    });
         };
-        for (const auto* list : {&addons_, &lodAddons_}) {
-            for (const auto& a : *list) {
-                if (same(a.addonName, name)) return versionBlock(a);
+        const auto find = [&](const std::string& n) -> const TocFile* {
+            for (const auto* list : {&addons_, &lodAddons_}) {
+                for (const auto& a : *list) {
+                    if (same(a.addonName, n)) return &a;
+                }
             }
+            return nullptr;
+        };
+        const TocFile* a = find(name);
+        if (!a) return {};
+        if (std::string block = versionBlock(*a); !block.empty()) return block;
+        // A required dependency that is not there, or switched off, or that
+        // cannot load itself, keeps this one from loading - and the client
+        // says which (DEP_MISSING, DEP_DISABLED, DEP_INTERFACE_VERSION...).
+        for (const auto& dep : a->getRequiredDeps()) {
+            const TocFile* d = find(dep);
+            if (!d) return "DEP_MISSING";
+            if (!isAddonEnabled(d->addonName)) return "DEP_DISABLED";
+            if (std::string block = versionBlock(*d); !block.empty()) return "DEP_" + block;
         }
         return {};
     };
@@ -522,6 +537,13 @@ void AddonManager::loadAllAddons() {
                 startupDone.insert(key);
                 return false;
             }
+            // A dependency that cannot load itself takes this one with it.
+            if (const std::string block = versionBlock(d ? *d : *lod); !block.empty()) {
+                LOG_WARNING("AddonManager: not loading '", addon.addonName, "': it requires '",
+                            dep, "', which cannot load (", block, ")");
+                startupDone.insert(key);
+                return false;
+            }
             if (d) loadOrdered(*d);
             else { std::string why; loadAddOnByName(lod->addonName, why); }
         }
@@ -546,6 +568,11 @@ void AddonManager::loadAllAddons() {
             skipped++;
             return false;
         }
+        // Loaded from here on as far as IsAddOnLoaded is concerned - its own
+        // files may ask, and one that raises part way is still loaded, as in
+        // the client. An addon held back above, or by a missing dependency,
+        // never reaches this line and so never answers as loaded.
+        lodLoaded_.insert(key);
         const bool ok = loadAddon(addon);
         if (ok) loaded++; else failed++;
         return ok;
@@ -787,7 +814,12 @@ bool AddonManager::loadFrameXml(const std::string& frameXmlDir) {
         it != toc->directives.end()) {
         interfaceVersion = std::atoi(it->second.c_str());
     }
-    const bool legacyHandlers = interfaceVersion == 0 || interfaceVersion < 30000;
+    // 3.x passes the arguments and still publishes the globals as well - they
+    // went in 4.0 - and 3.3.5 addons written the old way depend on that:
+    // Atlas's XML handlers read `this`, and with the globals withheld every
+    // one of them raised on its first line. So it is the arguments alone only
+    // from 4.0 on.
+    const bool legacyHandlers = interfaceVersion == 0 || interfaceVersion < 40000;
     setLegacyHandlerGlobals(legacyHandlers);
     // What every addon's own ## Interface is held against (versionBlock).
     clientInterface_ = interfaceVersion;
@@ -1937,7 +1969,10 @@ bool AddonManager::loadAddOnByName(const std::string& name, std::string& reason)
     for (const auto& dep : found->getRequiredDeps()) {
         std::string depWhy;
         if (!loadAddOnByName(dep, depWhy)) {
-            reason = (depWhy == "DISABLED") ? "DEP_DISABLED" : "DEP_MISSING";
+            reason = (depWhy == "DISABLED" || depWhy == "INTERFACE_VERSION" ||
+                      depWhy == "INCOMPATIBLE")
+                         ? "DEP_" + depWhy
+                         : std::string("DEP_MISSING");
             LOG_WARNING("AddonManager: not loading '", found->addonName, "': it requires '",
                         dep, "' (", depWhy, ")");
             return false;

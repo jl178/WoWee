@@ -2188,6 +2188,23 @@ static int lua_IsAddonVersionCheckEnabled(lua_State* L) {
 }
 
 // GetAddOnMetadata(addonNameOrIndex, key) → value
+/// IsAddOnLoadOnDemand(nameOrIndex) - 1 when the manifest says LoadOnDemand,
+/// nil otherwise. AceLibrary (Ace2) asks it of every addon it knows about.
+static int lua_IsAddOnLoadOnDemand(lua_State* L) {
+    const int idx = pushAddonRegistryAndIndex(L, 1);
+    if (idx < 1) { lua_pushnil(L); return 1; }
+    lua_rawgeti(L, -1, idx);
+    bool lod = false;
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "loadOnDemand");
+        lod = lua_toboolean(L, -1) != 0;
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 2);
+    if (lod) lua_pushnumber(L, 1); else lua_pushnil(L);
+    return 1;
+}
+
 static int lua_GetAddOnMetadata(lua_State* L) {
     const int idx = pushAddonRegistryAndIndex(L, 1);
     if (idx < 1) { lua_pushnil(L); return 1; }
@@ -3957,10 +3974,13 @@ static int lua_IsAddOnLoaded(lua_State* L) {
             lua_pop(L, 1);
             lua_getfield(L, -1, "name");
             const char* name = lua_tostring(L, -1);
-            // Being listed means loaded only for addons that load at startup.
-            // A load-on-demand one is listed from the start and loaded later,
-            // so its state is the manager's to answer, below.
-            found = !lod && name && std::strcmp(name, wanted) == 0;
+            // Listed is not loaded, for either kind: a load-on-demand addon is
+            // listed from the start and loaded later, and a startup one may
+            // have been held back (another interface version, a missing
+            // dependency). The manager knows which actually ran; the list is
+            // the answer only where there is no manager to ask.
+            (void)lod;
+            found = !getLuaServices(L) && name && std::strcmp(name, wanted) == 0;
             lua_pop(L, 1);
         }
         lua_pop(L, 1);
@@ -6516,7 +6536,23 @@ void registerSystemLuaAPI(lua_State* L) {
             if (auto* gh = getGameHandler(L)) gh->convertToRaid();
             return 0;
         }},
-                {"FillLocalizedClassList",   lua_ReturnNothing},
+                // FillLocalizedClassList(table [, female]) - each class token
+                // to its name, which is how constants.lua builds
+                // LOCALIZED_CLASS_NAMES_MALE and _FEMALE. A no-op left both
+                // empty, and every addon that names classes from them (Skada
+                // labels its class filters this way) read nil.
+                {"FillLocalizedClassList", [](lua_State* L) -> int {
+            if (!lua_istable(L, 1)) return 0;
+            for (unsigned id = 1; id < sizeof(kLuaClasses) / sizeof(kLuaClasses[0]); ++id) {
+                const char* token = luaClassToken(id);
+                if (!token || !*kLuaClasses[id]) continue;
+                lua_pushstring(L, token);
+                lua_pushstring(L, kLuaClasses[id]);
+                lua_rawset(L, 1);
+            }
+            lua_pushvalue(L, 1);
+            return 1;
+        }},
                 // Sends the request rather than doing nothing. The reply is
                 // parsed, fires GUILD_EVENT_LOG_UPDATE and friendsframe
                 // listens for it, so answering nothing here was the one link
@@ -7081,6 +7117,62 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CombatLog_Object_IsA", lua_CombatLog_Object_IsA},
                 {"GetNumAddOns",      lua_GetNumAddOns},
                 {"GetAddOnInfo",      lua_GetAddOnInfo},
+                {"IsAddOnLoadOnDemand", lua_IsAddOnLoadOnDemand},
+                // GetAddOnDependencies(nameOrIndex) - the required
+                // dependencies, one return each, as the manifest names them
+                // (## Dependencies, ## RequiredDeps or any ## Dep...).
+                {"GetAddOnDependencies", [](lua_State* L) -> int {
+            const int idx = pushAddonRegistryAndIndex(L, 1);
+            if (idx < 1) return 0;
+            lua_rawgeti(L, -1, idx);
+            if (!lua_istable(L, -1)) { lua_pop(L, 2); return 0; }
+            lua_getfield(L, -1, "metadata");
+            std::vector<std::string> deps;
+            if (lua_istable(L, -1)) {
+                lua_pushnil(L);
+                while (lua_next(L, -2) != 0) {
+                    if (lua_type(L, -2) == LUA_TSTRING && lua_isstring(L, -1)) {
+                        std::string key = lua_tostring(L, -2);
+                        toLowerInPlace(key);
+                        if (key.rfind("dep", 0) == 0 || key == "requireddeps") {
+                            std::string list = lua_tostring(L, -1);
+                            size_t at = 0;
+                            while (at <= list.size()) {
+                                size_t comma = list.find(',', at);
+                                if (comma == std::string::npos) comma = list.size();
+                                std::string name = list.substr(at, comma - at);
+                                const size_t a = name.find_first_not_of(" \t");
+                                const size_t b = name.find_last_not_of(" \t");
+                                if (a != std::string::npos) deps.push_back(name.substr(a, b - a + 1));
+                                at = comma + 1;
+                            }
+                        }
+                    }
+                    lua_pop(L, 1);
+                }
+            }
+            lua_pop(L, 3);
+            for (const auto& d : deps) lua_pushstring(L, d.c_str());
+            return static_cast<int>(deps.size());
+        }},
+                // Which platform the client runs on. Addons word paths and
+                // key names by it.
+                {"IsWindowsClient", [](lua_State* L) -> int {
+#ifdef _WIN32
+            lua_pushnumber(L, 1);
+#else
+            lua_pushnil(L);
+#endif
+            return 1;
+        }},
+                {"IsLinuxClient", [](lua_State* L) -> int {
+#if defined(__linux__)
+            lua_pushnumber(L, 1);
+#else
+            lua_pushnil(L);
+#endif
+            return 1;
+        }},
                 {"SetAddonVersionCheck", lua_SetAddonVersionCheck},
                 {"IsAddonVersionCheckEnabled", lua_IsAddonVersionCheckEnabled},
                 // Turning an addon off, which the "an addon did something it
