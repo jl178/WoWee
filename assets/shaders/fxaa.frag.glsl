@@ -50,13 +50,13 @@ layout(push_constant) uniform PC {
     float enhancedSat;       // and the chroma scale below the shoulder (0 = off)
     vec4  enhancedShade;     // and the shade's: rgb the hue of the grey it keeps (the
                             // sky-lit ambient's, 1 = none), a its chroma scale (1 = as it is)
-    vec4  cornerBlur;       // x 1 when uBlur holds this frame's corner sums (fxaa_blur.comp)
+    vec4  cornerBlur;       // x 1 when uBlur holds this frame's corner sums (fxaa_blur.frag)
 } pc;
 
 // The scene boxed down to a quarter (mip 1 of a half-size image), the stock
 // FFXBox4 target the glow and the ghost world blur from.
 layout(set = 0, binding = 1) uniform sampler2D uGlow;
-// Worked out from it once a frame at its texel corners (fxaa_blur.comp): rgb
+// Worked out from it once a frame at its texel corners (fxaa_blur.frag): rgb
 // the glow's blur, a the brightest channel of the 8 x 8 texels round the
 // corner. Read only while pc.cornerBlur.x is 1.
 layout(set = 0, binding = 2) uniform sampler2D uBlur;
@@ -511,6 +511,8 @@ vec3 stockScreenEffect(vec3 c, vec2 uv) {
     return r;
 }
 
+vec3 fxaa(vec2 uv, ivec2 px, bool onTexel, vec3 rgbM, float drunk);
+
 void main() {
     float drunk = clamp(pc.intoxication, 0.0, 1.0);
     vec2 uv     = TexCoord + vec2(
@@ -540,11 +542,17 @@ void main() {
     }
 
     // FXAA switched off: the pass is here for the colour alone.
-    if (pc.antialias < 0.5) {
-        outColor = vec4(stockScreenEffect(rgbM, uv), 1.0);
-        return;
-    }
+    vec3 c = pc.antialias < 0.5 ? rgbM : fxaa(uv, px, onTexel, rgbM, drunk);
+    // One call for every way through: written out after each of FXAA's
+    // exits, it was inlined three times over, and the shader's size (its
+    // registers) cost the pass more than its edge search did.
+    outColor = vec4(stockScreenEffect(c, uv), 1.0);
+}
 
+// FXAA over the pixel rgbM (sober: texel px); rgbM itself where there is no
+// edge to smooth.
+vec3 fxaa(vec2 uv, ivec2 px, bool onTexel, vec3 rgbM, float drunk) {
+    vec2 rcp = pc.rcpFrame;
     // --- Cardinal neighbours: is there an edge here at all ---
     float lumaM = luma(rgbM);
     float lumaN = lumaNb(uv, px, onTexel, ivec2( 0, -1));
@@ -557,8 +565,7 @@ void main() {
     float range    = rangeMax - rangeMin;
 
     if (range < max(FXAA_EDGE_THRESHOLD_MIN, rangeMax * FXAA_EDGE_THRESHOLD)) {
-        outColor = vec4(stockScreenEffect(rgbM, uv), 1.0);
-        return;
+        return rgbM;
     }
 
     float lumaNW = lumaNb(uv, px, onTexel, ivec2(-1, -1));
@@ -665,5 +672,5 @@ void main() {
         fxaaResult = clamp(fxaaResult + s * (fxaaResult - blur), 0.0, 1.0);
     }
 
-    outColor = vec4(stockScreenEffect(fxaaResult, uv), 1.0);
+    return fxaaResult;
 }

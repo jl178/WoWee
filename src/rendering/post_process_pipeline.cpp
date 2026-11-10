@@ -1935,6 +1935,8 @@ void PostProcessPipeline::destroyFXAAResources() {
     destroy(device, fxaa_.blurPool);
     fxaa_.blurSet = VK_NULL_HANDLE;
     destroy(device, fxaa_.blurSetLayout);
+    if (fxaa_.blurFramebuffer) { vkDestroyFramebuffer(device, fxaa_.blurFramebuffer, nullptr); fxaa_.blurFramebuffer = VK_NULL_HANDLE; }
+    if (fxaa_.blurPass) { vkDestroyRenderPass(device, fxaa_.blurPass, nullptr); fxaa_.blurPass = VK_NULL_HANDLE; }
     destroyImage(device, alloc, fxaa_.blurImage);
     fxaa_.blurReady = false;
 }
@@ -1952,40 +1954,84 @@ void PostProcessPipeline::initFXAABlur() {
         destroy(device, fxaa_.blurPool);
         fxaa_.blurSet = VK_NULL_HANDLE;
         destroy(device, fxaa_.blurSetLayout);
+        if (fxaa_.blurFramebuffer) { vkDestroyFramebuffer(device, fxaa_.blurFramebuffer, nullptr); fxaa_.blurFramebuffer = VK_NULL_HANDLE; }
+        if (fxaa_.blurPass) { vkDestroyRenderPass(device, fxaa_.blurPass, nullptr); fxaa_.blurPass = VK_NULL_HANDLE; }
         destroyImage(device, alloc, fxaa_.blurImage);
     };
 
     // One texel per corner of the quarter-size texels: one more each way.
-    fxaa_.blurImage = createImage(device, alloc, quarter.width + 1, quarter.height + 1,
-                                  VK_FORMAT_R16G16B16A16_SFLOAT,
-                                  VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    const VkFormat format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    fxaa_.blurImage = createImage(device, alloc, quarter.width + 1, quarter.height + 1, format,
+                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     if (!fxaa_.blurImage.image) return fail("no corner blur image");
 
-    VkDescriptorSetLayoutBinding bindings[2]{};
-    bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    bindings[0].descriptorCount = 1;
-    bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    bindings[1].binding = 1;
-    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[1].descriptorCount = 1;
-    bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    // Every texel is written: nothing to load or clear. Left readable by the
+    // final pass; the dependencies order it after last frame's reads and
+    // before this frame's.
+    VkAttachmentDescription color{};
+    color.format = format;
+    color.samples = VK_SAMPLE_COUNT_1_BIT;
+    color.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    color.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkAttachmentReference colorRef{.attachment = 0, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorRef;
+    VkSubpassDependency deps[2]{};
+    deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    deps[0].dstSubpass = 0;
+    deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    deps[1].srcSubpass = 0;
+    deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    VkRenderPassCreateInfo rpCI{.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rpCI.attachmentCount = 1;
+    rpCI.pAttachments = &color;
+    rpCI.subpassCount = 1;
+    rpCI.pSubpasses = &subpass;
+    rpCI.dependencyCount = 2;
+    rpCI.pDependencies = deps;
+    if (vkCreateRenderPass(device, &rpCI, nullptr, &fxaa_.blurPass) != VK_SUCCESS) {
+        return fail("no corner blur render pass");
+    }
+    VkFramebufferCreateInfo fbCI{.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    fbCI.renderPass = fxaa_.blurPass;
+    fbCI.attachmentCount = 1;
+    fbCI.pAttachments = &fxaa_.blurImage.imageView;
+    fbCI.width = quarter.width + 1;
+    fbCI.height = quarter.height + 1;
+    fbCI.layers = 1;
+    if (vkCreateFramebuffer(device, &fbCI, nullptr, &fxaa_.blurFramebuffer) != VK_SUCCESS) {
+        return fail("no corner blur framebuffer");
+    }
+
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binding.descriptorCount = 1;
+    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     VkDescriptorSetLayoutCreateInfo layoutInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layoutInfo.bindingCount = 2;
-    layoutInfo.pBindings = bindings;
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings = &binding;
     if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fxaa_.blurSetLayout) != VK_SUCCESS) {
         return fail("no corner blur set layout");
     }
-
-    VkDescriptorPoolSize poolSizes[2]{};
-    poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[0].descriptorCount = 1;
-    poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizes[1].descriptorCount = 1;
+    VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1};
     VkDescriptorPoolCreateInfo poolInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.maxSets = 1;
-    poolInfo.poolSizeCount = 2;
-    poolInfo.pPoolSizes = poolSizes;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &fxaa_.blurPool) != VK_SUCCESS) {
         return fail("no corner blur pool");
     }
@@ -2000,19 +2046,13 @@ void PostProcessPipeline::initFXAABlur() {
     src.sampler = fxaa_.sceneSampler;
     src.imageView = fxaa_.glowImage.imageView;
     src.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    VkDescriptorImageInfo dst{};
-    dst.imageView = fxaa_.blurImage.imageView;
-    dst.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkWriteDescriptorSet writes[2]{};
-    for (uint32_t b = 0; b < 2; ++b) {
-        writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[b].dstSet = fxaa_.blurSet;
-        writes[b].dstBinding = b;
-        writes[b].descriptorCount = 1;
-        writes[b].descriptorType = bindings[b].descriptorType;
-        writes[b].pImageInfo = b == 0 ? &src : &dst;
-    }
-    vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+    VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = fxaa_.blurSet;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &src;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 
     VkPipelineLayoutCreateInfo plCI{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     plCI.setLayoutCount = 1;
@@ -2020,17 +2060,29 @@ void PostProcessPipeline::initFXAABlur() {
     if (vkCreatePipelineLayout(device, &plCI, nullptr, &fxaa_.blurPipelineLayout) != VK_SUCCESS) {
         return fail("no corner blur pipeline layout");
     }
-    VkShaderModule compMod;
-    if (!compMod.loadFromFile(device, "assets/shaders/fxaa_blur.comp.spv")) {
-        return fail("no fxaa_blur.comp.spv");
+    VkShaderModule vertMod, fragMod;
+    if (!vertMod.loadFromFile(device, "assets/shaders/postprocess.vert.spv") ||
+        !fragMod.loadFromFile(device, "assets/shaders/fxaa_blur.frag.spv")) {
+        vertMod.destroy();
+        fragMod.destroy();
+        return fail("no fxaa_blur.frag.spv");
     }
-    VkComputePipelineCreateInfo cpCI{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    cpCI.stage = compMod.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
-    cpCI.layout = fxaa_.blurPipelineLayout;
-    const VkResult r = vkCreateComputePipelines(device, vkCtx_->getPipelineCache(), 1, &cpCI, nullptr,
-                                                &fxaa_.blurPipeline);
-    compMod.destroy();
-    if (r != VK_SUCCESS) return fail("no corner blur pipeline");
+    fxaa_.blurPipeline = PipelineBuilder()
+        .setShaders(vertMod.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
+                    fragMod.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
+        .setVertexInput({}, {})
+        .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE)
+        .setNoDepthTest()
+        .setColorBlendAttachment(PipelineBuilder::blendDisabled())
+        .setMultisample(VK_SAMPLE_COUNT_1_BIT)
+        .setLayout(fxaa_.blurPipelineLayout)
+        .setRenderPass(fxaa_.blurPass)
+        .setDynamicStates(viewportAndScissorDynamic())
+        .build(device, vkCtx_->getPipelineCache());
+    vertMod.destroy();
+    fragMod.destroy();
+    if (!fxaa_.blurPipeline) return fail("no corner blur pipeline");
 }
 
 void PostProcessPipeline::prepareSceneForFXAA(VkImage scene) {
@@ -2109,30 +2161,38 @@ void PostProcessPipeline::prepareSceneForFXAA(VkImage scene) {
     barrier(glow, 0, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-    // Read by the final pass, and by the corner blur below.
+    // Read by the corner blur below and the final pass.
     barrier(glow, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     barrier(scene, 0, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
     // The glow's blur and the bloom's gate at the quarter-size texel corners
-    // (fxaa_blur.comp), which the final pass reads in place of its taps.
-    if (fxaa_.blurPipeline && fxaa_.blurSet) {
-        const VkImage blur = fxaa_.blurImage.image;
-        // Whatever read it last frame is done before this writes it.
-        barrier(blur, 0, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-        vkCmdBindPipeline(currentCmd_, VK_PIPELINE_BIND_POINT_COMPUTE, fxaa_.blurPipeline);
-        vkCmdBindDescriptorSets(currentCmd_, VK_PIPELINE_BIND_POINT_COMPUTE, fxaa_.blurPipelineLayout, 0, 1,
+    // (fxaa_blur.frag), which the final pass reads in place of its taps. The
+    // render pass's own dependencies order it against last frame's reads and
+    // this frame's.
+    if (fxaa_.blurPipeline && fxaa_.blurSet && fxaa_.blurFramebuffer) {
+        const VkExtent2D corners{quarter.width + 1, quarter.height + 1};
+        VkRenderPassBeginInfo rp{.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        rp.renderPass = fxaa_.blurPass;
+        rp.framebuffer = fxaa_.blurFramebuffer;
+        rp.renderArea.extent = corners;
+        vkCmdBeginRenderPass(currentCmd_, &rp, VK_SUBPASS_CONTENTS_INLINE);
+        VkViewport vp{};
+        vp.width = static_cast<float>(corners.width);
+        vp.height = static_cast<float>(corners.height);
+        vp.maxDepth = 1.0f;
+        vkCmdSetViewport(currentCmd_, 0, 1, &vp);
+        VkRect2D sc{};
+        sc.extent = corners;
+        vkCmdSetScissor(currentCmd_, 0, 1, &sc);
+        vkCmdBindPipeline(currentCmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaa_.blurPipeline);
+        vkCmdBindDescriptorSets(currentCmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, fxaa_.blurPipelineLayout, 0, 1,
                                 &fxaa_.blurSet, 0, nullptr);
-        vkCmdDispatch(currentCmd_, (quarter.width + 1 + 7) / 8, (quarter.height + 1 + 7) / 8, 1);
-        barrier(blur, 0, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        vkCmdDraw(currentCmd_, 3, 1, 0, 0);
+        vkCmdEndRenderPass(currentCmd_);
         fxaa_.blurReady = true;
     }
 }
@@ -2190,7 +2250,7 @@ void PostProcessPipeline::renderFXAAPass() {
         hdrScene() ? enhancedExposure_ : 0.0f, hdrScene() ? enhancedSat_ : 0.0f,
         // The Enhanced shade's grey and chroma (1, 1, 1, 1 off).
         enhancedShadeTint_.r, enhancedShadeTint_.g, enhancedShadeTint_.b, enhancedShade_,
-        // Whether the corner blur holds this frame's sums (fxaa_blur.comp).
+        // Whether the corner blur holds this frame's sums (fxaa_blur.frag).
         fxaa_.blurReady ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f
     };
     vkCmdPushConstants(currentCmd_, fxaa_.pipelineLayout,

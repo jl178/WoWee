@@ -325,7 +325,7 @@ private:
         AllocatedImage glowImage{};
 
         /// The glow's blur and the bloom's gate, one texel per quarter-size
-        /// texel corner, worked out by fxaa_blur.comp from glowImage's mip 1
+        /// texel corner, worked out by fxaa_blur.frag from glowImage's mip 1
         /// once a frame instead of at every pixel (the shader reads one
         /// bilinear tap where it took sixteen). Absent with glowImage, or
         /// where it could not be made; the shader then takes its own taps.
@@ -335,6 +335,8 @@ private:
         VkDescriptorSetLayout blurSetLayout      = VK_NULL_HANDLE;
         VkDescriptorPool      blurPool           = VK_NULL_HANDLE;
         VkDescriptorSet       blurSet            = VK_NULL_HANDLE;
+        VkRenderPass          blurPass           = VK_NULL_HANDLE;
+        VkFramebuffer         blurFramebuffer    = VK_NULL_HANDLE;
         /// Whether blurImage holds this frame's sums (prepareSceneForFXAA).
         bool blurReady = false;
     };
