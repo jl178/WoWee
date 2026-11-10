@@ -2132,6 +2132,7 @@ int lua_Tooltip_SetOwner(lua_State* L) {
     w->isTooltip = true;
     // Cleared here, because SetOwner is what precedes a fresh set of lines.
     w->tooltipLines.clear();
+    w->tooltipUnit.clear();
 
     // Remembered, because IsOwned reads it and nothing wrote it - so every
     // check answered false and a tooltip outlived the frame it belonged to.
@@ -2783,6 +2784,28 @@ static int lua_Tooltip_IsUnit(lua_State* L) {
     return 1;
 }
 
+/// GameTooltip:GetUnit() - the name of the unit the tooltip is showing and
+/// the token it was set with ("mouseover" for one under the cursor), or
+/// nothing once the tooltip shows something else. Addons decorate unit
+/// tooltips from OnTooltipSetUnit by asking this which unit it is.
+static int lua_Tooltip_GetUnit(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    if (!w || w->tooltipUnit.empty()) return 0;
+    std::string name;
+    lua_getglobal(L, "UnitName");
+    if (lua_isfunction(L, -1)) {
+        lua_pushstring(L, w->tooltipUnit.c_str());
+        if (lua_pcall(L, 1, 1, 0) == 0 && lua_isstring(L, -1)) name = lua_tostring(L, -1);
+        lua_pop(L, 1);
+    } else {
+        lua_pop(L, 1);
+    }
+    if (name.empty() && !w->tooltipLines.empty()) name = w->tooltipLines.front().left;
+    lua_pushstring(L, name.c_str());
+    lua_pushstring(L, w->tooltipUnit.c_str());
+    return 2;
+}
+
 int lua_Tooltip_SetUnit(lua_State* L) {
     auto* w = widgetOf(L, 1);
     // A model frame has a SetUnit of its own - it is how the paperdoll loads
@@ -2831,7 +2854,20 @@ int lua_Tooltip_SetUnit(lua_State* L) {
     for (char& c : uidStr) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     const uint64_t guid = wowee::addons::resolveUnitGuid(gh, uidStr);
     if (guid == 0) { lua_pushboolean(L, 0); return 1; }
-    const std::string name = gh->lookupName(guid);
+    std::string name = gh->lookupName(guid);
+    if (name.empty()) {
+        // Whatever UnitName answers - the unit's own object, a party
+        // member's record, or the player's own name, which is in no name
+        // cache: the player's tooltip came out empty.
+        lua_getglobal(L, "UnitName");
+        if (lua_isfunction(L, -1)) {
+            lua_pushstring(L, uidStr.c_str());
+            if (lua_pcall(L, 1, 1, 0) == 0 && lua_isstring(L, -1)) name = lua_tostring(L, -1);
+            lua_pop(L, 1);
+        } else {
+            lua_pop(L, 1);
+        }
+    }
     if (name.empty()) { lua_pushboolean(L, 0); return 1; }
 
     w->isTooltip = true;
@@ -3589,7 +3625,7 @@ int lua_Tooltip_SetGuildBankItem(lua_State* L) {
 }
 
 int lua_Tooltip_ClearLines(lua_State* L) {
-    if (auto* w = widgetOf(L, 1)) w->tooltipLines.clear();
+    if (auto* w = widgetOf(L, 1)) { w->tooltipLines.clear(); w->tooltipUnit.clear(); }
     // And what the tooltip was showing, which is a different question from
     // what is written in it.
     //
@@ -4324,6 +4360,48 @@ int lua_Frame_SetFrameLevel(lua_State* L) {
     if (tree && id) tree->refreshLevels(id);
     return 0;
 }
+/// The tooltip line a font string stands for: one handed over with
+/// AddFontStrings, or one of the template's <tooltip>TextLeft<n> and
+/// TextRight<n>. A tooltip's lines live in its own list here, so these
+/// font strings read and write that list - SetText and SetTextColor on
+/// GameTooltipTextLeft1 is how addons recolour a unit's name or rewrite a
+/// level line, and written to the font string alone it changed nothing on
+/// screen. index is 1-based; 0 when the font string is not a tooltip line.
+struct TooltipLineRef {
+    wowee::ui::Widget* owner = nullptr;
+    size_t index = 0;
+    bool right = false;
+};
+static TooltipLineRef tooltipLineFor(lua_State* L, const wowee::ui::Widget* w) {
+    TooltipLineRef ref;
+    if (!w || w->kind != wowee::ui::WidgetKind::FontString) return ref;
+    auto* tree = wowee::addons::getWidgetTree(L);
+    if (!tree) return ref;
+    if (w->tooltipLineOwner != 0) {
+        ref.owner = tree->get(w->tooltipLineOwner);
+        ref.index = static_cast<size_t>(w->tooltipLineIndex);
+        ref.right = w->tooltipLineRight;
+        if (!ref.owner) ref.index = 0;
+        return ref;
+    }
+    if (w->name.empty()) return ref;
+    wowee::ui::Widget* owner = tree->get(w->parent);
+    if (!owner || !owner->isTooltip || owner->name.empty() ||
+        w->name.compare(0, owner->name.size(), owner->name) != 0) {
+        return ref;
+    }
+    const std::string rest = w->name.substr(owner->name.size());
+    const bool left = rest.compare(0, 8, "TextLeft") == 0;
+    const bool right = rest.compare(0, 9, "TextRight") == 0;
+    if (!left && !right) return ref;
+    const std::string digits = rest.substr(left ? 8 : 9);
+    if (digits.empty() || digits.find_first_not_of("0123456789") != std::string::npos) return ref;
+    ref.owner = owner;
+    ref.index = static_cast<size_t>(std::strtoul(digits.c_str(), nullptr, 10));
+    ref.right = right;
+    return ref;
+}
+
 int lua_FontString_SetText(lua_State* L) {
     // Anything but a string is taken as no text rather than as an error.
     //
@@ -4335,7 +4413,16 @@ int lua_FontString_SetText(lua_State* L) {
     // chatconfigframe's whole OnEvent.
     const char* text = lua_isstring(L, 2) ? lua_tostring(L, 2) : "";
     const std::string shown = wowee::ui::resolvePluralEscapes(text);
-    if (auto* w = widgetOf(L, 1)) w->text = shown;
+    auto* fw = widgetOf(L, 1);
+    // A tooltip line that exists is rewritten where it is drawn from.
+    if (const TooltipLineRef ref = tooltipLineFor(L, fw);
+        ref.owner && ref.index >= 1 && ref.index <= ref.owner->tooltipLines.size()) {
+        auto& line = ref.owner->tooltipLines[ref.index - 1];
+        (ref.right ? line.right : line.left) = shown;
+        fw->text.clear();
+    } else if (fw) {
+        fw->text = shown;
+    }
     // GetText answers what was set, not what is drawn. WoW resolves the escape
     // on the way to the screen and hands the original back, and FrameXML reads
     // its own labels back in a few places to re-format them.
@@ -4510,6 +4597,13 @@ int lua_FontString_SetTextColor(lua_State* L) {
         w->color[2] = static_cast<float>(luaOptNumberText(L, 4, 1.0));
         w->color[3] = static_cast<float>(luaOptNumberText(L, 5, 1.0));
         w->fontOwned |= wowee::ui::Widget::kFontOwnColor;
+        // And the tooltip line it stands for, which is what is drawn.
+        if (const TooltipLineRef ref = tooltipLineFor(L, w);
+            ref.owner && ref.index >= 1 && ref.index <= ref.owner->tooltipLines.size()) {
+            float* c = ref.right ? ref.owner->tooltipLines[ref.index - 1].rc
+                                 : ref.owner->tooltipLines[ref.index - 1].lc;
+            for (int i = 0; i < 4; ++i) c[i] = w->color[i];
+        }
     }
     return 0;
 }
@@ -7575,6 +7669,7 @@ void LuaEngine::registerCoreAPI() {
         {"SetTradeSkillItem", lua_Tooltip_SetTradeSkillItem},
         {"SetUnit",         lua_Tooltip_SetUnit},
         {"IsUnit",          lua_Tooltip_IsUnit},
+        {"GetUnit",         lua_Tooltip_GetUnit},
         {"AddDoubleLine",   lua_Tooltip_AddDoubleLine},
         {"ClearLines",      lua_Tooltip_ClearLines},
         {"SetFrameStack",   lua_Tooltip_SetFrameStack},
@@ -9446,7 +9541,7 @@ void LuaEngine::registerCoreAPI() {
         "    end\n"
         "    return nil\n"
         "end\n"
-        "function __WoweeFrameMT:GetUnit() return nil end\n"
+
         // NumLines and GetText come from the widget itself, which is where
         // the lines now live.
         // The aura tooltip, as the real client fills it in C for all four of
