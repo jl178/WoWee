@@ -3221,6 +3221,50 @@ static int lua_ResetGroupPreviewTalentPoints(lua_State* L) {
     return 0;
 }
 
+// ResetPreviewTalentPoints(tabIndex[, isPet[, groupIndex]]) - take back the
+// points staged in one tree only (0x5C7130), and say how many with
+// PREVIEW_TALENT_POINTS_CHANGED (0, tab, group, change). Ranks Learn has
+// already sent stay staged: the server will teach them whatever this says.
+// The pet has the one tree, so for it this is the whole preview.
+static int lua_ResetPreviewTalentPoints(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const int tab = static_cast<int>(luaL_checknumber(L, 1));
+    if (wantsPetTalents(L, 2)) {
+        petResetPreview(gh);
+        return 0;
+    }
+    if (!gh) return 0;
+    settlePreview(gh);
+    const auto classTabs = classTalentTabs(gh, gh->getPlayerClass());
+    // A tab the class does not have names no talent, so nothing is taken back
+    // - as in the client, which walks the tab and finds nothing staged there.
+    const bool knownTab = tab >= 1 && tab <= static_cast<int>(classTabs.size());
+    const uint32_t tabId = knownTab ? classTabs[static_cast<size_t>(tab - 1)]->tabId : 0u;
+    const auto& talents = gh->getAllTalents();
+    int removed = 0;
+    auto& staged = previewPoints();
+    for (auto it = staged.begin(); it != staged.end();) {
+        const auto t = talents.find(it->first);
+        if (!knownTab || t == talents.end() || t->second.tabId != tabId) { ++it; continue; }
+        int keep = 0;
+        if (const auto c = committedPreview().talents.find(it->first);
+            c != committedPreview().talents.end()) {
+            keep = std::min(it->second, c->second.remaining);
+        }
+        removed += it->second - keep;
+        if (keep > 0) { it->second = keep; ++it; }
+        else it = staged.erase(it);
+    }
+    if (removed != 0) {
+        const int group = lua_isnumber(L, 3) ? static_cast<int>(lua_tonumber(L, 3))
+                                             : gh->getActiveTalentSpec() + 1;
+        gh->fireAddonEvent("PREVIEW_TALENT_POINTS_CHANGED",
+                           {"0", std::to_string(tab), std::to_string(group),
+                            std::to_string(-removed)});
+    }
+    return 0;
+}
+
 // What still has to be sent for one staged talent: the ranks above what is
 // learned and above what an earlier Learn already has on its way.
 struct PreviewSend {
@@ -3744,6 +3788,36 @@ QuestSource currentQuestSource(game::GameHandler* gh) {
     return s;
 }
 
+/// The flags of the quest the quest frame is showing (0xC0D6B4): the offer's
+/// own when it is an offer, otherwise the quest's as its query answered them
+/// - a quest being handed in or asked about is in the log.
+static uint32_t currentQuestFlags(game::GameHandler* gh) {
+    if (!gh) return 0;
+    uint32_t questId = 0;
+    if (gh->isQuestOfferRewardOpen()) questId = gh->getQuestOfferReward().questId;
+    else if (gh->isQuestRequestItemsOpen()) questId = gh->getQuestRequestItems().questId;
+    else if (gh->isQuestDetailsOpen()) return gh->getQuestDetails().questFlags;
+    if (questId == 0) return 0;
+    for (const auto& q : gh->getQuestLog()) {
+        if (q.questId == questId) return q.questFlags;
+    }
+    return 0;
+}
+
+// QuestIsDaily() / QuestIsWeekly() - 1 or nil for the quest on the quest
+// frame: QUEST_FLAGS_DAILY 0x1000 and QUEST_FLAGS_WEEKLY 0x8000 (0x58C4D0,
+// 0x58C510). QuestFrame shows the daily/weekly line from them.
+static int lua_QuestIsDaily(lua_State* L) {
+    if (currentQuestFlags(getGameHandler(L)) & 0x1000u) lua_pushnumber(L, 1);
+    else lua_pushnil(L);
+    return 1;
+}
+static int lua_QuestIsWeekly(lua_State* L) {
+    if (currentQuestFlags(getGameHandler(L)) & 0x8000u) lua_pushnumber(L, 1);
+    else lua_pushnil(L);
+    return 1;
+}
+
 /// Counts only the filled slots: the server pads a reward list to a fixed
 /// width, and a row drawn for an empty one is a blank button the player can
 /// click.
@@ -4257,6 +4331,7 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"AddPreviewTalentPoints",  lua_AddPreviewTalentPoints},
                 {"GetGroupPreviewTalentPointsSpent", lua_GetGroupPreviewTalentPointsSpent},
                 {"ResetGroupPreviewTalentPoints",    lua_ResetGroupPreviewTalentPoints},
+                {"ResetPreviewTalentPoints", lua_ResetPreviewTalentPoints},
                 {"LearnPreviewTalents",     lua_LearnPreviewTalents},
                 {"LearnTalent",             lua_LearnTalent},
                 {"GetUnspentTalentPoints",  lua_GetUnspentTalentPoints},
@@ -4398,6 +4473,8 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"GetQuestLogRewardMoney", lua_GetQuestLogRewardMoney},
                 {"GetQuestLogRequiredMoney", lua_GetQuestLogRequiredMoney},
                 {"GetTitleText",         lua_GetTitleText},
+                {"QuestIsDaily",         lua_QuestIsDaily},
+                {"QuestIsWeekly",        lua_QuestIsWeekly},
                 {"GetQuestText",         lua_GetQuestText},
                 {"GetObjectiveText",     lua_GetObjectiveText},
                 {"GetProgressText",      lua_GetProgressText},

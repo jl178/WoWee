@@ -1623,6 +1623,16 @@ void registerSpellLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"GetTotemTimeLeft", lua_GetTotemTimeLeft},
+                // TargetTotem(slot) - target the totem standing in that slot,
+                // the guid SMSG_TOTEM_CREATED named for it.
+                {"TargetTotem", [](lua_State* L) -> int {
+            auto* gh = getGameHandler(L);
+            const int slot = static_cast<int>(luaL_checknumber(L, 1));
+            if (!gh || slot < 1 || slot > game::GameHandler::NUM_TOTEM_SLOTS) return 0;
+            const auto& totem = gh->getTotemSlot(slot - 1);
+            if (totem.active() && totem.guid != 0) gh->setTarget(totem.guid);
+            return 0;
+        }},
                 {"SpellStopCasting", [](lua_State* L) -> int {
             // 0x809EA0: the cast or channel stops; with none, a repeating
             // Auto Shot or Shoot does. 1 when something stopped, else nil.

@@ -2910,6 +2910,8 @@ public:
     // Shaman totems (4 slots: 0=Earth, 1=Fire, 2=Water, 3=Air)
     struct TotemSlot {
         uint32_t spellId     = 0;
+        /// The totem itself, from SMSG_TOTEM_CREATED - what TargetTotem targets.
+        uint64_t guid        = 0;
         uint32_t durationMs  = 0;
         std::chrono::steady_clock::time_point placedAt{};
         [[nodiscard]] bool active() const { return spellId != 0 && remainingMs() > 0; }

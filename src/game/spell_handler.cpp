@@ -6456,10 +6456,7 @@ void SpellHandler::handleTotemCreated(network::Packet& packet) {
     const bool totemTbcLike = isPreWotlk();
     if (!packet.hasRemaining(totemTbcLike ? 17u : 9u) ) return;
     uint8_t slot = packet.readUInt8();
-    if (totemTbcLike)
-        /*uint64_t guid =*/ packet.readUInt64();
-    else
-        /*uint64_t guid =*/ packet.readPackedGuid();
+    const uint64_t guid = totemTbcLike ? packet.readUInt64() : packet.readPackedGuid();
     if (!packet.hasRemaining(8)) return;
     uint32_t duration = packet.readUInt32();
     uint32_t spellId  = packet.readUInt32();
@@ -6467,6 +6464,7 @@ void SpellHandler::handleTotemCreated(network::Packet& packet) {
               " spellId=", spellId, " duration=", duration, "ms");
     if (slot < GameHandler::NUM_TOTEM_SLOTS) {
         owner_.activeTotemSlotsRef()[slot].spellId    = spellId;
+        owner_.activeTotemSlotsRef()[slot].guid       = guid;
         owner_.activeTotemSlotsRef()[slot].durationMs = duration;
         owner_.activeTotemSlotsRef()[slot].placedAt   = std::chrono::steady_clock::now();
         // The totem bar draws each slot from its start and duration, and

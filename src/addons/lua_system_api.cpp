@@ -6561,6 +6561,7 @@ void registerSystemLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"RegisterForSave",          lua_ReturnNothing},
+                {"RegisterForSavePerCharacter", lua_ReturnNothing},
                 {"RegisterStaticConstants",  lua_ReturnNothing},
                 {"SetChatWindowName",        lua_SetChatWindowName},
                 {"SetupFullscreenScale",     lua_ReturnNothing},

@@ -29,6 +29,7 @@
 #include "ui/framexml_takeover.hpp"
 
 #include <array>
+#include <cstdlib>
 #include <string>
 
 namespace wowee::addons {
@@ -298,6 +299,48 @@ int lua_GetSocketItemBoundTradeable(lua_State* L) {
     return 1;
 }
 
+/// GetItemGem(itemLink, index) → name, link of the gem in that socket.
+///
+/// Read off the link, as the client reads it (0x51C150): an item link is
+/// "item:id:enchant:gem1:gem2:gem3:gem4:...", each gem field an enchantment id,
+/// and SpellItemEnchantment's source item is the gem it came out of. A plain
+/// name or id has no gems in it and answers nothing; so does a gem whose item
+/// has not been queried yet, which the call asks for so a later one can say.
+int lua_GetItemGem(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const char* item = luaL_checkstring(L, 1);
+    const int index = static_cast<int>(luaL_checknumber(L, 2));
+    if (!gh || index < 1 || index > 4) return 0;
+    const std::string link = item;
+    const size_t at = link.find("item:");
+    if (at == std::string::npos) return 0;
+    // Fields after "item:": id, enchant, then the four gems.
+    size_t pos = at + 5;
+    uint32_t enchantId = 0;
+    for (int field = 0; field <= index + 1; ++field) {
+        const size_t end = link.find_first_of(":|]", pos);
+        const std::string value = link.substr(pos, end == std::string::npos ? std::string::npos
+                                                                            : end - pos);
+        if (field == index + 1) {
+            enchantId = static_cast<uint32_t>(std::strtoul(value.c_str(), nullptr, 10));
+            break;
+        }
+        if (end == std::string::npos || link[end] != ':') return 0;
+        pos = end + 1;
+    }
+    if (enchantId == 0) return 0;
+    const uint32_t gem = gh->getEnchantGemItem(enchantId);
+    if (gem == 0) return 0;
+    const auto* info = gh->getItemInfo(gem);
+    if (!info || !info->valid || info->name.empty()) {
+        gh->queryItemInfo(gem, 0);
+        return 0;
+    }
+    lua_pushstring(L, info->name.c_str());
+    lua_pushstring(L, game::buildItemLink(gem, info->quality, info->name).c_str());
+    return 2;
+}
+
 }  // namespace
 
 void registerSocketLuaAPI(lua_State* L) {
@@ -316,6 +359,7 @@ void registerSocketLuaAPI(lua_State* L) {
         {"ClickSocketButton",          lua_ClickSocketButton},
         {"AcceptSockets",              lua_AcceptSockets},
         {"CloseSocketInfo",            lua_CloseSocketInfo},
+        {"GetItemGem",                 lua_GetItemGem},
         {.name = nullptr, .func = nullptr},
     };
     for (const luaL_Reg* fn = fns; fn->name; ++fn) {
