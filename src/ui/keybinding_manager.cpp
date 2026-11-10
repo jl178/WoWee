@@ -151,6 +151,73 @@ void KeybindingManager::initializeDefaults(Device device) {
         bindings_["MULTIACTIONBAR1BUTTON" + std::to_string(i)] = {"SHIFT-" + key, ""};
         if (i <= 8) bindings_["SHAPESHIFTBUTTON" + std::to_string(i)] = {"CTRL-" + key, ""};
     }
+    // The rest of stock's defaults (Data/wtf/defaultbindings.wtf), in its
+    // order, for every key the rows above leave free. None of these had a
+    // key, so the action bar page keys, targeting party members, the bag
+    // keys and the rest did nothing until the player bound them by hand.
+    //
+    // Left out on purpose:
+    //  - keys this client gives to something else: R (camera reset, not
+    //    REPLY), SHIFT-1..6 (the bottom-left bar, not ACTIONPAGE1..6) and
+    //    CTRL-1..8 (the stance bar, not BONUSACTIONBUTTON1..8 - and with
+    //    those gone, BONUSACTIONBUTTON9/10 on CTRL-9/0 too);
+    //  - BUTTON1-3 (CAMERAORSELECTORMOVE, TURNORACTION, MOVEANDSTEER): the
+    //    camera owns the mouse buttons, and a binding would take the press
+    //    from it;
+    //  - BUTTON4 for autorun, whose two slots are taken;
+    //  - the Mac movie recorder (bindings.xml declares those for the Mac
+    //    client only), and TOGGLECOMBATLOG / TOGGLEGEARSETS, which no
+    //    bindings.xml here declares.
+    static constexpr std::pair<const char*, const char*> kStockDefaults[] = {
+        {"NUMPAD0", "JUMP"}, {"INSERT", "PITCHUP"}, {"DELETE", "PITCHDOWN"},
+        {"PAGEUP", "CHATPAGEUP"}, {"PAGEDOWN", "CHATPAGEDOWN"}, {"SHIFT-PAGEDOWN", "CHATBOTTOM"},
+        {"CTRL-PAGEUP", "COMBATLOGPAGEUP"}, {"CTRL-PAGEDOWN", "COMBATLOGPAGEDOWN"},
+        {"CTRL-SHIFT-PAGEDOWN", "COMBATLOGBOTTOM"}, {"SHIFT-R", "REPLY2"},
+        {"CTRL-F1", "SHAPESHIFTBUTTON1"}, {"CTRL-F2", "SHAPESHIFTBUTTON2"},
+        {"CTRL-F3", "SHAPESHIFTBUTTON3"}, {"CTRL-F4", "SHAPESHIFTBUTTON4"},
+        {"CTRL-F5", "SHAPESHIFTBUTTON5"}, {"CTRL-F6", "SHAPESHIFTBUTTON6"},
+        {"CTRL-F7", "SHAPESHIFTBUTTON7"}, {"CTRL-F8", "SHAPESHIFTBUTTON8"},
+        {"CTRL-F9", "SHAPESHIFTBUTTON9"}, {"CTRL-F10", "SHAPESHIFTBUTTON10"},
+        // Up is the previous page and down the next, as stock has them.
+        {"SHIFT-UP", "PREVIOUSACTIONPAGE"}, {"SHIFT-MOUSEWHEELUP", "PREVIOUSACTIONPAGE"},
+        {"SHIFT-DOWN", "NEXTACTIONPAGE"}, {"SHIFT-MOUSEWHEELDOWN", "NEXTACTIONPAGE"},
+        {"SHIFT-TAB", "TARGETPREVIOUSENEMY"}, {"CTRL-TAB", "TARGETNEARESTFRIEND"},
+        {"CTRL-SHIFT-TAB", "TARGETPREVIOUSFRIEND"},
+        {"F1", "TARGETSELF"}, {"SHIFT-F1", "TARGETPET"},
+        {"F2", "TARGETPARTYMEMBER1"}, {"F3", "TARGETPARTYMEMBER2"},
+        {"F4", "TARGETPARTYMEMBER3"}, {"F5", "TARGETPARTYMEMBER4"},
+        {"SHIFT-F2", "TARGETPARTYPET1"}, {"SHIFT-F3", "TARGETPARTYPET2"},
+        {"SHIFT-F4", "TARGETPARTYPET3"}, {"SHIFT-F5", "TARGETPARTYPET4"},
+        {"G", "TARGETLASTHOSTILE"}, {"F", "ASSISTTARGET"}, {"CTRL-V", "ALLNAMEPLATES"},
+        {"T", "ATTACKTARGET"}, {"SHIFT-T", "PETATTACK"},
+        {"F8", "TOGGLEBAG1"}, {"F9", "TOGGLEBAG2"}, {"F10", "TOGGLEBAG3"}, {"F11", "TOGGLEBAG4"},
+        {"SHIFT-I", "TOGGLEPETBOOK"}, {"SHIFT-P", "TOGGLECHARACTER3"},
+        {"SHIFT-SPACE", "TOGGLEWORLDSTATESCORES"}, {"SHIFT-M", "TOGGLEBATTLEFIELDMINIMAP"},
+        {"SHIFT-O", "TOGGLECHANNELPULLOUT"}, {"U", "TOGGLECHARACTER2"},
+        {"SHIFT-Y", "TOGGLESTATISTICS"},
+        {"NUMPADPLUS", "MINIMAPZOOMIN"}, {"NUMPADMINUS", "MINIMAPZOOMOUT"},
+        {"CTRL-M", "TOGGLEMUSIC"}, {"CTRL-S", "TOGGLESOUND"},
+        {"CTRL-=", "MASTERVOLUMEUP"}, {"CTRL--", "MASTERVOLUMEDOWN"}, {"ALT-Z", "TOGGLEUI"},
+        {"END", "NEXTVIEW"}, {"HOME", "PREVVIEW"},
+        {"CTRL-R", "TOGGLEFPS"}, {"CTRL-Y", "TOGGLESTATS"}, {"CTRL-Q", "TOGGLETRIS"},
+        {"CTRL-W", "TOGGLEPORTALS"}, {"CTRL-E", "TOGGLECOLLISION"},
+        {"CTRL-T", "TOGGLECOLLISIONDISPLAY"}, {"ALT-B", "TOGGLEPLAYERBOUNDS"},
+        {"ALT-P", "TOGGLEPERFORMANCEDISPLAY"}, {"CTRL-P", "TOGGLEPERFORMANCEPAUSE"},
+        {"ALT-O", "TOGGLEPERFORMANCEVALUES"},
+        {"NUMPAD5", "VEHICLEEXIT"}, {"NUMPAD1", "VEHICLEPREVSEAT"}, {"NUMPAD3", "VEHICLENEXTSEAT"},
+        {"CTRL-MOUSEWHEELUP", "VEHICLEAIMINCREMENT"}, {"CTRL-MOUSEWHEELDOWN", "VEHICLEAIMDECREMENT"},
+    };
+    for (const auto& [rawKey, command] : kStockDefaults) {
+        std::string key = rawKey;
+        if (!normalizeKey(key)) continue;
+        bool taken = false;
+        for (const auto& [name, slots] : bindings_)
+            for (const auto& slot : slots) taken = taken || slot == key;
+        if (taken) continue;
+        auto& slots = bindings_[command];
+        if (slots[0].empty()) slots[0] = key;
+        else if (slots[1].empty()) slots[1] = key;
+    }
 }
 void KeybindingManager::resetToDefaults() {
     resetToDefaults(Device::KeyboardMouse);

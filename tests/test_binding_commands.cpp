@@ -53,6 +53,9 @@ TEST_CASE_METHOD(Fixture, "Shared resolution prefers explicit chords and otherwi
         REQUIRE_FALSE(command.empty());
         for (const auto& prefix : {"SHIFT-", "CTRL-", "ALT-", "ALT-CTRL-SHIFT-"}) {
             const std::string chord = std::string(prefix) + base;
+            // A chord stock binds itself (SHIFT-TAB, CTRL-TAB, SHIFT-SPACE)
+            // is explicit, so it is not a fallback to test.
+            if (!manager.commandForKey(chord).empty()) continue;
             CHECK(manager.resolveCommand(chord) == command);
             REQUIRE(manager.setBinding(chord, "CUSTOM_CHORD"));
             CHECK(manager.resolveCommand(chord) == "CUSTOM_CHORD");
@@ -82,6 +85,11 @@ TEST_CASE_METHOD(Fixture, "Queued physical edges keep queue-time modifiers and s
                       SDL_SCANCODE_Z, SDL_SCANCODE_GRAVE, SDL_SCANCODE_NUMLOCKCLEAR}) {
         const auto command = manager.commandForKey(Manager::keyNameFromSDL(SDL_SCANCODE_TO_KEYCODE(scan)));
         for (auto mod : {SDL_KMOD_SHIFT, SDL_KMOD_CTRL, SDL_KMOD_ALT}) {
+            // Stock binds SHIFT-TAB, CTRL-TAB and SHIFT-SPACE themselves.
+            const std::string chord = Manager::modifiedKey(
+                Manager::keyNameFromSDL(SDL_SCANCODE_TO_KEYCODE(scan)),
+                mod == SDL_KMOD_SHIFT, mod == SDL_KMOD_CTRL, mod == SDL_KMOD_ALT);
+            if (!manager.commandForKey(chord).empty()) continue;
             manager.beginInputFrame();
             event(scan, true, mod); event(scan, false, mod);
             CHECK(manager.isCommandPressed(command));
@@ -183,7 +191,7 @@ TEST_CASE_METHOD(Fixture, "Binding persistence preserves both device groups and 
     CHECK(manager.commandForKey("BUTTON4") == "EXTRA_MOUSE");
     REQUIRE(manager.setBinding("PAD1"));
     REQUIRE(manager.setBinding("PADLSTICK"));
-    manager.bindings()["SECONDARY_ONLY"] = {"", "F11"};
+    manager.bindings()["SECONDARY_ONLY"] = {"", "ALT-F11"};  // F11 is stock's fourth bag
     manager.controllerBindings()["PAD_SECONDARY_ONLY"] = {"", "PADFORWARD"};
     const auto keyboard = manager.bindings(), controller = manager.controllerBindings();
     for (auto invalid : {"NOT_A_KEY", "CTRL-", "PADNOTREAL", "F1\n"})
@@ -282,5 +290,30 @@ TEST_CASE_METHOD(Fixture, "Legacy native settings trim recognized rows and never
     REQUIRE(restarted.saveBindings(file.string()));
     REQUIRE(restarted.loadBindingsWithLegacy(file.string(), legacy.string()));
     CHECK(restarted.commandForKey("C") == "TOGGLECHARACTER0");
-    CHECK(restarted.commandForKey("F9").empty());
+    // Back to the defaults, where F9 is stock's third bag, not the import.
+    CHECK(restarted.commandForKey("F9") == "TOGGLEBAG2");
+}
+
+TEST_CASE_METHOD(Fixture, "Stock's default keys are bound where this client leaves them free", "[bindings]") {
+    // Data/wtf/defaultbindings.wtf. Up is the previous page, down the next.
+    CHECK(manager.commandForKey("SHIFT-UP") == "PREVIOUSACTIONPAGE");
+    CHECK(manager.commandForKey("SHIFT-MOUSEWHEELUP") == "PREVIOUSACTIONPAGE");
+    CHECK(manager.commandForKey("SHIFT-DOWN") == "NEXTACTIONPAGE");
+    CHECK(manager.commandForKey("SHIFT-MOUSEWHEELDOWN") == "NEXTACTIONPAGE");
+    CHECK(manager.commandForKey("F1") == "TARGETSELF");
+    CHECK(manager.commandForKey("F2") == "TARGETPARTYMEMBER1");
+    CHECK(manager.commandForKey("SHIFT-TAB") == "TARGETPREVIOUSENEMY");
+    CHECK(manager.commandForKey("CTRL-SHIFT-TAB") == "TARGETPREVIOUSFRIEND");
+    CHECK(manager.commandForKey("F8") == "TOGGLEBAG1");
+    CHECK(manager.commandForKey("U") == "TOGGLECHARACTER2");
+    CHECK(manager.commandForKey("CTRL-F1") == "SHAPESHIFTBUTTON1");
+    CHECK(manager.bindings().at("JUMP") == std::array<std::string, 2>{"SPACE", "NUMPAD0"});
+    // This client's own choices for a key win over stock's.
+    CHECK(manager.commandForKey("R") == "WOWEERESETCAMERA");
+    CHECK(manager.commandForKey("SHIFT-1") == "MULTIACTIONBAR1BUTTON1");
+    CHECK(manager.commandForKey("CTRL-1") == "SHAPESHIFTBUTTON1");
+    // The camera keeps the mouse buttons.
+    CHECK(manager.commandForKey("BUTTON1").empty());
+    CHECK(manager.commandForKey("BUTTON2").empty());
+    CHECK(manager.commandForKey("BUTTON3").empty());
 }
