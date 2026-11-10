@@ -13174,10 +13174,15 @@ void LuaEngine::updateSizeChanges() {
             mut->lastReportedH = w.rectH;
             mut->answeredW = mut->answeredH = -1.0f;
         }
-        // Nothing is fired the first time a frame is measured: every frame in
-        // the interface would report a change on the first layout, which says
-        // nothing and runs 3000 handlers to say it.
-        if (!known) continue;
+        // The first layout too. The client compares the new rect against the
+        // one the frame had, which before its first layout is empty, and runs
+        // OnSizeChanged when the height or the width moved by more than a hair
+        // (CSimpleFrame 0x48FA20 -> 0x490330 -> 0x48F070). Skipping the first
+        // measurement lost the one call a frame sized in the same breath it was
+        // made ever gets: ElvUI sizes its arena and boss holders right after
+        // making their movers 0 x 0 and keeps the movers in step from this
+        // handler, so the movers stayed 0 x 0 and the five arena frames, hung
+        // from the mover's top, ran off the bottom of the screen.
         if (w.rectW <= 0.0f || w.rectH <= 0.0f) continue;
         lua_getglobal(L_, "__WoweeFramesByWid");
         if (!lua_istable(L_, -1)) { lua_pop(L_, 1); return; }
