@@ -105,6 +105,42 @@ static void callTM (lua_State *L, const TValue *f, const TValue *p1,
 }
 
 
+/*
+** WOWEE: taint.
+**
+** Whether the running code is ordinary Lua, whose stores and reads carry
+** taint, or the client's own (a Lua function compiled with loadsystem on, a C
+** function outside the standard library, or the host with nothing running),
+** which is transparent. Standard library C functions count as their caller.
+*/
+int luaV_tainttracked (lua_State *L) {
+  CallInfo *ci = L->ci;
+  for (;;) {
+    Closure *cl;
+    if (ci == L->base_ci)  /* nothing running: the host itself */
+      return L != G(L)->mainthread;  /* a coroutine's base is its resumer's */
+    if (!ttisfunction(ci->func)) return 0;
+    cl = clvalue(ci->func);
+    if (cl->c.isC) {
+      if (cl->c.taint == LUA_TAINT_STDLIB) { ci--; continue; }
+      return 0;
+    }
+    return cl->l.taint != LUA_TAINT_SYSTEM;
+  }
+}
+
+int luaV_taintstore (lua_State *L) {
+  int t = G(L)->taint;
+  if (t == 0) return 0;
+  return luaV_tainttracked(L) ? t : 0;
+}
+
+void luaV_taintread (lua_State *L, const TValue *o) {
+  if (o->taint > 0 && G(L)->taint == 0 && luaV_tainttracked(L))
+    G(L)->taint = o->taint;
+}
+
+
 void luaV_gettable (lua_State *L, const TValue *t, TValue *key, StkId val) {
   int loop;
   for (loop = 0; loop < MAXTAGLOOP; loop++) {
@@ -114,6 +150,7 @@ void luaV_gettable (lua_State *L, const TValue *t, TValue *key, StkId val) {
       const TValue *res = luaH_get(h, key); /* do a primitive get */
       if (!ttisnil(res) ||  /* result is no nil? */
           (tm = fasttm(L, h->metatable, TM_INDEX)) == NULL) { /* or no TM? */
+        luaV_taintread(L, res);
         setobj2s(L, val, res);
         return;
       }
@@ -624,6 +661,11 @@ void luaV_execute (lua_State *L, int nexeccalls) {
             lua_assert(L->top == L->base + clvalue(func)->l.p->maxstacksize);
             ci->savedpc = L->savedpc;
             ci->tailcalls++;  /* one more call lost */
+            /* WOWEE: a restore the new frame owed is owed by this one now */
+            if ((ci+1)->restoretaint && !ci->restoretaint) {
+              ci->restoretaint = 1;
+              ci->savedtaint = (ci+1)->savedtaint;
+            }
             L->ci--;  /* remove new frame */
             goto reentry;
           }
@@ -762,6 +804,7 @@ void luaV_execute (lua_State *L, int nexeccalls) {
         nup = p->nups;
         ncl = luaF_newLclosure(L, nup, cl->env);
         ncl->l.p = p;
+        ncl->l.taint = cl->taint;  /* WOWEE: the taint of the code it is in */
         for (j=0; j<nup; j++, pc++) {
           if (GET_OPCODE(*pc) == OP_GETUPVAL)
             ncl->l.upvals[j] = cl->upvals[GETARG_B(*pc)];

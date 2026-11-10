@@ -55,6 +55,8 @@ static void stack_init (lua_State *L1, lua_State *L) {
   setnilvalue(L1->top++);  /* `function' entry for this `ci' */
   L1->base = L1->ci->base = L1->top;
   L1->ci->top = L1->top + LUA_MINSTACK;
+  L1->ci->restoretaint = 0;
+  L1->ci->savedtaint = 0;
 }
 
 
@@ -174,6 +176,9 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud) {
   g->grayagain = NULL;
   g->weak = NULL;
   g->tmudata = NULL;
+  g->taint = 0;
+  g->loadsystem = 0;
+  g->markstdlib = 0;
   g->totalbytes = sizeof(LG);
   g->gcpause = LUAI_GCPAUSE;
   g->gcstepmul = LUAI_GCMUL;

@@ -472,6 +472,52 @@ bool WidgetTree::noteSizingContext(const void* font, const void* assets,
     return true;
 }
 
+void WidgetTree::setProtectedExplicit(uint32_t id, bool on) {
+    if (id == 0 || id >= widgets_.size()) return;
+    if (widgets_[id].protectedExplicit == on) return;
+    widgets_[id].protectedExplicit = on;
+    ++protectionGeneration_;
+}
+
+bool WidgetTree::isProtected(uint32_t id, bool* explicitOut) const {
+    if (explicitOut) *explicitOut = false;
+    if (id == 0 || id >= widgets_.size()) return false;
+    if (widgets_[id].protectedExplicit) {
+        if (explicitOut) *explicitOut = true;
+        return true;
+    }
+    // 1 = protected. Worked out from every declared frame outwards: what it
+    // is parented to and what it is anchored to are protected, and so on
+    // from those.
+    if (protectionCacheLayoutGen_ != layoutGeneration_ ||
+        protectionCacheGen_ != protectionGeneration_ ||
+        protectionCache_.size() != widgets_.size()) {
+        protectionCache_.assign(widgets_.size(), 0);
+        std::vector<uint32_t> work;
+        for (uint32_t i = 1; i < widgets_.size(); ++i) {
+            if (widgets_[i].protectedExplicit) {
+                protectionCache_[i] = 1;
+                work.push_back(i);
+            }
+        }
+        auto mark = [&](uint32_t to) {
+            if (to == 0 || to >= widgets_.size() || protectionCache_[to]) return;
+            protectionCache_[to] = 1;
+            work.push_back(to);
+        };
+        while (!work.empty()) {
+            const uint32_t p = work.back();
+            work.pop_back();
+            const Widget& w = widgets_[p];
+            mark(w.parent);
+            for (const Anchor& a : w.anchors) mark(a.relativeTo ? a.relativeTo : w.parent);
+        }
+        protectionCacheLayoutGen_ = layoutGeneration_;
+        protectionCacheGen_ = protectionGeneration_;
+    }
+    return protectionCache_[id] != 0;
+}
+
 const Widget* WidgetTree::get(uint32_t id) const {
     if (id == 0 || id >= widgets_.size()) return nullptr;
     return &widgets_[id];

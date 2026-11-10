@@ -30,6 +30,8 @@
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_bit_lib.hpp"
 #include "addons/lua_handler_globals.hpp"
+#include "addons/lua_taint.hpp"
+#include <optional>
 #include "addons/lua_api_registrations.hpp"
 #include "addons/world_map_api.hpp"
 #include "addons/toc_parser.hpp"
@@ -6984,9 +6986,13 @@ static int lua_CreateFrame(lua_State* L) {
     if (name && *name) {
         lua_pushstring(L, name);
         lua_setfield(L, -2, "__name");
-        // Also set as a global so other addons can find it by name
+        // Also set as a global so other addons can find it by name - by the
+        // code creating it, so a frame an addon names is a global that addon
+        // tainted, as issecurevariable reports in the client.
         lua_pushvalue(L, -1);
         lua_setglobal(L, name);
+        lua_pushstring(L, name);
+        lua_rawsettaint(L, LUA_GLOBALSINDEX, lua_gettaint(L));
     }
 
     // The fifth argument is the frame's id, and it has to be in place before
@@ -7074,6 +7080,9 @@ static int lua_CreateFrame(lua_State* L) {
     // Applied after the metatable, so the template's body can call methods on
     // what it is given.
     if (const char* templates = lua_isstring(L, 4) ? lua_tostring(L, 4) : nullptr) {
+        // What a template declares is the client building the frame, not a
+        // script changing it, so lockdown does not apply to it.
+        taint::ConstructionScope building;
         const std::string list(templates);
         size_t start = 0;
         while (start <= list.size()) {
@@ -7212,11 +7221,15 @@ bool LuaEngine::initialize() {
     gcInCycle_ = false;
     gcAutoFallback_ = false;
 
-    // Open safe standard libraries (no io, os, debug, package)
+    // Open safe standard libraries (no io, os, debug, package). Marked as the
+    // standard library, which is transparent to taint: rawset, table.insert or
+    // pcall act for whoever called them (see lua.h).
+    lua_setmarkstdlib(L_, 1);
     luaopen_base(L_);
     luaopen_table(L_);
     luaopen_string(L_);
     luaopen_math(L_);
+    lua_setmarkstdlib(L_, 0);
 
     // Remove unsafe globals from base library.
     //
@@ -7299,10 +7312,8 @@ bool LuaEngine::initialize() {
         "function mt:IsFrameType(t) return self:IsObjectType(t) end\n"
         // Whether insecure code may change this frame now: always out of
         // combat, and in combat only for a frame that is not protected.
-        "function mt:CanChangeAttribute()\n"
-        "  return not InCombatLockdown() or not self:IsProtected()\n"
-        "end\n"
-        "mt.CanChangeProtectedState = mt.CanChangeAttribute\n"
+        // CanChangeAttribute and CanChangeProtectedState are bound in
+        // addons/lua_taint.cpp: they answer for the running code's taint too.
         // A setter kept, a getter added; the setter's own work, where it has
         // any, still runs.
         "local function pair(setName, getName, key, default)\n"
@@ -7378,6 +7389,10 @@ bool LuaEngine::initialize() {
         "  local t = byType[self:GetObjectType()]\n"
         "  return (t and t[name]) and true or false\n"
         "end\n");
+
+    // Taint and secure execution: after everything above, so the client's own
+    // issecure, securecall, hooksecurefunc and IsProtected are the ones left.
+    taint::registerAPI(L_);
 
     // Last, so every bootstrap block above reads a _G that answers honestly.
     installMissingApiFallback();
@@ -8498,23 +8513,10 @@ void LuaEngine::registerCoreAPI() {
         "    local handler = self.__scripts and self.__scripts.OnAttributeChanged\n"
         "    if handler then handler(self, name, value) end\n"
         "end\n"
-        // (isProtected, isProtectedExplicitly). Explicit: the frame was
-        // declared protected="true" or inherits a template that was
-        // (SecureFrameTemplate and everything built on it). Implicit: an
-        // ancestor is - a protected frame's children move with it, so they
-        // are protected too. UIParent is declared protected, which makes
-        // nearly everything implicitly protected, as in the real client.
-        "function mt:IsProtected()\n"
-        "    self = realFrame(self)\n"
-        "    if rawget(self, '__protected') then return true, true end\n"
-        "    local p = self:GetParent()\n"
-        "    local guard = 0\n"
-        "    while p and guard < 64 do\n"
-        "        if rawget(realFrame(p), '__protected') then return true, false end\n"
-        "        p = p:GetParent(); guard = guard + 1\n"
-        "    end\n"
-        "    return nil, nil\n"
-        "end\n"
+        // IsProtected is the client's rule now (WidgetTree::isProtected,
+        // bound in addons/lua_taint.cpp): declared, or something protected
+        // depends on the frame. It used to count a protected ancestor, which
+        // made everything under UIParent (declared protected) protected.
         // The three-argument form names one attribute in pieces, and falls
         // back to the bare name when no piece-specific value was set - which
         // is how every action button works. ActionButton_OnLoad sets "type",
@@ -9290,24 +9292,8 @@ void LuaEngine::registerCoreAPI() {
         "__WoweeClientChatAddMessage = DEFAULT_CHAT_FRAME.AddMessage\n"
     );
 
-    // hooksecurefunc - hook a function to run additional code after it
-    bootstrap(
-        "function hooksecurefunc(tblOrName, nameOrFunc, funcOrNil)\n"
-        "    local tbl, name, hook\n"
-        "    if type(tblOrName) == 'table' then\n"
-        "        tbl, name, hook = tblOrName, nameOrFunc, funcOrNil\n"
-        "    else\n"
-        "        tbl, name, hook = _G, tblOrName, nameOrFunc\n"
-        "    end\n"
-        "    local orig = tbl[name]\n"
-        "    if type(orig) ~= 'function' then return end\n"
-        "    tbl[name] = function(...)\n"
-        "        local r = {orig(...)}\n"
-        "        hook(...)\n"
-        "        return unpack(r)\n"
-        "    end\n"
-        "end\n"
-    );
+    // hooksecurefunc, securecall, issecure and the rest of the taint
+    // vocabulary are the client's: see addons/lua_taint.cpp.
 
     // GetItemIcon(item) - the item's icon, which GetItemInfo also answers;
     // LibActionButton draws an item on a bar with it.
@@ -10272,36 +10258,17 @@ void LuaEngine::registerCoreAPI() {
         "  if type(fn) ~= 'function' then error('Usage: seterrorhandler(errfunc)', 2) end\n"
         "  _errorHandler = function(err) __WoweeReportError(err) return fn(err) end\n"
         "end\n"
-        // A name is as valid as a function here, and FrameXML mostly passes a
-        // name: UIDropDownMenu_Initialize does
-        // securecall("UIDropDownMenu_InitializeHelper", frame), and the helper
-        // is what sets UIDROPDOWNMENU_INIT_MENU and zeroes every list's
-        // numButtons. Accepting only a function meant that call did nothing at
-        // all, silently, and eight files died further on indexing what it
-        // should have set.
-        //
-        // rawget, so a name this client does not have stays nil rather than
-        // becoming the missing-API object, which is not callable as a function.
-        "function securecall(fn, ...)\n"
-        "    if type(fn) == 'string' then fn = rawget(_G, fn) end\n"
-        "    if type(fn) == 'function' then return fn(...) end\n"
-        "end\n"
+        // securecall is the client's, with the rest of the taint vocabulary:
+        // see addons/lua_taint.cpp.
         // WoW's own names for indexing the global table, which predate _G being
         // exposed and are still what a good deal of 3.3.5 code is written with.
         // Blizzard_DebugTools calls getglobal at file scope and failed to load
         // whole without it.
         "function getglobal(n) return _G[n] end\n"
         "function setglobal(n, v) _G[n] = v end\n"
-        // The rest of the taint vocabulary, which is a no-op here for the same
-        // reason issecure is: nothing in this client is tainted, so nothing
-        // needs protecting from it. Both are called for their effect and their
-        // return value respectively, and both were missing - forceinsecure at
-        // nine call sites and scrub at ten.
+        // forceinsecure, issecure and issecurevariable are the client's, with
+        // the rest of the taint vocabulary: see addons/lua_taint.cpp.
         //
-        // /dump found it. DevTools_DumpCommand calls forceinsecure() on its
-        // first line, so the command raised rather than dumping - which only
-        // became reachable at all once Blizzard_DebugTools started loading.
-        "function forceinsecure() end\n"
         // scrub keeps what can cross the secure boundary and drops the rest:
         // strings, numbers and booleans pass, everything else becomes nil.
         // The count has to survive, because securehandlers.lua returns it
@@ -10319,24 +10286,6 @@ void LuaEngine::registerCoreAPI() {
         "end\n"
         // Iterating a table the secure way, which for our purposes is next.
         "SecureNext = next\n"
-        // Secure, because nothing here is tainted.
-        //
-        // These answered false, which is the opposite of the premise written
-        // above them: taint is what makes code insecure, no addon here taints
-        // anything, so every call site is secure and WoW would say so. False
-        // told the interface it was running tainted and sent it down the
-        // defensive branch everywhere.
-        //
-        // The cost was a reported bug with no error behind it.
-        // ActionButton_ShowGrid increments its counter only `if (issecure())`
-        // and shows the button only once that counter reaches one - so the
-        // empty slots of the action bar never appeared while something was on
-        // the cursor. Dragging a spell to the bar therefore had nothing to
-        // land on: the press went to MainMenuBar, which is the strip behind
-        // them and takes no drop, and the spell stayed on the cursor. Bag to
-        // bag worked the whole time, because those buttons are always shown.
-        "function issecurevariable(...) return true end\n"
-        "function issecure() return true end\n"
         // GetCVarBool wraps C-side GetCVar (registered in table) for boolean queries
         // Misc compatibility stubs
         // GetScreenWidth, GetScreenHeight, GetNumLootItems are now C functions
@@ -11051,7 +11000,12 @@ void LuaEngine::fireEvent(const std::string& eventName,
         fireClassicCombatLine(args);
         return;
     }
+    // Combat lockdown starts once PLAYER_REGEN_DISABLED has been delivered
+    // and ends before PLAYER_REGEN_ENABLED is, so the handlers of each - the
+    // last and first chance to rearrange protected frames - are not locked.
+    if (eventName == "PLAYER_REGEN_ENABLED") taint::setCombatLockdown(false);
     dispatchEvent(eventName, args);
+    if (eventName == "PLAYER_REGEN_DISABLED") taint::setCombatLockdown(true);
 }
 
 void LuaEngine::dispatchEvent(const std::string& eventName,
@@ -12119,6 +12073,7 @@ bool LuaEngine::dispatchBindingKey(int sdlKeycode, bool shift, bool ctrl, bool a
 
 bool LuaEngine::dispatchBindingInput(const std::string& key, bool shift, bool ctrl, bool alt, bool down) {
     if (!L_ || key.empty()) return false;
+    const taint::HardwareEventScope hardware;  // a key: see lua_taint.hpp
     if (!down) {
         auto held = heldBindings_.find(key);
         if (held == heldBindings_.end()) return false;
@@ -12333,6 +12288,7 @@ void LuaEngine::dispatchFrameChar(const char* utf8) {
 
 bool LuaEngine::dispatchFrameKey(int sdlKeycode, bool down, int bindingKeycode, int modifiers) {
     if (!L_) return false;
+    const taint::HardwareEventScope hardware;
     const ScopedCaptureModifiers captureModifiers(bindingCaptureModifiers_, modifiers);
     const int identity = bindingKeycode ? bindingKeycode : sdlKeycode;
     auto held = heldFrameKeys_.find(identity);
@@ -12376,6 +12332,7 @@ void LuaEngine::releaseInput() {
 
 void LuaEngine::dispatchKey(int sdlKeycode, bool ctrlHeld) {
     if (!L_ || focusedWid_ == 0) return;
+    const taint::HardwareEventScope hardware;
     auto* w = widgets_.get(focusedWid_);
     if (!w || !w->isEditBox) return;
 
@@ -13050,6 +13007,7 @@ void LuaEngine::noteMouseModifiers(int button, int modifiers) {
 
 void LuaEngine::dispatchMouse(float x, float y, float screenH, MouseButtons buttons) {
     if (!L_) return;
+    const taint::HardwareEventScope hardware;  // the mouse: see lua_taint.hpp
     // The cursor arrives in window pixels measured from the top, and the tree
     // is in interface units measured from the bottom. ui::mouseToTreeSpace is
     // the one definition of that conversion - the link rects a draw pass files
@@ -14560,6 +14518,8 @@ bool LuaEngine::executeFile(const std::string& path) {
         source.erase(0, 3);
     }
     const std::string chunkName = "@" + path;
+    // Interface source: FrameXML's secure, an addon's tainted by the addon.
+    taint::SourceLoadScope taintScope(L_, taint::idForAddon(addonContext_));
     int err = runChunk(L_, source.c_str(), source.size(), chunkName.c_str(), &addonContext_);
     if (err != 0) {
         const char* errMsg = lua_tostring(L_, -1);
@@ -14618,6 +14578,16 @@ bool LuaEngine::executeString(const std::string& code, const std::string& chunkN
     if (!L_) return false;
 
     BudgetGuard guard(L_, chunkTimeoutMs_);
+    // "@path" is interface or addon source - the Lua an XML file was turned
+    // into - and carries that source's taint. Anything else is the client's
+    // own Lua, which is transparent to taint.
+    const bool isSource = !chunkName.empty() && chunkName[0] == '@';
+    std::optional<taint::SourceLoadScope> taintScope;
+    std::optional<taint::ConstructionScope> building;
+    if (isSource) {
+        taintScope.emplace(L_, taint::idForAddon(addonContext_));
+        building.emplace();
+    }
     int err = runChunk(L_, code.c_str(), code.size(), chunkName.c_str());
     if (err != 0) {
         const char* errMsg = lua_tostring(L_, -1);

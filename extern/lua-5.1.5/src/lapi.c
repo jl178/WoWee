@@ -559,7 +559,11 @@ LUA_API void lua_rawget (lua_State *L, int idx) {
   lua_lock(L);
   t = index2adr(L, idx);
   api_check(L, ttistable(t));
-  setobj2s(L, L->top - 1, luaH_get(hvalue(t), L->top - 1));
+  {
+    const TValue *res = luaH_get(hvalue(t), L->top - 1);
+    luaV_taintread(L, res);
+    setobj2s(L, L->top - 1, res);
+  }
   lua_unlock(L);
 }
 
@@ -569,7 +573,11 @@ LUA_API void lua_rawgeti (lua_State *L, int idx, int n) {
   lua_lock(L);
   o = index2adr(L, idx);
   api_check(L, ttistable(o));
-  setobj2s(L, L->top, luaH_getnum(hvalue(o), n));
+  {
+    const TValue *res = luaH_getnum(hvalue(o), n);
+    luaV_taintread(L, res);
+    setobj2s(L, L->top, res);
+  }
   api_incr_top(L);
   lua_unlock(L);
 }
@@ -867,6 +875,18 @@ LUA_API int lua_load (lua_State *L, lua_Reader reader, void *data,
   if (!chunkname) chunkname = "?";
   luaZ_init(L, &z, reader, data);
   status = luaD_protectedparser(L, &z, chunkname);
+  if (status == 0) {
+    /* WOWEE: whose code this is. Loaded by the client's own code (the host,
+       one of its C functions, its own Lua) it is the client's, unless the
+       client said it is loading interface or addon source; loaded by
+       ordinary Lua (loadstring) it is whoever is running. */
+    Closure *cl = clvalue(L->top - 1);
+    int mode = G(L)->loadsystem;
+    if (mode == LUA_LOAD_SYSTEM || (mode == LUA_LOAD_AUTO && !luaV_tainttracked(L)))
+      cl->l.taint = LUA_TAINT_SYSTEM;
+    else
+      cl->l.taint = G(L)->taint;
+  }
   lua_unlock(L);
   return status;
 }
@@ -1085,3 +1105,69 @@ LUA_API const char *lua_setupvalue (lua_State *L, int funcindex, int n) {
   return name;
 }
 
+
+
+
+/*
+** WOWEE: taint (see lua.h)
+*/
+
+LUA_API int lua_gettaint (lua_State *L) {
+  return G(L)->taint;
+}
+
+LUA_API void lua_settaint (lua_State *L, int taint) {
+  G(L)->taint = taint > 0 ? taint : 0;
+}
+
+LUA_API int lua_rawgettaint (lua_State *L, int idx) {
+  StkId t;
+  int taint;
+  lua_lock(L);
+  t = index2adr(L, idx);
+  api_check(L, ttistable(t));
+  taint = luaH_get(hvalue(t), L->top - 1)->taint;
+  L->top--;
+  lua_unlock(L);
+  return taint;
+}
+
+LUA_API void lua_rawsettaint (lua_State *L, int idx, int taint) {
+  StkId t;
+  const TValue *slot;
+  lua_lock(L);
+  t = index2adr(L, idx);
+  api_check(L, ttistable(t));
+  slot = luaH_get(hvalue(t), L->top - 1);
+  if (slot != luaO_nilobject)
+    ((TValue *)slot)->taint = taint > 0 ? taint : 0;
+  L->top--;
+  lua_unlock(L);
+}
+
+LUA_API int lua_getfunctaint (lua_State *L, int idx) {
+  StkId o = index2adr(L, idx);
+  if (!ttisfunction(o)) return 0;
+  return clvalue(o)->c.taint;
+}
+
+LUA_API void lua_setfunctaint (lua_State *L, int idx, int taint) {
+  StkId o = index2adr(L, idx);
+  if (ttisfunction(o)) clvalue(o)->c.taint = taint;
+}
+
+LUA_API void lua_setloadsystem (lua_State *L, int on) {
+  G(L)->loadsystem = cast_byte(on);
+}
+
+LUA_API int lua_getloadsystem (lua_State *L) {
+  return G(L)->loadsystem;
+}
+
+LUA_API void lua_setmarkstdlib (lua_State *L, int on) {
+  G(L)->markstdlib = cast_byte(on != 0);
+}
+
+LUA_API int lua_istainttracked (lua_State *L) {
+  return luaV_tainttracked(L);
+}

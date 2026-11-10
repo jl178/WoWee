@@ -1412,12 +1412,6 @@ static int lua_PetCanBeAbandoned(lua_State* L) {
     return 1;
 }
 
-static int lua_InCombatLockdown(lua_State* L) {
-    auto* gh = getGameHandler(L);
-    lua_pushboolean(L, gh && gh->isInCombat());
-    return 1;
-}
-
 static int lua_IsMounted(lua_State* L) {
     auto* gh = getGameHandler(L);
     lua_pushboolean(L, gh && gh->isMounted());
@@ -2925,7 +2919,6 @@ void registerUnitLuaAPI(lua_State* L) {
                 {"UnitGUID",          lua_UnitGUID},
                 {"UnitIsPlayer",      lua_UnitIsPlayer},
                 {"UnitPVPName",       lua_UnitPVPName},
-                {"InCombatLockdown",  lua_InCombatLockdown},
                 {"UnitDistanceSquared", lua_UnitDistanceSquared},
                 {"CheckInteractDistance", lua_CheckInteractDistance},
                 {"UnitInRange",           lua_UnitInRange},

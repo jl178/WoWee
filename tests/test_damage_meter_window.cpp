@@ -221,6 +221,11 @@ TEST_CASE("a frame of the meter window makes no garbage", "[meterwindow]") {
         -- A first stretch to let the interpreter grow its call stack once,
         -- which it does on a collect and is not the window's doing.
         for _ = 1, 100 do tick(driver, 0.016) end
+        -- And one stretch the same as the measured one: the first run of
+        -- this loop grows the interpreter once more (a single ~1 KB step a
+        -- few ticks in, flat after it), which is the interpreter settling,
+        -- not garbage a frame makes.
+        for _ = 1, 2000 do tick(driver, 0.016) end
         local before = collectgarbage('count')
         for _ = 1, 2000 do tick(driver, 0.016) end
         local grown = collectgarbage('count') - before

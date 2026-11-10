@@ -101,6 +101,10 @@ struct Widget {
     std::vector<Anchor> anchors;
     float width = 0.0f;
     float height = 0.0f;
+    /// Declared protected="true", or built from a template that was
+    /// (SecureFrameTemplate and everything on it). See WidgetTree::isProtected
+    /// for the frames that are protected because of one of these.
+    bool protectedExplicit = false;
     bool shown = true;
     float alpha = 1.0f;
     /// Whether this frame takes the mouse. False by default, as in WoW, where a
@@ -875,6 +879,17 @@ public:
     [[nodiscard]] const Widget* get(uint32_t id) const;
     [[nodiscard]] size_t size() const { return widgets_.size(); }
 
+    /// Whether a frame is protected, as the client decides it
+    /// (CSimpleFrame, 0x00489BB0): declared so, or something protected
+    /// depends on it - a protected frame is its child (at any depth) or is
+    /// anchored to it. Moving or hiding either would move or hide the
+    /// protected frame, so insecure code may not do that in combat either.
+    /// The parent of a secure unit button is protected; a frame merely
+    /// parented to UIParent (which is declared protected) is not.
+    /// `explicitOut` answers whether it was declared rather than implied.
+    [[nodiscard]] bool isProtected(uint32_t id, bool* explicitOut = nullptr) const;
+    void setProtectedExplicit(uint32_t id, bool on);
+
     /// Anchor helpers. clearPoints is SetPoint's implicit reset when a frame is
     /// re-anchored from scratch, and what SetAllPoints does before pinning both
     /// corners.
@@ -1363,6 +1378,12 @@ private:
     /// Bumped whenever anything moves. A widget resolved in this generation
     /// needs no further work; one from an older generation is stale.
     uint64_t layoutGeneration_ = 1;
+    /// isProtected's answers, worked out for the whole tree at once and kept
+    /// until anything moves or a declaration changes.
+    uint64_t protectionGeneration_ = 1;
+    mutable uint64_t protectionCacheLayoutGen_ = 0;
+    mutable uint64_t protectionCacheGen_ = 0;
+    mutable std::vector<uint8_t> protectionCache_;
     // What the last full pass cost and whether it needed to run. Read by the
     // frame profile; see WidgetTree::layout.
     double lastWalkMs_ = 0.0;

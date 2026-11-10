@@ -25,6 +25,7 @@ Closure *luaF_newCclosure (lua_State *L, int nelems, Table *e) {
   luaC_link(L, obj2gco(c), LUA_TFUNCTION);
   c->c.isC = 1;
   c->c.env = e;
+  c->c.taint = G(L)->markstdlib ? LUA_TAINT_STDLIB : 0;
   c->c.nupvalues = cast_byte(nelems);
   return c;
 }
@@ -35,6 +36,9 @@ Closure *luaF_newLclosure (lua_State *L, int nelems, Table *e) {
   luaC_link(L, obj2gco(c), LUA_TFUNCTION);
   c->l.isC = 0;
   c->l.env = e;
+  /* WOWEE: a chunk takes the taint of whoever is loading it; OP_CLOSURE
+     then gives a nested function the taint of the code it is written in */
+  c->l.taint = G(L)->taint;
   c->l.nupvalues = cast_byte(nelems);
   while (nelems--) c->l.upvals[nelems] = NULL;
   return c;

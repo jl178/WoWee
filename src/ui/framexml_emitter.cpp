@@ -1014,6 +1014,7 @@ struct Emitter {
         // stopped working the moment combat began.
         if (node.attrBool("protected")) {
             line("rawset(" + var + ", '__protected', true)");
+            line("__WoweeSetProtected(" + var + ")");
         }
 
         if (const XmlNode* size = node.child("Size")) {

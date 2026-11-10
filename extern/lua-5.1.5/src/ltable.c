@@ -33,6 +33,7 @@
 #include "lobject.h"
 #include "lstate.h"
 #include "ltable.h"
+#include "lvm.h"
 
 
 /*
@@ -74,7 +75,7 @@
 
 static const Node dummynode_ = {
   {{NULL}, LUA_TNIL},  /* value */
-  {{{NULL}, LUA_TNIL, NULL}}  /* key */
+  {{{NULL}, LUA_TNIL, 0, NULL}}  /* key (WOWEE: and its taint) */
 };
 
 
@@ -164,6 +165,7 @@ int luaH_next (lua_State *L, Table *t, StkId key) {
   for (i++; i < t->sizearray; i++) {  /* try first array part */
     if (!ttisnil(&t->array[i])) {  /* a non-nil value? */
       setnvalue(key, cast_num(i+1));
+      luaV_taintread(L, &t->array[i]);
       setobj2s(L, key+1, &t->array[i]);
       return 1;
     }
@@ -171,6 +173,7 @@ int luaH_next (lua_State *L, Table *t, StkId key) {
   for (i -= t->sizearray; i < sizenode(t); i++) {  /* then hash part */
     if (!ttisnil(gval(gnode(t, i)))) {  /* a non-nil value? */
       setobj2s(L, key, key2tval(gnode(t, i)));
+      luaV_taintread(L, gval(gnode(t, i)));
       setobj2s(L, key+1, gval(gnode(t, i)));
       return 1;
     }

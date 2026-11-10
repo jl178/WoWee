@@ -52,6 +52,8 @@ typedef struct CallInfo {
   const Instruction *savedpc;
   int nresults;  /* expected number of results from this function */
   int tailcalls;  /* number of tail calls lost under this entry */
+  int savedtaint;  /* WOWEE: execution taint to restore when this call ends */
+  lu_byte restoretaint;  /* WOWEE: whether to restore it */
 } CallInfo;
 
 
@@ -91,6 +93,9 @@ typedef struct global_State {
   UpVal uvhead;  /* head of double-linked list of all open upvalues */
   struct Table *mt[NUM_TAGS];  /* metatables for basic types */
   TString *tmname[TM_N];  /* array with tag-method names */
+  int taint;  /* WOWEE: the taint of the running execution, 0 when secure */
+  lu_byte loadsystem;  /* WOWEE: chunks loaded now are the client's own */
+  lu_byte markstdlib;  /* WOWEE: C closures made now are standard library */
 } global_State;
 
 

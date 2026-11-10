@@ -241,6 +241,42 @@ LUA_API int   (lua_next) (lua_State *L, int idx);
 LUA_API void  (lua_concat) (lua_State *L, int n);
 
 LUA_API lua_Alloc (lua_getallocf) (lua_State *L, void **ud);
+
+/*
+** WOWEE: taint, as World of Warcraft's interface Lua keeps it.
+**
+** A taint is a small positive number naming whoever is responsible (the
+** client keeps the names); 0 is secure. The execution carries one, which it
+** picks up by running code compiled from a tainted source or by reading a
+** tainted table slot, and every table slot remembers the taint of the code
+** that last stored into it. Code compiled while lua_setloadsystem is on is
+** the client's own: it is transparent, neither tainting what it stores nor
+** picking up taint from what it reads, and a call it makes into ordinary Lua
+** runs that Lua with the callee's own taint and restores the caller's after -
+** which is how the client's C code calls script handlers. A C function that
+** is not part of the standard library is treated the same way.
+*/
+#define LUA_TAINT_SYSTEM	(-1)
+#define LUA_TAINT_STDLIB	(-2)
+LUA_API int   (lua_gettaint) (lua_State *L);
+LUA_API void  (lua_settaint) (lua_State *L, int taint);
+/* key on top: answers the taint of t[key] (raw) and pops the key */
+LUA_API int   (lua_rawgettaint) (lua_State *L, int idx);
+/* key on top: sets the taint of the existing slot t[key] and pops the key */
+LUA_API void  (lua_rawsettaint) (lua_State *L, int idx, int taint);
+LUA_API int   (lua_getfunctaint) (lua_State *L, int idx);
+LUA_API void  (lua_setfunctaint) (lua_State *L, int idx, int taint);
+/* whose code lua_load makes: AUTO is the client's when the client loads it
+   and the running code's when Lua loads it (loadstring); SOURCE is always the
+   running taint (interface and addon files); SYSTEM always the client's */
+#define LUA_LOAD_AUTO	0
+#define LUA_LOAD_SYSTEM	1
+#define LUA_LOAD_SOURCE	2
+LUA_API void  (lua_setloadsystem) (lua_State *L, int mode);
+LUA_API int   (lua_getloadsystem) (lua_State *L);
+LUA_API void  (lua_setmarkstdlib) (lua_State *L, int on);
+/* 1 when the running code is ordinary (taint-tracked) Lua */
+LUA_API int   (lua_istainttracked) (lua_State *L);
 LUA_API void lua_setallocf (lua_State *L, lua_Alloc f, void *ud);
 
 

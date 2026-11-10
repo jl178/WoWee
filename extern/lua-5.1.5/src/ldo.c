@@ -28,6 +28,34 @@
 #include "ltm.h"
 #include "lundump.h"
 #include "lvm.h"
+
+
+/*
+** WOWEE: what a call does to the execution's taint, decided as the callee
+** is entered (before its CallInfo is pushed, so L->ci is the caller).
+**
+** From ordinary Lua the callee's taint is simply picked up: running code that
+** an addon wrote taints the execution, and it stays tainted when that code
+** returns. From the client's own code - the host, a C function of the
+** client's, or Lua compiled as the client's - the call is a script handler
+** being run: it runs with the callee's own taint, whatever the caller's was,
+** and the caller's taint is put back when it returns.
+*/
+static void taint_enter (lua_State *L, CallInfo *newci, Closure *callee,
+                         int tracked) {
+  newci->restoretaint = 0;
+  newci->savedtaint = 0;
+  if (callee->c.isC || callee->l.taint == LUA_TAINT_SYSTEM) return;
+  if (tracked) {
+    if (callee->l.taint > 0 && G(L)->taint == 0)
+      G(L)->taint = callee->l.taint;
+  }
+  else {
+    newci->restoretaint = 1;
+    newci->savedtaint = G(L)->taint;
+    G(L)->taint = callee->l.taint > 0 ? callee->l.taint : 0;
+  }
+}
 #include "lzio.h"
 
 
@@ -286,7 +314,11 @@ int luaD_precall (lua_State *L, StkId func, int nresults) {
       base = adjust_varargs(L, p, nargs);
       func = restorestack(L, funcr);  /* previous call may change the stack */
     }
-    ci = inc_ci(L);  /* now `enter' new function */
+    {
+      int tracked = luaV_tainttracked(L);  /* WOWEE: asked of the caller */
+      ci = inc_ci(L);  /* now `enter' new function */
+      taint_enter(L, ci, clvalue(func), tracked);
+    }
     ci->func = func;
     L->base = ci->base = base;
     ci->top = L->base + p->maxstacksize;
@@ -309,6 +341,7 @@ int luaD_precall (lua_State *L, StkId func, int nresults) {
     int n;
     luaD_checkstack(L, LUA_MINSTACK);  /* ensure minimum stack size */
     ci = inc_ci(L);  /* now `enter' new function */
+    ci->restoretaint = 0;
     ci->func = restorestack(L, funcr);
     L->base = ci->base = ci->func + 1;
     ci->top = L->top + LUA_MINSTACK;
@@ -347,6 +380,7 @@ int luaD_poscall (lua_State *L, StkId firstResult) {
   if (L->hookmask & LUA_MASKRET)
     firstResult = callrethooks(L, firstResult);
   ci = L->ci--;
+  if (ci->restoretaint) G(L)->taint = ci->savedtaint;  /* WOWEE */
   res = ci->func;  /* res == final position of 1st result */
   wanted = ci->nresults;
   L->base = (ci - 1)->base;  /* restore base */
@@ -464,6 +498,13 @@ int luaD_pcall (lua_State *L, Pfunc func, void *u,
   status = luaD_rawrunprotected(L, func, u);
   if (status != 0) {  /* an error occurred? */
     StkId oldtop = restorestack(L, old_top);
+    /* WOWEE: unwound calls owed their callers a taint; the outermost wins */
+    {
+      CallInfo *ci;
+      CallInfo *keep = restoreci(L, old_ci);
+      for (ci = L->ci; ci > keep; ci--)
+        if (ci->restoretaint) G(L)->taint = ci->savedtaint;
+    }
     luaF_close(L, oldtop);  /* close eventual pending closures */
     luaD_seterrorobj(L, status, oldtop);
     L->nCcalls = oldnCcalls;

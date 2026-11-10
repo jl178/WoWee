@@ -68,7 +68,16 @@ typedef union {
 ** Tagged Values
 */
 
-#define TValuefields	Value value; int tt
+/*
+** WOWEE: every value slot carries the taint of the code that stored it (0 is
+** secure), the way World of Warcraft's interface Lua does. The field sits in
+** what was padding after `tt', so a TValue is the same size it always was.
+** It is written only where a value is stored into a table (setobj2t) and
+** copied only where a table moves its own slots (setobjt2t); stack copies
+** leave it alone, because on the stack it is the execution that is tainted,
+** not the value.
+*/
+#define TValuefields	Value value; int tt; int taint
 
 typedef struct lua_TValue {
   TValuefields;
@@ -114,7 +123,10 @@ typedef struct lua_TValue {
 
 
 /* Macros to set values */
-#define setnilvalue(obj) ((obj)->tt=LUA_TNIL)
+/* WOWEE: a function, so the slot expression is evaluated once - callers
+   pass things like res++ - while the taint goes with the nil */
+static inline void luaO_setnilvalue_ (TValue *o) { o->tt = LUA_TNIL; o->taint = 0; }
+#define setnilvalue(obj) luaO_setnilvalue_((TValue *)(obj))  /* a TKey too */
 
 #define setnvalue(obj,x) \
   { TValue *i_o=(obj); i_o->value.n=(x); i_o->tt=LUA_TNUMBER; }
@@ -176,9 +188,16 @@ typedef struct lua_TValue {
 #define sethvalue2s	sethvalue
 #define setptvalue2s	setptvalue
 /* from table to same table */
-#define setobjt2t	setobj
-/* to table */
-#define setobj2t	setobj
+#define setobjt2t(L,obj1,obj2) \
+  { const TValue *o2=(obj2); TValue *o1=(obj1); \
+    o1->value = o2->value; o1->tt=o2->tt; o1->taint=o2->taint; \
+    checkliveness(G(L),o1); }
+/* to table: the slot takes the taint of the code storing into it */
+LUAI_FUNC int luaV_taintstore (lua_State *L);
+#define setobj2t(L,obj1,obj2) \
+  { const TValue *o2=(obj2); TValue *o1=(obj1); \
+    o1->value = o2->value; o1->tt=o2->tt; o1->taint=luaV_taintstore(L); \
+    checkliveness(G(L),o1); }
 /* to new object */
 #define setobj2n	setobj
 #define setsvalue2n	setsvalue
@@ -288,9 +307,16 @@ typedef struct UpVal {
 ** Closures
 */
 
+/*
+** WOWEE: `taint' is the taint of the code a Lua closure was compiled from (0
+** secure, LUA_TAINT_SYSTEM for the client's own Lua, which neither carries
+** nor picks up taint). For a C closure it is LUA_TAINT_STDLIB when the
+** function is part of Lua's standard library, which is transparent to taint:
+** what it stores or reads counts as done by its caller.
+*/
 #define ClosureHeader \
 	CommonHeader; lu_byte isC; lu_byte nupvalues; GCObject *gclist; \
-	struct Table *env
+	struct Table *env; int taint
 
 typedef struct CClosure {
   ClosureHeader;

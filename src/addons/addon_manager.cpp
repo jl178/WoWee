@@ -1,5 +1,6 @@
 #include "addons/addon_manager.hpp"
 #include "addons/lua_handler_globals.hpp"
+#include "addons/lua_taint.hpp"
 #include "addons/addon_lua_snippets.hpp"
 #include "addons/lua_api_registrations.hpp"
 
@@ -490,6 +491,10 @@ void AddonManager::loadAllAddons() {
         // nor hidden is about to be on screen twice.
         ui::frameXmlReportUnaccountedElements();
     }
+
+    // The protected functions and frame methods, guarded once everything that
+    // defines them has run and before the first addon does.
+    if (lua_State* L = luaEngine_.getState()) taint::protectFunctions(L);
 
     // Only hand the Lua VM the addons that are actually enabled, so disabled ones
     // don't appear via GetNumAddOns/IsAddOnLoaded either.
@@ -1844,6 +1849,17 @@ bool AddonManager::loadXmlFile(const std::string& path, int depth) {
 }
 
 bool AddonManager::loadAddon(const TocFile& addon) {
+    // Every file of this addon - its .toc's Lua, and the scripts its XML
+    // pulls in - is handed (name, private table) as `...`, and its saved
+    // variables carry its taint. Restored after,
+    // because an addon can LoadAddOn another from its main chunk.
+    struct AddonScope {
+        LuaEngine& engine;
+        std::string previous;
+        ~AddonScope() { engine.setAddonContext(previous); }
+    } addonScope{luaEngine_, luaEngine_.addonContext()};
+    luaEngine_.setAddonContext(addon.addonName);
+
     // Load SavedVariables before addon code (so globals are available at load time)
     auto savedVars = addon.getSavedVariables();
     if (!savedVars.empty()) {
@@ -1868,16 +1884,6 @@ bool AddonManager::loadAddon(const TocFile& addon) {
         ~StockScope() { if (tree) tree->endStockCreation(); }
     } stockScope{stock ? &luaEngine_.widgets() : nullptr};
     if (stock) luaEngine_.widgets().beginStockCreation();
-
-    // Every file of this addon - its .toc's Lua, and the scripts its XML
-    // pulls in - is handed (name, private table) as `...`. Restored after,
-    // because an addon can LoadAddOn another from its main chunk.
-    struct AddonScope {
-        LuaEngine& engine;
-        std::string previous;
-        ~AddonScope() { engine.setAddonContext(previous); }
-    } addonScope{luaEngine_, luaEngine_.addonContext()};
-    luaEngine_.setAddonContext(addon.addonName);
 
     bool success = true;
     for (const auto& filename : addon.files) {
