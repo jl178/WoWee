@@ -186,7 +186,13 @@ summon properties' title).
 **Font and size**: UNIT_NAME_FONT at glyph height 0.99, **THICKOUTLINE**
 (0x7e64d0). The text is **3D world text**: each line is
 `0.2 yd × (model height > 4 ? height × 0.375 : 1)` tall (0x7e5420 × 0.2), so
-it shrinks with distance. There is **no distance fade**.
+it shrinks with distance. There is **no distance fade**, and **no size
+clamp** either way: the string is made with flags 0xC8 (0x80 = 3D,
+0x6BE2B0 -> 0x6C74D0), whose layout keeps the height in yards
+(0x6C0B20 returns it untouched for 3D) and skips the 2D path's pixel
+rounding and its 2-pixel floor (0x6C759B); the glyphs are emitted in view
+space around the name position (0x6C4440) and projected with the world.
+Close to the camera a name is as large as 0.2 yd is at that distance.
 
 **Placement**: the name position (attachment 18). The block is raised by its
 extra lines (0x7e5640 +0x30), so the last line sits on the name position and
