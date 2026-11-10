@@ -340,6 +340,20 @@ TEST_CASE("A binding becomes a listed command and a callable body",
     REQUIRE(has(r.lua, "DoJump();"));
 }
 
+TEST_CASE("A bindings file is a step the loader runs",
+          "[framexml][emit][bindings]") {
+    // The loader runs steps, not r.lua. Without one the file was parsed and
+    // dropped, and no key bound to a bindings.xml command did anything.
+    XmlNode root = parseOrFail(
+        "<Bindings><Binding name=\"NEXTACTIONPAGE\">ActionBar_PageUp();"
+        "</Binding></Bindings>");
+    const EmitResult r = emitFrameXml(root);
+    REQUIRE(r.steps.size() == 1);
+    REQUIRE(r.steps[0].kind == EmitResult::Step::Kind::Lua);
+    REQUIRE(has(r.steps[0].text,
+                "__WoweeBindingScripts[\"NEXTACTIONPAGE\"] = function(keystate)"));
+}
+
 TEST_CASE("A binding without a header adds no row of its own",
           "[framexml][emit][bindings]") {
     XmlNode root = parseOrFail("<Bindings><Binding name=\"JUMP\"/></Bindings>");

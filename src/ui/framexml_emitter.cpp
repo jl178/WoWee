@@ -1737,8 +1737,14 @@ EmitResult emitFrameXml(const XmlNode& rootIn) {
     Emitter e;
     // Bindings carry no frames, so the local every frame file opens with would
     // be an unused declaration in a file that is otherwise all data.
+    // Still one step to run: the loader runs steps, not result.lua, and
+    // without one the whole file was parsed and dropped - no command had a
+    // script, so RunBinding and every key bound to a bindings.xml command
+    // (the action bar page keys among them) did nothing.
     if (root.name == "Bindings") {
         emitBindings(e, root);
+        if (!e.result.lua.empty())
+            e.result.steps.push_back({EmitResult::Step::Kind::Lua, e.result.lua});
         return e.result;
     }
     e.line("local __w = {}");
