@@ -321,57 +321,107 @@ FwLiquid fwLiquidFor(bool isOcean, bool isCanal) {
 // the offset stays bounded and no seam opens between triangles.
 const float FW_FLOW_PERIOD = 2.4;  // seconds
 const float FW_FLOW_SPEED = 1.4;   // yards a second at full flow
+// The lakes' waves, set against Enhanced's Crystal Lake (docs/re/enhanced-water.md
+// 4): the band (yards), the slope of the longest wave, Phillips' L
+// (wind^2 / g, yards), how much a wave across the wind keeps, and the
+// fall-off of the short waves' slope, (lambda / lMax)^FW_TILT (the damping
+// of the small waves that keeps an FFT sea's short ripples faint).
+const float FW_LAKE_LMIN = 0.35;
+const float FW_LAKE_LMAX = 8.0;
+const float FW_LAKE_STEEP = 0.065;
+const float FW_LAKE_WINDL = 0.5;
+const float FW_CROSS = 0.8;
+const float FW_TILT = 0.5;
+// The bend of the crests: cycles of phase across the warp noise (9-yard).
+const float FW_BEND = 2.0;
 
 // Enhanced's surface is an FFT sea: per liquid, up to four FFTTile patches
 // (LiquidTypeXFFTTile; FFTTile columns 0 = patch size in yards, 2 = wind
 // speed). The lakes (1240/1288/1324/1325) take 16, 32 and 64-yard patches at
 // winds of 3-4, the sea (1250) 128-512 yards at 2-6, the canals (1344) one
-// 46-yard patch at 6. At those winds a Phillips spectrum peaks at waves of a
-// few yards: soft, broad, slow ripples. Here a dozen directional waves
-// spread about one wind, wavelengths spaced over each class's band, deep
-// water dispersion (w = sqrt(g k)), slopes summed analytically - no texture,
-// so no tile repeats - each faded out once it is smaller than the pixel.
+// 46-yard patch at 6. Its liquids have no ripple texture at all
+// (LiquidTypeXTexture lists only the six foam maps): every ripple is the
+// FFT's. A Phillips spectrum, A exp(-1 / (k L)^2) / k^4 with L = wind^2 / g,
+// carries the same slope in every octave above its peak and almost none
+// below it; the peak sits at waves of 2 pi L (about 8 yards at wind 3.5).
+// Here sixteen directional waves stand in for it: wavelengths spaced
+// geometrically over each class's band, each weighted by the root of that
+// cut-off and tilted toward the long waves (FW_TILT), spread all round by
+// the golden angle and weaker across the wind (the spectrum's |k.w|^2),
+// deep-water dispersion, the crests bent by a broad noise so they break up.
+// A wave shorter than about two pixels is faded out and its slope variance
+// kept (subVar), which Enhanced's prepass writes beside the slopes and its
+// shading turns into roughness: far water gets a wider, softer sun path
+// instead of sparkling noise.
 // Returns the slope (xy), the summed height (z) and the amplitude sum (w).
-const int FW_WAVES = 12;
+const int FW_WAVES = 16;
 const float FW_TWO_PI = 6.2831853;
 
-vec4 fwWaveSum(vec2 p, float time, float footprint, float waveClass) {
-    // Per class: shortest and longest wavelength (yards), slope amplitude.
-    float lMin = 0.6, lMax = 7.0, steep = 0.07;         // lakes and rivers
-    if (waveClass > 0.5 && waveClass < 1.5) { lMin = 2.5; lMax = 48.0; steep = 0.10; }  // sea
-    if (waveClass > 1.5) { lMin = 1.0; lMax = 9.0; steep = 0.06; }                       // canals
-    const vec2 wind = vec2(0.8, 0.6);
+vec4 fwWaveSum(vec2 p, vec2 bend, float time, vec2 dpx, vec2 dpy, float waveClass, out float subVar) {
+    // Per class: shortest and longest wavelength (yards), the slope of one
+    // wave above the spectrum's peak, and Phillips' L = wind^2 / g (yards).
+    float lMin = FW_LAKE_LMIN, lMax = FW_LAKE_LMAX, steep = FW_LAKE_STEEP, windL = FW_LAKE_WINDL;  // lakes, rivers: wind 3-4
+    if (waveClass > 0.5 && waveClass < 1.5) { lMin = 1.5; lMax = 64.0; steep = 0.07; windL = 2.6; }  // sea: winds 2-6
+    if (waveClass > 1.5) { lMin = 0.5; lMax = 23.0; steep = 0.06; windL = 3.7; }                    // canals: wind 6
     vec2 slope = vec2(0.0);
     float h = 0.0;
     float wsum = 0.0;
+    subVar = 0.0;
+    // Wavelengths spaced geometrically, longest first, stepped by one ratio
+    // (so the loop needs no pow): the wavelength, the frequency (deep
+    // water, sqrt(g k)), the short-wave tilt and Phillips' exponent
+    // (-0.5 / (k L)^2, which goes as lambda^2) all scale per step.
+    float ratio = pow(lMin / lMax, 1.0 / float(FW_WAVES - 1));
+    float lambda = lMax;
+    float w = 0.8 * sqrt(9.8 * FW_TWO_PI / lMax);
+    float wStep = inversesqrt(ratio);
+    float tilt = 1.0;
+    float tiltStep = pow(ratio, FW_TILT);
+    float cutExp = -0.5 * (lMax * lMax) / (FW_TWO_PI * FW_TWO_PI * windL * windL);
+    float cutStep = ratio * ratio;
+    // Directions turned by the golden angle from one wave to the next (all
+    // round the circle, never two alike; a rotation per step, no trig),
+    // weaker across the wind; phases stepped the same way.
+    const vec2 wind = vec2(0.8, 0.6);
+    const float GA_C = -0.7373688, GA_S = 0.6754903;  // cos, sin of 2.39996
+    vec2 dir = vec2(0.6, -0.8);
+    float phase0 = 4.461;
     for (int i = 0; i < FW_WAVES; ++i) {
-        float fi = float(i);
-        // Wavelengths spaced geometrically, longest first; directions spread
-        // +-83 degrees about the wind by a fixed scramble.
-        float lambda = lMax * pow(lMin / lMax, fi / float(FW_WAVES - 1));
-        float ang = (fract(fi * 0.618034 + 0.13) * 2.0 - 1.0) * 1.45;
-        vec2 dir = vec2(wind.x * cos(ang) - wind.y * sin(ang), wind.x * sin(ang) + wind.y * cos(ang));
         float k = FW_TWO_PI / lambda;
-        float w = sqrt(9.8 * k) * 0.8;
-        float phase0 = fract(fi * 0.3819 + 0.71) * FW_TWO_PI;
-        // A wave smaller than about two pixels is only noise.
+        float amp = steep * exp(cutExp) * tilt * (FW_CROSS + (1.0 - FW_CROSS) * abs(dot(dir, wind)));
+        // A wave smaller than about two pixels is only noise: its slope goes
+        // to the roughness instead. Measured along its own direction (how
+        // far its phase runs across a pixel), so a wave seen side-on at a
+        // grazing angle stays while one running toward the eye is filtered.
+        float footprint = abs(dot(dpx, dir)) + abs(dot(dpy, dir));
         float aa = 1.0 - smoothstep(0.5, 1.0, footprint * 2.0 / lambda);
-        // Waves across the wind are weaker (the spectrum's cos^2).
-        float amp = steep * aa * (0.45 + 0.55 * cos(ang) * cos(ang));
-        float arg = k * dot(dir, p) - w * time + phase0;
+        subVar += 0.5 * amp * amp * (1.0 - aa * aa);
+        amp *= aa;
+        // Each wave's phase bent by a broad noise field, a different way per
+        // direction, so its crests break up after a few wavelengths as an
+        // FFT sea's do instead of running on as straight lines.
+        float arg = k * dot(dir, p) - w * time + phase0 + FW_TWO_PI * FW_BEND * dot(dir, bend);
         slope += dir * (amp * cos(arg));
         h += amp / k * sin(arg);
         wsum += amp / k;
+        lambda *= ratio;
+        w *= wStep;
+        tilt *= tiltStep;
+        cutExp *= cutStep;
+        dir = vec2(dir.x * GA_C - dir.y * GA_S, dir.x * GA_S + dir.y * GA_C);
+        phase0 += 2.3995;
     }
     return vec4(slope, h, wsum);
 }
 
-// The surface's normal (xyz) and its height as -1..1 of the waves' reach (w).
-vec4 fwSurfaceNormal(vec2 p, vec2 flow, float time, float dist, float waveClass) {
-    float footprint = max(length(fwidth(p)), 1e-3);
+// The surface's normal (xyz) and its height as -1..1 of the waves' reach (w);
+// the slope variance below the pixel in subVar.
+vec4 fwSurfaceNormal(vec2 p, vec2 flow, float time, float dist, float waveClass, out float subVar) {
+    vec2 dpx = dFdx(p), dpy = dFdy(p);
     // A gentle warp so the crests are not straight lines.
     vec2 warp = vec2(noiseValue(p * 0.11 + 3.1), noiseValue(p * 0.11 - 7.7)) - 0.5;
     vec2 q = p + warp * 2.4;
+    vec2 bend = warp;  // the same noise bends each wave's phase (no second pair)
     vec4 wv;
     if (dot(flow, flow) > 1e-6) {
         // Rivers: the pattern carried down the slope, two phases half a
@@ -379,12 +429,16 @@ vec4 fwSurfaceNormal(vec2 p, vec2 flow, float time, float dist, float waveClass)
         float ph = time / FW_FLOW_PERIOD;
         float fa = fract(ph), fb = fract(ph + 0.5);
         float wA = 1.0 - abs(1.0 - 2.0 * fa);
-        vec4 a = fwWaveSum(q - flow * (fa * FW_FLOW_SPEED * FW_FLOW_PERIOD), time, footprint, waveClass);
-        vec4 b = fwWaveSum(q - flow * (fb * FW_FLOW_SPEED * FW_FLOW_PERIOD) + vec2(5.3, 2.9), time, footprint, waveClass);
+        float vA, vB;
+        vec4 a = fwWaveSum(q - flow * (fa * FW_FLOW_SPEED * FW_FLOW_PERIOD), bend, time, dpx, dpy, waveClass, vA);
+        vec4 b = fwWaveSum(q - flow * (fb * FW_FLOW_SPEED * FW_FLOW_PERIOD) + vec2(5.3, 2.9), bend, time, dpx, dpy, waveClass, vB);
         wv = mix(b, a, wA);
-        wv.xy *= 1.0 + 0.8 * min(length(flow), 1.0);
+        subVar = mix(vB, vA, wA);
+        float chop = 1.0 + 0.8 * min(length(flow), 1.0);
+        wv.xy *= chop;
+        subVar *= chop * chop;
     } else {
-        wv = fwWaveSum(q, time, footprint, waveClass);
+        wv = fwWaveSum(q, bend, time, dpx, dpy, waveClass, subVar);
     }
     vec3 n = normalize(vec3(-wv.xy, 1.0));
     return vec4(n, wv.z / max(wv.w, 1e-3));
@@ -392,19 +446,23 @@ vec4 fwSurfaceNormal(vec2 p, vec2 flow, float time, float dist, float waveClass)
 
 // Brightness of the body's light and of the mirrored surroundings, set side
 // by side against Enhanced's Crystal Lake at 9:27 (docs/re/enhanced-water.md 4).
-const float FW_BODY_AMB = 0.55;
+const float FW_BODY_AMB = 0.58;
 // How much of the colours' own saturation the body keeps, and the green of
 // the shore and trees in what the surface mirrors.
 const float FW_ALBEDO_SAT = 0.15;
 const vec3 FW_SURROUND_TINT = vec3(0.85, 1.0, 0.85);
 const float FW_BODY_SUN = 0.05;
+// How far the ripples' height moves the body between Color_2 and Color_1.
+const float FW_CREST_COLOUR = 0.3;
 const float FW_SURROUND_LIGHT = 0.6;
 const float FW_SURROUND_SHARE = 0.75;
 const float FW_ENV_SAT = 0.1;
-const vec3 FW_BODY_TINT = vec3(0.92, 1.05, 1.0);
+// How much of the stand-in's edge is the ragged skyline (lakes, canals).
+const float FW_SKYLINE = 0.6;
+const vec3 FW_BODY_TINT = vec3(0.95, 1.05, 0.97);
 // The mirrored sky as a grey, a touch green, and dimmer than Light.dbc's
 // rings (Enhanced's far lake reads 0.86 of ours in luma).
-const vec3 FW_ENV_TINT = vec3(0.86, 0.88, 0.85);
+const vec3 FW_ENV_TINT = vec3(0.81, 0.83, 0.86);
 
 // Karis' EnvBRDFApprox, as Enhanced's water evaluates it (F0 0.02).
 float fwEnvBrdf(float roughness, float NdotV) {
@@ -418,6 +476,61 @@ float fwEnvBrdf(float roughness, float NdotV) {
 float fwFoamPattern(vec2 p) {
     float n = noiseValue(p) * 0.55 + noiseValue(p * 2.7 + 17.0) * 0.3 + noiseValue(p * 6.1 - 5.0) * 0.15;
     return n;
+}
+
+// Enhanced's reflectionMode 2: screen-space reflections over its probe. The
+// reflected ray is marched through the scene's depth copy (the scene before
+// the water, so the water never hides what it mirrors) in steps that grow
+// with distance, refined on the first crossing, and the scene's colour read
+// there: the shore, the trees and an island stand in the lake, broken up by
+// the ripples. Returns the colour and its weight (0 = no hit; then the probe
+// stand-in shows). Projected through the copy's own camera, as
+// historyLookup does.
+const int FW_SSR_STEPS = 10;
+const float FW_SSR_MIN_F = 0.03;
+vec4 fwScreenReflection(vec3 P, vec3 R, vec2 screenUV0, float near, float far) {
+    vec4 c0 = projection * (view * vec4(P, 1.0));
+    vec4 h0 = historyViewProj * vec4(P, 1.0);
+    if (c0.w <= 1e-4 || h0.w <= 1e-4) return vec4(0.0);
+    vec2 ndcC = c0.xy / c0.w;
+    float ySign = abs(screenUV0.y - (ndcC.y * 0.5 + 0.5)) <= abs(screenUV0.y - (0.5 - ndcC.y * 0.5)) ? 1.0 : -1.0;
+    vec2 ndcH0 = h0.xy / h0.w;
+    vec2 uvH0 = screenUV0 + vec2(ndcH0.x - ndcC.x, (ndcH0.y - ndcC.y) * ySign) * 0.5;
+    float stepLen = 0.8;
+    float tPrev = 0.0;
+    float t = 0.0;
+    for (int i = 0; i < FW_SSR_STEPS; ++i) {
+        t += stepLen;
+        stepLen *= 1.55;
+        vec4 hc = historyViewProj * vec4(P + R * t, 1.0);
+        if (hc.w <= 1e-3) return vec4(0.0);
+        vec2 ndc = hc.xy / hc.w;
+        vec2 uv = uvH0 + vec2(ndc.x - ndcH0.x, (ndc.y - ndcH0.y) * ySign) * 0.5;
+        if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return vec4(0.0);
+        float sceneLin = linearizeDepth(textureLod(SceneDepth, uv, 0.0).r, near, far);
+        float behind = hc.w - sceneLin;
+        if (behind > 0.0) {
+            // Crossed a surface: thick enough to be the thing in the way
+            // (not a thin post the ray skipped past)? Refine between the
+            // last two points.
+            if (behind > max(2.0, stepLen * 1.5)) return vec4(0.0);
+            float a = tPrev, b = t;
+            for (int j = 0; j < 3; ++j) {
+                float m = 0.5 * (a + b);
+                vec4 hm = historyViewProj * vec4(P + R * m, 1.0);
+                vec2 um = uvH0 + vec2(hm.x / hm.w - ndcH0.x, (hm.y / hm.w - ndcH0.y) * ySign) * 0.5;
+                float sl = linearizeDepth(textureLod(SceneDepth, um, 0.0).r, near, far);
+                if (hm.w > sl) { b = m; uv = um; } else { a = m; }
+            }
+            // Fade toward the copy's edges and at the march's reach.
+            vec2 e = smoothstep(vec2(0.0), vec2(0.06), uv) * smoothstep(vec2(1.0), vec2(0.94), uv);
+            float reach = 1.0 - smoothstep(float(FW_SSR_STEPS - 3), float(FW_SSR_STEPS), float(i));
+            vec3 col = textureLod(SceneColor, uv * hdParams.zw, 0.0).rgb;
+            return vec4(col, e.x * e.y * reach);
+        }
+        tPrev = t;
+    }
+    return vec4(0.0);
 }
 
 void main() {
@@ -493,7 +606,8 @@ void main() {
     // water (the canals).
     float waveClass = (push.depthRamp > 0.5 && push.depthRamp < 1.5) ? 1.0
                     : (push.depthRamp > 1.5 ? 2.0 : 0.0);
-    vec4 fwWave = fw ? fwSurfaceNormal(FragPos.xy, flowDir * flowSpeed, time, dist, waveClass)
+    float fwSubVar = 0.0;
+    vec4 fwWave = fw ? fwSurfaceNormal(FragPos.xy, flowDir * flowSpeed, time, dist, waveClass, fwSubVar)
                      : vec4(0.0, 0.0, 1.0, 0.0);
     vec3 N = fw ? fwWave.xyz
                 : (hdParams.x > 0.5 ? hdSurfaceNormal(FragPos.xy, time, dist) : vec3(0.0, 0.0, 1.0));
@@ -574,9 +688,13 @@ void main() {
             }
 
             // In-scattering: the albedo between Color_2 (troughs) and
-            // Color_1 (crests) by the ripple's height, times (1 - T), lit by
-            // the sky and the sun, forward-scattered toward a low sun (HG).
-            float hgt = clamp(0.5 + fwWave.w, 0.0, 1.0);
+            // Color_1 (crests) by the ripple's height, veiling in with the
+            // depth, lit by the sky and the sun, forward-scattered toward a
+            // low sun (HG). The height moves it only a little: at full
+            // swing the colour followed the long waves' height and drew
+            // broad light and dark bands, twice the capture's ripple
+            // contrast.
+            float hgt = clamp(0.5 + FW_CREST_COLOUR * fwWave.w, 0.0, 1.0);
             vec3 albedo = mix(L.colLow, L.colHigh, hgt);
             albedo = mix(vec3(dot(albedo, vec3(0.299, 0.587, 0.114))), albedo, FW_ALBEDO_SAT);
             float cosVL = dot(-viewDir, ldir);
@@ -590,13 +708,22 @@ void main() {
             // is a blue the water's body does not take on in Enhanced).
             float ambL = dot(amb, vec3(0.299, 0.587, 0.114));
             vec3 inLight = ambL * FW_BODY_TINT * FW_BODY_AMB + sunIn * shadowF * (FW_BODY_SUN + FW_BODY_SUN * hg);
-            vec3 bodyF = albedo * (vec3(1.0) - T) * inLight;
+            // The body grows in over the depth as one veil, not per channel:
+            // per channel, blue (gone within a yard) brought the body's full
+            // blue over a red-brown bed and the shallows went mauve, where
+            // Enhanced's go ochre, then olive, then grey-teal (the capture's
+            // shallows read 102 80 50). The bed still loses blue first.
+            float veil = 1.0 - dot(T, vec3(0.3, 0.55, 0.15));
+            vec3 bodyF = albedo * veil * inLight;
 
             // Reflection: EnvBRDFApprox at F0 0.02 of the environment -
             // Light.dbc's sky by the ring rule, or the planar sky pass.
             vec3 Nr = normalize(mix(vec3(0.0, 0.0, 1.0), N, 0.6));
             float NdotV = max(dot(Nr, viewDir), 1e-3);
-            float F = fwEnvBrdf(0.06, NdotV);
+            // Enhanced's roughness: a glassy base plus the root of the root
+            // of the slope variance the pixel cannot show.
+            float fwRough = clamp(max(0.06, 0.013 + sqrt(sqrt(fwSubVar * 0.5))), 0.0, 1.0);
+            float F = fwEnvBrdf(fwRough, NdotV);
             vec3 R = reflect(-viewDir, Nr);
             R.z = max(R.z, 0.02);
             vec3 env = stockSkyAt(normalize(R));
@@ -619,11 +746,29 @@ void main() {
             // haze. Stand-in: toward the horizon the mirrored sky goes to the
             // fog colour, darkened as the land under it.
             float lowR = 1.0 - smoothstep(0.03, 0.6, R.z);
+            if (!isOcean) {
+                // Round a lake or a canal the surroundings stand to uneven
+                // heights (trees, banks, roofs): a ragged skyline by the
+                // reflected ray's bearing, so the ripples break the mirror
+                // into streaks of shore and sky as Enhanced's probe does,
+                // instead of one smooth fade. The sea's horizon stays open.
+                vec2 az = normalize(R.xy + vec2(1e-4));
+                float n = noiseValue(az * 5.0 + 1.7) * 0.65 + noiseValue(az * 13.0 - 4.1) * 0.35;
+                float skyline = mix(0.06, 0.5, n);
+                lowR = mix(lowR, 1.0 - smoothstep(skyline - 0.04, skyline + 0.04, R.z), FW_SKYLINE);
+            }
             vec3 surround = mix(fogColor.rgb, amb, 0.4) * FW_SURROUND_TINT * FW_SURROUND_LIGHT;
             env = mix(env, surround, lowR * FW_SURROUND_SHARE);
             // Enhanced's mirrored sky is a grey-blue: its probe is relit in
             // its linear light and graded; Light.dbc's sky rings are bluer.
             env = mix(vec3(dot(env, vec3(0.299, 0.587, 0.114))) * FW_ENV_TINT, env, FW_ENV_SAT);
+            // What the screen holds of the surroundings, over the stand-in;
+            // only where the mirror shows (F well over its 0.02 floor:
+            // looking down at the water near the camera it does not).
+            if (composeBed && F > FW_SSR_MIN_F) {
+                vec4 ssr = fwScreenReflection(FragPos, R, screenUV, near, far);
+                env = mix(env, ssr.rgb, ssr.a * smoothstep(FW_SSR_MIN_F, FW_SSR_MIN_F * 1.5, F));
+            }
 
             // The sun's (by night the moon's) highlight: GGX on a calm
             // sheet, Fresnel at the half vector; in the HDR scene it may pass
@@ -636,7 +781,8 @@ void main() {
             float NdotH = max(dot(N, H), 0.0);
             float VdotH = max(dot(viewDir, H), 0.0);
             float NdotL = max(dot(N, Ls), 0.0);
-            const float a2 = 0.05 * 0.05;
+            float ga = max(0.05, fwRough * fwRough);
+            float a2 = ga * ga;
             float dd = NdotH * NdotH * (a2 - 1.0) + 1.0;
             float D = a2 / (3.14159265 * dd * dd);
             float Fh = 0.02 + 0.98 * pow(1.0 - VdotH, 5.0);

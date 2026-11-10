@@ -166,25 +166,42 @@ above:
   that encoding (`T^(1/2.2)`). The body's brightness and hue were set
   numerically against the capture (section 4): the colours keep 15% of their
   saturation, the sky light that reaches into the water is Light.dbc's
-  ambient brightness x 0.55 in a faint green-teal (Light.dbc's ambient is a
+  ambient brightness x 0.58 in a faint green-teal (Light.dbc's ambient is a
   blue Enhanced's water does not take on), the sun x (0.05 + 0.05 HG(g 0.6))
   through Enhanced's Fresnel transmission and sun gate, one shadow-map tap.
   The sun gate and highlight use the sun sprite's own direction
   (`LightingParams::sunDir`, in the sky colours' `.w` of the water's frame
-  block), since the stock light stays up all night. The wave height that
-  picks between the two colours is the waves' own (below).
+  block), since the stock light stays up all night. The body veils in over
+  the depth as one weight, `1 - T . (0.3, 0.55, 0.15)`, not per channel:
+  per channel the body's blue came in within a yard over a red-brown bed and
+  the shallows went mauve (86 63 65 against Enhanced's ochre 102 80 50). The
+  wave height moves the colour between Color_2 and Color_1 by 0.3 of its
+  swing (at full swing it drew the long waves as broad light and dark bands,
+  the largest share of the ripple contrast, twice the capture's).
 - **Waves**: Enhanced's surface is an FFT sea, per liquid up to four `FFTTile`
   patches (`LiquidTypeXFFTTile`; FFTTile column 0 the patch size in yards,
   column 2 the wind speed): the lakes and rivers 16, 32 and 64-yard patches at
   winds of 3-4, the sea 128-512 yards at 2-6, the canals one 46-yard patch at
-  6 - a Phillips spectrum that peaks at waves of a few yards. Wowee sums
-  twelve directional waves analytically (slopes and height, no texture, so
-  no tile repeats): wavelengths spaced geometrically over 0.6-7 yd (lakes),
-  2.5-48 yd (sea), 1-9 yd (canals), spread +-83 degrees about one wind and
-  weaker across it, deep-water dispersion (w = 0.8 sqrt(g k)), each faded out
-  below two pixels, the field warped a little by value noise so crests are
-  not straight. In rivers the field is carried down the flow (below). The
-  stock lake_a/ocean_h frames are no longer read in this mode.
+  6 - a Phillips spectrum that peaks at waves of a few yards. Enhanced has no
+  ripple texture: `LiquidTypeXTexture` gives its PBR liquids only the six
+  foam maps, so every ripple is the FFT's (no scrolled detail normals).
+  Wowee sums sixteen directional waves analytically (slopes and height, no
+  texture, so no tile repeats): wavelengths spaced geometrically over
+  0.35-8 yd (lakes), 1.5-64 yd (sea), 0.5-23 yd (canals), each weighted by
+  the root of Phillips' cut-off `exp(-1 / (k L)^2)` (L = wind^2 / g: 0.5 yd
+  lakes, 2.6 sea, 3.7 canals) and by `(lambda / lMax)^0.5` (the short waves
+  faint, as an FFT sea's damped small waves are), at 0.8 strength across the
+  wind, deep-water dispersion (w = 0.8
+  sqrt(g k)), the directions turned by the golden angle from wave to wave,
+  the field warped by value noise and each wave's phase bent by the same
+  noise (2 cycles across it) so the crests break up after a few
+  wavelengths. A wave is faded out where it is under two pixels measured
+  along its own direction (so waves seen side-on at a grazing angle stay),
+  and its slope variance goes to the roughness as Enhanced's prepass does
+  (`roughness = 0.013 + sqrt(sqrt(variance / 2))`, at least 0.06; it widens
+  the sun path and lowers the environment Fresnel far off). In rivers the
+  field is carried down the flow (below). The stock lake_a/ocean_h frames
+  are not read in this mode.
 - **Refraction**: Enhanced's bend (slope x depth), in view space, eased off
   with distance; refused where the bent tap lands in front of the water.
 - **Reflection**: EnvBRDFApprox at F0 0.02 (Enhanced's), of Light.dbc's sky
@@ -194,8 +211,17 @@ above:
   relit probe of the surroundings; as a stand-in, the lower a reflected ray
   (below 0.6 of the zenith), the more of it (up to 0.75) is the "surroundings":
   the fog colour and the ambient, green-tinted, at 0.6 brightness - the shore,
-  trees and haze. No probe cube or SSR.
-- **Sun and moon**: GGX (alpha 0.05) with Schlick at the half vector, the
+  trees and haze; round lakes and canals (not the sea) its edge is a ragged
+  skyline by the reflected ray's bearing (value noise, 0.06-0.5 of the
+  zenith), so the ripples break the mirror into streaks of shore and sky.
+  The sky part is graded to grey (tint 0.81 0.83 0.86). Over that, Enhanced's
+  SSR (`reflectionMode 2`): the reflected ray marched through the scene's
+  depth copy (10 steps growing x1.55 to ~110 yd, 3 refining), the scene's
+  colour where it crosses something, faded at the copy's edges - islands,
+  posts, bridges, the player stand in the water. Marched only where the
+  Fresnel is over 0.03 (looking down near the camera the mirror does not
+  show). No probe cube.
+- **Sun and moon**: GGX (alpha max(0.05, roughness^2)) with Schlick at the half vector, the
   shadow tap; in the HDR scene up to 6 (it blooms), else 1.2. By night the
   path is the moon's, taken opposite the sun, at 0.35 of the night light
   times dnc.db's night intensity. The planar sky pass's own sun and moon
@@ -235,6 +261,58 @@ little redder (Enhanced's ground textures are its own). The first version
 (blue-first absorption, the colours at full saturation, the sky as it is) read
 38 65 79 near and 79 109 116 far: a saturated blue, as Jered saw.
 
+**The ripples against the capture.** Jered, of the version above: "ripples
+on water dont look like enhanced", then "better but not great still". Measured
+from the capture's own viewpoint (`.go xyz -9474 -110`, facing 4.49, camera
+pitch -28 at 16 yards, 9:27, the regions below line up with the capture's
+island and shore to a few pixels), rendered at the capture's 2560x1080 (at
+1280x540 the finest ripples are lost before the comparison starts) and both
+halved to 1280x540, six frames 0.7 s apart averaged. Per region: luma detail
+under ~6 px (fine: luma minus a sigma-2 blur, std), detail 6-30 px (mid:
+sigma 2 minus sigma 10), and the power-weighted wavelength of the detail
+across (x) and down (y) the screen, in pixels:
+
+| Region (1280x540 px) | Enhanced: mid / fine / wl x / wl y | 89942de | Now |
+|---|---|---|---|
+| deep, near (50,200)-(370,285) | 1.24 / 0.71 / 46 / 19 | 2.51 / 1.81 / 69 / 16 | 1.14 / 0.98 / 57 / 13 |
+| middle (0,130)-(450,195) | 1.58 / 1.78 / 46 / 8.8 | 4.69 / 4.78 / 62 / 9.6 | 1.40 / 2.22 / 36 / 7.3 |
+| middle, wide (150,115)-(750,150) | 1.71 / 2.39 / 32 / 7.5 | 4.39 / 5.40 / 69 / 8.8 | 1.66 / 2.21 / 34 / 9.9 |
+| far (575,50)-(750,100) | 1.32 / 3.12 / 38 / 5.2 | 2.55 / 9.48 / 57 / 4.8 | 1.17 / 3.71 / 44 / 5.0 |
+| shallows by the player (380,200)-(560,280) | 0.67 / 1.00 / 16 / 12 | 1.54 / 1.00 / 68 / 17 | 0.60 / 0.61 / 27 / 14 |
+
+Mean |log ratio| to Enhanced over the regions and the four terms: 0.62
+before, 0.20 now (mid 0.85 -> 0.09, fine 0.77 -> 0.26, wl x 0.67 -> 0.25,
+wl y 0.17 -> 0.19); colour 0.067 -> 0.037. What it took, by how much each
+moved the numbers: the crest-to-trough colour swing was most of the ripple
+contrast (at full swing it painted the long waves' height as broad bands;
+at 0.3 the mid contrast halved and the wavelengths came within 20% of the
+capture's), then the spectrum: equal slope per wave over 0.6-7 yd drew
+"scales" of short ripples near the camera at twice the capture's fine
+detail, where Enhanced's sheet is smooth near and finely streaked far off;
+weighting the short waves down ((lambda / 8)^0.5) and the band 0.35-8 yd
+put both in range. The noise bend shortened the crests across the screen
+(wl x in the middle 77 -> 36-42). The colour of the body and of the shallows:
+deep water within 3 of the capture's channels in the near and middle
+regions, the far lake still 5-6 brighter (it mirrors a stand-in, not the
+trees), the shallows ochre (93 65 51 against 102 80 50) where they were
+mauve (86 63 65).
+
+Not closed: Enhanced's far lake carries dark streaks of the mirrored trees
+(its probe cube); the SSR finds the island, the reeds and the player but
+not trees off the top of the screen, and the stand-in's ragged skyline only
+imitates them. Enhanced's water is also clearer near the shore (its bed
+shapes show under a yard or two more water than ours).
+
+**Cost of the ripple and reflection work** (same method as below, three
+8 s pairs a place; another agent's client shared the Iris Xe throughout, so
+the HD-water reference itself wandered 1.3-2.2 ms between runs and only the
+paired differences mean anything): over HD water the row now costs about
++0.4 to +0.65 ms at the Crystal Lake shore and +0.8 to +1.1 ms where the
+canal fills the view, against +0.0 to +0.06 and +0.13 to +0.18 for
+89942de in the same conditions; the SSR is about a quarter of it, the
+sixteen waves and their filtering the rest. Enhanced-preset only; at
+2560x1080 expect about four times that on this GPU.
+
 **Cost** (lab server, Iris Xe, 1280x540, Enhanced preset at noon, the row off
 (HD water) and on in turn, four 8 s pairs a place, `WOWEE_FRAME_PROFILE=1`,
 the GPU's `water` pass, paired medians):
@@ -263,9 +341,9 @@ scratchpad's `fwater/side_crystal.png` (Enhanced | HD water | this row) and
 `fwater/sheet_r1.png` (the tour).
 
 - Not done: the FFT surface and its whitecaps (Wowee's sheet is flat; the
-  ripples are the stock frames'); the reflection of the surroundings (probe
-  cube / SSR - a five-step SSR cost 0.3 ms at 1280x540 in E34 and was
-  dropped); per-zone liquid types beyond the three classes (swamps, Desolace
+  ripples are sixteen analytic waves shading it); the probe cube of the
+  surroundings (the SSR covers what is on screen, a stand-in the rest);
+  per-zone liquid types beyond the three classes (swamps, Desolace
   and the rest need the area -> LiquidType link Enhanced's ADTs carry); the
   shore distance field (rim foam), which 3.3.5 does not have; the view of
   the world above from under the surface (`bed * T`).
