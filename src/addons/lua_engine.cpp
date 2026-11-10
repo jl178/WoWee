@@ -4430,7 +4430,8 @@ int lua_Texture_SetTexture(lua_State* L) {
     // failure - Halls of Lightning's ready popup showed the Deadmines.
     if (w->solidColor) { lua_pushnumber(L, 1); return 1; }
     if (w->texturePath.empty()) return 0;
-    auto* assets = core::Application::getInstance().getAssetManager();
+    auto* app = core::Application::instanceOrNull();
+    auto* assets = app ? app->getAssetManager() : nullptr;
     if (!assets) { lua_pushnumber(L, 1); return 1; }
     static std::unordered_map<std::string, bool> known;
     auto [it, fresh] = known.try_emplace(w->texturePath, false);

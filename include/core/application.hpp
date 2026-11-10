@@ -133,6 +133,9 @@ public:
 
     // Singleton access
     static Application& getInstance() { return *instance; }
+    /// The same, or null where there is no application - framexml_run runs
+    /// the interface without one.
+    static Application* instanceOrNull() { return instance; }
 
 
 
