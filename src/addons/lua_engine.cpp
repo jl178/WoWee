@@ -1146,8 +1146,24 @@ int lua_Region_GetWidth(lua_State* L) {
     const bool widthBorrowed =
         w && w->kind == wowee::ui::WidgetKind::FontString && w->anchors.empty() &&
         w->width <= 0.0f;
+    // And a font string is as wide as the width it was given, or else as its
+    // text - never as the span its anchors stretch it over
+    // (CSimpleFontString's GetWidth, 0x00483F30: the set width, and the
+    // string's width when that is zero). AceGUI anchors a tab's label to
+    // both sides of the tab and sizes the tab from the label's GetWidth; the
+    // anchored span fed back into it, and every tab grew to the full row.
+    const bool explicitWidth =
+        w && w->kind == wowee::ui::WidgetKind::FontString && !w->autoSized &&
+        w->width > 0.0f;
+    if (explicitWidth) {
+        lua_pushnumber(L, w->width);
+        return 1;
+    }
+    const bool spanned =
+        w && w->kind == wowee::ui::WidgetKind::FontString && !w->anchors.empty();
     if (w && !w->text.empty() && w->kind == wowee::ui::WidgetKind::FontString &&
-        (staleAutoSize || widthBorrowed || (w->rectW <= 0.0f && w->width <= 0.0f))) {
+        (staleAutoSize || widthBorrowed || spanned ||
+         (w->rectW <= 0.0f && w->width <= 0.0f))) {
         // A font string that was never given a width is as wide as its text.
         // That is what WoW answers, and the interface sizes things from it:
         // PanelTemplates_TabResize builds a tab's width out of
