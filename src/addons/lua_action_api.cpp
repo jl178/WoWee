@@ -21,6 +21,7 @@
 #include "game/current_action.hpp"
 #include "game/pet_action.hpp"
 #include "addons/lua_services.hpp"
+#include "addons/lua_taint.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include <cstdlib>
@@ -2665,8 +2666,26 @@ static int lua_RunBinding(lua_State* L) {
     if (!lua_istable(L, -1)) { lua_pop(L, 1); return 0; }
     lua_getfield(L, -1, command.c_str());
     if (!lua_isfunction(L, -1)) { lua_pop(L, 2); return 0; }
+    // With the caller's taint, which is how the client runs it: RunBinding
+    // (0x55FAD0) hands the execution's taint (0xD4139C) to the binding runner
+    // (0x55F860) and refuses nothing itself. So an addon may run a binding,
+    // and whatever protected thing the binding does refuses it as it would
+    // the addon. Called straight from here the binding's FrameXML body would
+    // run secure, since a call from C runs Lua with the callee's own taint;
+    // a one-line trampoline compiled with the caller's taint carries it in.
+    const int callerTaint = lua_gettaint(L);
+    if (callerTaint > 0) {
+        {
+            const taint::SourceLoadScope scope(L, callerTaint);
+            if (luaL_loadstring(L, "local f, s = ... return f(s)") != 0) {
+                lua_pop(L, 3);
+                return 0;
+            }
+        }
+        lua_insert(L, -2);  // trampoline below the binding
+    }
     lua_pushstring(L, keystate);
-    if (lua_pcall(L, 1, 0, 0) != 0) {
+    if (lua_pcall(L, callerTaint > 0 ? 2 : 1, 0, 0) != 0) {
         LOG_WARNING("Binding ", command, " failed: ",
                     lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
         lua_pop(L, 1);

@@ -200,3 +200,30 @@ TEST_CASE("functions returning fewer values than asked still fill with nil", "[l
         0);
     CHECK(f.number("padded") == 1);
 }
+
+TEST_CASE("a call from the client runs secure code secure, a tainted trampoline does not",
+          "[lua][taint]") {
+    // RunBinding's case: the client hands the binding the caller's taint
+    // (Wow.exe 0x55FAD0). Called straight from C, the binding's own taint
+    // wins; through a one-line trampoline compiled with the caller's taint,
+    // the caller's taint is what the binding runs with.
+    Fixture f;
+    f.runSource("function SecureBody(s) seenInBody = taintnow() end", 0);
+
+    lua_settaint(f.L, kAddon);
+    lua_getglobal(f.L, "SecureBody");
+    lua_pushstring(f.L, "down");
+    REQUIRE(lua_pcall(f.L, 1, 0, 0) == 0);
+    lua_settaint(f.L, 0);
+    CHECK(f.number("seenInBody") == 0);
+
+    lua_setloadsystem(f.L, LUA_LOAD_SOURCE);
+    lua_settaint(f.L, kAddon);
+    REQUIRE(luaL_loadstring(f.L, "local f, s = ... return f(s)") == 0);
+    lua_setloadsystem(f.L, LUA_LOAD_AUTO);
+    lua_getglobal(f.L, "SecureBody");
+    lua_pushstring(f.L, "down");
+    REQUIRE(lua_pcall(f.L, 2, 0, 0) == 0);
+    lua_settaint(f.L, 0);
+    CHECK(f.number("seenInBody") == kAddon);
+}

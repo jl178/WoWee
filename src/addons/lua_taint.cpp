@@ -94,6 +94,14 @@ enum class Rule : int {
 /// action bars and picking things up only in combat. Targeting, attacking,
 /// focus and a handful more test the execution's taint themselves (the
 /// functions around 0x0051FF20 and 0x00524FC0) and are refused outright.
+///
+/// Each entry is a registered function whose own code, or a callee a call or
+/// two down, reaches the refusal (0x513530) or the category check. Not here,
+/// because nothing they run tests the taint: DestroyTotem (CMSG_TOTEM_
+/// DESTROYED straight from 0x5197D0), Logout, Quit, ForceQuit, PetStopAttack
+/// and CancelShapeshiftForm. RunBinding is not refused either - it runs the
+/// binding with the caller's taint (0x55FAD0), and the binding is refused by
+/// what it calls.
 struct Protected { const char* name; Rule rule; };
 const Protected kProtected[] = {
     // movement and the camera (category 0)
@@ -112,20 +120,23 @@ const Protected kProtected[] = {
     {"CameraOrSelectOrMoveStart", Rule::Forbidden},
     {"CameraOrSelectOrMoveStop", Rule::Forbidden},
     {"MoveAndSteerStart", Rule::Forbidden}, {"MoveAndSteerStop", Rule::Forbidden},
+    {"VehicleAimUpStart", Rule::Forbidden}, {"VehicleAimUpStop", Rule::Forbidden},
+    {"VehicleAimDownStart", Rule::Forbidden}, {"VehicleAimDownStop", Rule::Forbidden},
     // spells, items and the pet (category 2)
     {"CastSpell", Rule::Forbidden}, {"CastSpellByName", Rule::Forbidden},
     {"CastSpellByID", Rule::Forbidden}, {"CastShapeshiftForm", Rule::Forbidden},
-    {"CancelShapeshiftForm", Rule::Forbidden}, {"CastPetAction", Rule::Forbidden},
+    {"CastPetAction", Rule::Forbidden},
+    {"EnableSpellAutocast", Rule::Forbidden}, {"DisableSpellAutocast", Rule::Forbidden},
+    {"ToggleSpellAutocast", Rule::Forbidden},
     {"TogglePetAutocast", Rule::Forbidden}, {"SpellTargetItem", Rule::Forbidden},
     {"SpellTargetUnit", Rule::Forbidden}, {"SpellStopTargeting", Rule::Forbidden},
     {"SpellStopCasting", Rule::Forbidden}, {"UseAction", Rule::Forbidden},
     {"UseContainerItem", Rule::Forbidden}, {"UseInventoryItem", Rule::Forbidden},
     {"UseItemByName", Rule::Forbidden}, {"UseQuestLogSpecialItem", Rule::Forbidden},
-    {"CancelUnitBuff", Rule::Forbidden}, {"DestroyTotem", Rule::Forbidden},
+    {"CancelUnitBuff", Rule::Forbidden},
     {"PetAttack", Rule::Forbidden}, {"PetFollow", Rule::Forbidden},
     {"PetWait", Rule::Forbidden}, {"PetPassiveMode", Rule::Forbidden},
     {"PetDefensiveMode", Rule::Forbidden}, {"PetAggressiveMode", Rule::Forbidden},
-    {"PetStopAttack", Rule::Forbidden},
     // attacking, targeting and focus (their own taint test)
     {"AttackTarget", Rule::Forbidden}, {"StartAttack", Rule::Forbidden},
     {"StopAttack", Rule::Forbidden}, {"TargetUnit", Rule::Forbidden},
@@ -144,8 +155,6 @@ const Protected kProtected[] = {
     {"StopMacro", Rule::Forbidden}, {"SetPartyAssignment", Rule::Forbidden},
     {"ClearPartyAssignment", Rule::Forbidden},
     // the rest that test the execution's taint themselves
-    {"RunBinding", Rule::Forbidden}, {"Logout", Rule::Forbidden},
-    {"Quit", Rule::Forbidden}, {"ForceQuit", Rule::Forbidden},
     {"RegisterForSave", Rule::Forbidden}, {"RegisterForSavePerCharacter", Rule::Forbidden},
     // GM tickets (category 17)
     {"NewGMTicket", Rule::Forbidden}, {"UpdateGMTicket", Rule::Forbidden},
@@ -156,6 +165,12 @@ const Protected kProtected[] = {
     {"AcceptProposal", Rule::Hardware}, {"SearchLFGJoin", Rule::Hardware},
     {"SearchLFGLeave", Rule::Hardware}, {"CalendarAddEvent", Rule::Hardware},
     {"CalendarUpdateEvent", Rule::Hardware},
+    // the battleground queue (20)
+    {"JoinBattlefield", Rule::Hardware}, {"AcceptBattlefieldPort", Rule::Hardware},
+    // their own test, tainted and no key or click behind it (0x51AC90,
+    // 0x5222E0, 0x522E30, 0x51A7A0)
+    {"CancelLogout", Rule::Hardware}, {"ReloadUI", Rule::Hardware},
+    {"SetCurrentTitle", Rule::Hardware}, {"UninviteUnit", Rule::Hardware},
     // raid groups (11), macro editing (12), bindings (13), the action bars and
     // the cursor (14), equipping (22): only in combat
     {"SetRaidSubgroup", Rule::Combat}, {"SwapRaidSubgroup", Rule::Combat},
@@ -166,7 +181,8 @@ const Protected kProtected[] = {
     {"SetOverrideBinding", Rule::Combat}, {"SetOverrideBindingSpell", Rule::Combat},
     {"SetOverrideBindingClick", Rule::Combat}, {"SetOverrideBindingItem", Rule::Combat},
     {"SetOverrideBindingMacro", Rule::Combat}, {"ClearOverrideBindings", Rule::Combat},
-    {"SetMouselookOverrideBinding", Rule::Combat}, {"PickupSpell", Rule::Combat},
+    {"SetMouselookOverrideBinding", Rule::Combat}, {"LoadBindings", Rule::Combat},
+    {"SaveBindings", Rule::Combat}, {"PickupSpell", Rule::Combat},
     {"PickupCompanion", Rule::Combat}, {"PickupAction", Rule::Combat},
     {"PlaceAction", Rule::Combat}, {"ChangeActionBarPage", Rule::Combat},
     {"SetMultiCastSpell", Rule::Combat}, {"PickupPetAction", Rule::Combat},
