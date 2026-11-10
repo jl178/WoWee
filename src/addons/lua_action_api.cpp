@@ -490,6 +490,24 @@ static int lua_GetActionTexture(lua_State* L) {
             lua_pushstring(L, equipmentSetIconPath(*set).c_str());
             return 1;
         }
+    } else if (action.type == game::ActionBarSlot::MACRO) {
+        // The macro's own icon. The question mark means "what it casts":
+        // the icon of the spell the macro would cast now, as GetMacroSpell
+        // names it, and the question mark itself when it casts nothing. Nil
+        // here left every macro on an addon's bar (LibActionButton reads
+        // only this) without an icon.
+        static const char* kQuestionMark = "Interface\\Icons\\INV_Misc_QuestionMark";
+        std::string icon = gh->getMacroIcon(action.id);
+        std::string lower = icon;
+        toLowerInPlace(lower);
+        if (icon.empty() || lower == "interface\\icons\\inv_misc_questionmark") {
+            const std::string arg = macroActionArg(gh, action.id);
+            const uint32_t spellId = arg.empty() ? 0 : knownSpellByName(gh, arg);
+            icon = spellId ? gh->getSpellIconPath(spellId) : std::string();
+            if (icon.empty()) icon = kQuestionMark;
+        }
+        lua_pushstring(L, icon.c_str());
+        return 1;
     }
     lua_pushnil(L);
     return 1;
