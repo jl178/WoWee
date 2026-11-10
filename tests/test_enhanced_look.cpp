@@ -497,19 +497,23 @@ TEST_CASE("Enhanced shade: less chroma, a cooler grey, by day only", "[enhanced]
 }
 
 #ifdef WOWEE_SOURCE_DIR
-TEST_CASE("Enhanced shade: fxaa.frag reads its tint and chroma as the push block's last vec4", "[enhanced]") {
+TEST_CASE("Enhanced shade: fxaa.frag reads its tint and chroma as the push block's seventh vec4", "[enhanced]") {
     std::ifstream f(std::string(WOWEE_SOURCE_DIR) + "/assets/shaders/fxaa.frag.glsl");
     REQUIRE(f.good());
     std::stringstream ss;
     ss << f.rdbuf();
     const std::string src = ss.str();
-    // After enhancedSat (offset 92): a whole vec4 at 96, 112 bytes in all,
-    // as post_process_pipeline.cpp pushes them.
+    // After enhancedSat (offset 92): a whole vec4 at 96, then the corner
+    // blur's at 112, 128 bytes in all, as post_process_pipeline.cpp pushes
+    // them.
     const auto sat = src.find("float enhancedSat;");
     const auto shade = src.find("vec4  enhancedShade;");
+    const auto corner = src.find("vec4  cornerBlur;");
     REQUIRE(sat != std::string::npos);
     REQUIRE(shade != std::string::npos);
+    REQUIRE(corner != std::string::npos);
     CHECK(sat < shade);
+    CHECK(shade < corner);
     CHECK(src.find("pc.enhancedShade.a") != std::string::npos);
     CHECK(src.find("pc.enhancedShade.rgb") != std::string::npos);
 }

@@ -50,11 +50,16 @@ layout(push_constant) uniform PC {
     float enhancedSat;       // and the chroma scale below the shoulder (0 = off)
     vec4  enhancedShade;     // and the shade's: rgb the hue of the grey it keeps (the
                             // sky-lit ambient's, 1 = none), a its chroma scale (1 = as it is)
+    vec4  cornerBlur;       // x 1 when uBlur holds this frame's corner sums (fxaa_blur.comp)
 } pc;
 
 // The scene boxed down to a quarter (mip 1 of a half-size image), the stock
 // FFXBox4 target the glow and the ghost world blur from.
 layout(set = 0, binding = 1) uniform sampler2D uGlow;
+// Worked out from it once a frame at its texel corners (fxaa_blur.comp): rgb
+// the glow's blur, a the brightest channel of the 8 x 8 texels round the
+// corner. Read only while pc.cornerBlur.x is 1.
+layout(set = 0, binding = 2) uniform sampler2D uBlur;
 
 float luma(vec3 c) {
     return dot(c, vec3(0.299, 0.587, 0.114));
@@ -112,6 +117,26 @@ float lumaAt(vec2 uv) {
     float l = luma(texture(uScene, uv).rgb);
     return pc.hdr > 0.5 ? hdrToDisplay(l) : l;
 }
+// The same two at a whole pixel, clamped to the picture as the sampler's
+// edge mode clamps. Where the pass reads the pixel itself and its eight
+// neighbours, sober, its coordinates sit on texel centres, where the
+// bilinear filter returns the texel unchanged: a fetch is the same value
+// without the filter's work.
+ivec2 texelIn(ivec2 p) {
+    return clamp(p, ivec2(0), textureSize(uScene, 0) - 1);
+}
+vec3 sceneTexel(ivec2 p) {
+    vec3 c = texelFetch(uScene, texelIn(p), 0).rgb;
+    return pc.hdr > 0.5 ? hdrToDisplay(c) : c;
+}
+float lumaTexel(ivec2 p) {
+    float l = luma(texelFetch(uScene, texelIn(p), 0).rgb);
+    return pc.hdr > 0.5 ? hdrToDisplay(l) : l;
+}
+// A neighbour's luma, o pixels from this one.
+float lumaNb(vec2 uv, ivec2 px, bool onTexel, ivec2 o) {
+    return onTexel ? lumaTexel(px + o) : lumaAt(uv + vec2(o) * pc.rcpFrame);
+}
 // The quarter-size scene, as the glow and the nether blur read it
 // (displayed), and as the bloom reads it (in the scene's own light).
 vec3 glowAt(vec2 uv) {
@@ -147,6 +172,15 @@ const float kSearchStep[FXAA_SEARCH_STEPS] =
 // is the same filter. Without a quarter-size scene, the pixel itself.
 vec3 stockBlur(vec2 uv) {
     if (pc.glowSource < 0.5) return sceneAt(uv);
+    if (pc.cornerBlur.x > 0.5) {
+        // The same sum, from the corners: every tap sits half a texel off,
+        // so the sum is bilinear between the quarter-size texels' corners,
+        // and the sampler's one tap between the corner sums is all sixteen.
+        // Corner k of a row is texel k of uBlur, centred at k + 0.5.
+        vec2 q = vec2(textureSize(uGlow, 1));
+        vec2 at = (uv * q + 0.5) / vec2(textureSize(uBlur, 0));
+        return blurToDisplay(textureLod(uBlur, at, 0.0).rgb);
+    }
     const float offs[4] = float[](-2.5, -0.5, 0.5, 2.5);
     const float wts[4]  = float[](0.125, 0.375, 0.375, 0.125);
     vec2 texel = 1.0 / vec2(textureSize(uGlow, 1));
@@ -261,25 +295,67 @@ const float kGradeKal[32] = float[](
     0.553, 0.588, 0.631, 0.667, 0.706, 0.741, 0.780, 0.824,
     0.863, 0.902, 0.937, 0.969, 0.988, 0.996, 0.996, 1.000);
 
-float gradeChannel(float x, bool kalimdor) {
+// The same curves a segment at a time: each segment's two ends side by side,
+// so a lookup is one load where it was two. A table indexed per pixel is
+// read from memory, not registers, and the four reads a channel the select
+// between the continents made (both tables, both ends) cost a third of this
+// pass on the Iris Xe.
+const vec2 kGradeSegEK[31] = vec2[](
+    vec2(kGradeEK[0], kGradeEK[1]), vec2(kGradeEK[1], kGradeEK[2]), vec2(kGradeEK[2], kGradeEK[3]),
+    vec2(kGradeEK[3], kGradeEK[4]), vec2(kGradeEK[4], kGradeEK[5]), vec2(kGradeEK[5], kGradeEK[6]),
+    vec2(kGradeEK[6], kGradeEK[7]), vec2(kGradeEK[7], kGradeEK[8]), vec2(kGradeEK[8], kGradeEK[9]),
+    vec2(kGradeEK[9], kGradeEK[10]), vec2(kGradeEK[10], kGradeEK[11]), vec2(kGradeEK[11], kGradeEK[12]),
+    vec2(kGradeEK[12], kGradeEK[13]), vec2(kGradeEK[13], kGradeEK[14]), vec2(kGradeEK[14], kGradeEK[15]),
+    vec2(kGradeEK[15], kGradeEK[16]), vec2(kGradeEK[16], kGradeEK[17]), vec2(kGradeEK[17], kGradeEK[18]),
+    vec2(kGradeEK[18], kGradeEK[19]), vec2(kGradeEK[19], kGradeEK[20]), vec2(kGradeEK[20], kGradeEK[21]),
+    vec2(kGradeEK[21], kGradeEK[22]), vec2(kGradeEK[22], kGradeEK[23]), vec2(kGradeEK[23], kGradeEK[24]),
+    vec2(kGradeEK[24], kGradeEK[25]), vec2(kGradeEK[25], kGradeEK[26]), vec2(kGradeEK[26], kGradeEK[27]),
+    vec2(kGradeEK[27], kGradeEK[28]), vec2(kGradeEK[28], kGradeEK[29]), vec2(kGradeEK[29], kGradeEK[30]),
+    vec2(kGradeEK[30], kGradeEK[31]));
+const vec2 kGradeSegKal[31] = vec2[](
+    vec2(kGradeKal[0], kGradeKal[1]), vec2(kGradeKal[1], kGradeKal[2]), vec2(kGradeKal[2], kGradeKal[3]),
+    vec2(kGradeKal[3], kGradeKal[4]), vec2(kGradeKal[4], kGradeKal[5]), vec2(kGradeKal[5], kGradeKal[6]),
+    vec2(kGradeKal[6], kGradeKal[7]), vec2(kGradeKal[7], kGradeKal[8]), vec2(kGradeKal[8], kGradeKal[9]),
+    vec2(kGradeKal[9], kGradeKal[10]), vec2(kGradeKal[10], kGradeKal[11]), vec2(kGradeKal[11], kGradeKal[12]),
+    vec2(kGradeKal[12], kGradeKal[13]), vec2(kGradeKal[13], kGradeKal[14]), vec2(kGradeKal[14], kGradeKal[15]),
+    vec2(kGradeKal[15], kGradeKal[16]), vec2(kGradeKal[16], kGradeKal[17]), vec2(kGradeKal[17], kGradeKal[18]),
+    vec2(kGradeKal[18], kGradeKal[19]), vec2(kGradeKal[19], kGradeKal[20]), vec2(kGradeKal[20], kGradeKal[21]),
+    vec2(kGradeKal[21], kGradeKal[22]), vec2(kGradeKal[22], kGradeKal[23]), vec2(kGradeKal[23], kGradeKal[24]),
+    vec2(kGradeKal[24], kGradeKal[25]), vec2(kGradeKal[25], kGradeKal[26]), vec2(kGradeKal[26], kGradeKal[27]),
+    vec2(kGradeKal[27], kGradeKal[28]), vec2(kGradeKal[28], kGradeKal[29]), vec2(kGradeKal[29], kGradeKal[30]),
+    vec2(kGradeKal[30], kGradeKal[31]));
+
+// One channel through a curve: segment i of 31, f of the way along it.
+float gradeEK(float x) {
     float t = clamp(x, 0.0, 1.0) * 31.0;
     int i = min(int(t), 30);
-    float f = t - float(i);
-    float a = kalimdor ? kGradeKal[i] : kGradeEK[i];
-    float b = kalimdor ? kGradeKal[i + 1] : kGradeEK[i + 1];
-    return mix(a, b, f);
+    vec2 ab = kGradeSegEK[i];
+    return mix(ab.x, ab.y, t - float(i));
+}
+float gradeKal(float x) {
+    float t = clamp(x, 0.0, 1.0) * 31.0;
+    int i = min(int(t), 30);
+    vec2 ab = kGradeSegKal[i];
+    return mix(ab.x, ab.y, t - float(i));
 }
 
 vec3 enhancedGrade(vec3 c) {
-    bool kal = pc.gradeCurve > 0.5;
-    vec3 g = vec3(gradeChannel(c.r, kal), gradeChannel(c.g, kal), gradeChannel(c.b, kal));
     // Mid-tones only. Enhanced's curve lifts the upper mid-tones most (0.77 ->
     // 0.89) of a tone-mapped picture whose highlights are already rolled
     // off; here the sunlit ground and leaves sit at 0.7-0.9 and the lift
     // drove them to white. Fades out from 0.6 to 0.9 of the brightest
-    // channel, so a highlight keeps the value it has.
+    // channel, so a highlight keeps the value it has - and is not looked up.
     float top = max(c.r, max(c.g, c.b));
-    return mix(c, g, pc.gradeWeight * (1.0 - smoothstep(0.6, 0.9, top)));
+    float w = pc.gradeWeight * (1.0 - smoothstep(0.6, 0.9, top));
+    if (w <= 0.0) return c;
+    // The continent is the same for every pixel: one table is read.
+    vec3 g;
+    if (pc.gradeCurve > 0.5) {
+        g = vec3(gradeKal(c.r), gradeKal(c.g), gradeKal(c.b));
+    } else {
+        g = vec3(gradeEK(c.r), gradeEK(c.g), gradeEK(c.b));
+    }
+    return mix(c, g, w);
 }
 
 // Bloom (not stock; the Enhanced preset's "Bloom Intensity", which Enhanced
@@ -301,22 +377,40 @@ void bloomAt(vec2 uv, out vec3 ldr, out vec3 hdr) {
     hdr = vec3(0.0);
     if (pc.glowSource < 0.5) return;
     vec2 texel = 1.0 / vec2(textureSize(uGlow, 1));
-    float wsum = 0.0;
+    // Each scene takes only its own half: the 8-bit halo is drawn over the
+    // 8-bit scene alone and the light above the floor is the HDR scene's
+    // alone (an 8-bit tap never passes 1). Working out both at every tap
+    // put nine tone maps a pixel on the HDR scene for a halo it discards.
+    bool hdrScene = pc.hdr > 0.5;
+    if (hdrScene && pc.cornerBlur.x > 0.5) {
+        // The taps below reach texels from 3 before the nearest corner to 2
+        // after it; that corner's alpha is the brightest channel from 4
+        // before to 3 after. Under the floor there, every tap is under it
+        // and adds nothing - which is nearly every pixel.
+        vec2 q = vec2(textureSize(uGlow, 1));
+        ivec2 corner = clamp(ivec2(round(uv * q)), ivec2(0), textureSize(uBlur, 0) - 1);
+        float peak = texelFetch(uBlur, corner, 0).a;
+        if (peak < kHdrBloomFloor - 0.01) return;
+    }
+    // With the HDR scene the bloom is only the light above the floor
+    // (a lamp, a candle, the sun): spread tight, a texel and a half
+    // of the quarter-size scene apart, so a torch keeps a small local
+    // glow rather than a wide halo (Jered's Goldshire candles).
+    float spread = hdrScene ? 1.5 : 4.0;
+    // The tent's weights, (2 - |x|)(2 - |y|), sum to 16.
+    const float wsum = 16.0;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             float w = (2.0 - abs(float(x))) * (2.0 - abs(float(y)));
-            // With the HDR scene the bloom is only the light above the floor
-            // (a lamp, a candle, the sun): spread tight, a texel and a half
-            // of the quarter-size scene apart, so a torch keeps a small local
-            // glow rather than a wide halo (Jered's Goldshire candles).
-            vec3 s = glowLinearAt(uv + vec2(x, y) * (pc.hdr > 0.5 ? 1.5 : 4.0) * texel);
-            vec3 d = pc.hdr > 0.5 ? hdrToDisplay(s) : s;
-            ldr += max(d - kBloomKnee, 0.0) * w;
-            // Light above kHdrBloomFloor: the sun's disc and glare (2.5x),
-            // lamps and fire. At 1 the sunlit Barrens ground under an HDR
-            // sun bloomed into a glowing orange-white sheet.
-            hdr += max(s - kHdrBloomFloor, 0.0) * w;
-            wsum += w;
+            vec3 s = glowLinearAt(uv + vec2(x, y) * spread * texel);
+            if (hdrScene) {
+                // Light above kHdrBloomFloor: the sun's disc and glare (2.5x),
+                // lamps and fire. At 1 the sunlit Barrens ground under an HDR
+                // sun bloomed into a glowing orange-white sheet.
+                hdr += max(s - kHdrBloomFloor, 0.0) * w;
+            } else {
+                ldr += max(s - kBloomKnee, 0.0) * w;
+            }
         }
     }
     ldr = ldr / wsum / (1.0 - kBloomKnee);
@@ -424,8 +518,13 @@ void main() {
         cos(TexCoord.x * 29.0) * pc.rcpFrame.y) * (3.0 * drunk);
     vec2 rcp    = pc.rcpFrame;
 
+    // Sober and at the scene's own size, this pixel and its neighbours are
+    // whole texels (lumaNb).
+    ivec2 px = ivec2(gl_FragCoord.xy);
+    bool onTexel = drunk <= 0.0 && textureSize(uScene, 0) == ivec2(round(1.0 / rcp));
+
     // --- Centre, with the drunk blur folded in before anything reads it ---
-    vec3 rgbM = sceneAt(uv);
+    vec3 rgbM = onTexel ? sceneTexel(px) : sceneAt(uv);
     if (drunk > 0.0) {
         vec2 radius = rcp * mix(1.0, 5.0, drunk);
         vec3 blur = rgbM;
@@ -448,10 +547,10 @@ void main() {
 
     // --- Cardinal neighbours: is there an edge here at all ---
     float lumaM = luma(rgbM);
-    float lumaN = lumaAt(uv + vec2( 0.0, -1.0) * rcp);
-    float lumaS = lumaAt(uv + vec2( 0.0,  1.0) * rcp);
-    float lumaE = lumaAt(uv + vec2( 1.0,  0.0) * rcp);
-    float lumaW = lumaAt(uv + vec2(-1.0,  0.0) * rcp);
+    float lumaN = lumaNb(uv, px, onTexel, ivec2( 0, -1));
+    float lumaS = lumaNb(uv, px, onTexel, ivec2( 0,  1));
+    float lumaE = lumaNb(uv, px, onTexel, ivec2( 1,  0));
+    float lumaW = lumaNb(uv, px, onTexel, ivec2(-1,  0));
 
     float rangeMax = max(lumaM, max(max(lumaN, lumaS), max(lumaE, lumaW)));
     float rangeMin = min(lumaM, min(min(lumaN, lumaS), min(lumaE, lumaW)));
@@ -462,10 +561,10 @@ void main() {
         return;
     }
 
-    float lumaNW = lumaAt(uv + vec2(-1.0, -1.0) * rcp);
-    float lumaNE = lumaAt(uv + vec2( 1.0, -1.0) * rcp);
-    float lumaSW = lumaAt(uv + vec2(-1.0,  1.0) * rcp);
-    float lumaSE = lumaAt(uv + vec2( 1.0,  1.0) * rcp);
+    float lumaNW = lumaNb(uv, px, onTexel, ivec2(-1, -1));
+    float lumaNE = lumaNb(uv, px, onTexel, ivec2( 1, -1));
+    float lumaSW = lumaNb(uv, px, onTexel, ivec2(-1,  1));
+    float lumaSE = lumaNb(uv, px, onTexel, ivec2( 1,  1));
 
     float lumaNS   = lumaN + lumaS;
     float lumaWE   = lumaW + lumaE;

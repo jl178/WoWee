@@ -323,8 +323,24 @@ private:
         /// shader runs the Gauss4 taps on mip 1. Absent where the format
         /// cannot be blitted, and then the glow and ghost blur are off.
         AllocatedImage glowImage{};
+
+        /// The glow's blur and the bloom's gate, one texel per quarter-size
+        /// texel corner, worked out by fxaa_blur.comp from glowImage's mip 1
+        /// once a frame instead of at every pixel (the shader reads one
+        /// bilinear tap where it took sixteen). Absent with glowImage, or
+        /// where it could not be made; the shader then takes its own taps.
+        AllocatedImage blurImage{};
+        VkPipeline            blurPipeline       = VK_NULL_HANDLE;
+        VkPipelineLayout      blurPipelineLayout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout blurSetLayout      = VK_NULL_HANDLE;
+        VkDescriptorPool      blurPool           = VK_NULL_HANDLE;
+        VkDescriptorSet       blurSet            = VK_NULL_HANDLE;
+        /// Whether blurImage holds this frame's sums (prepareSceneForFXAA).
+        bool blurReady = false;
     };
     FXAAState fxaa_;
+    /// blurImage, its pipeline and its set, or nothing if any part fails.
+    void initFXAABlur();
     bool initFXAAResources();
     void destroyFXAAResources();
     void renderFXAAPass();

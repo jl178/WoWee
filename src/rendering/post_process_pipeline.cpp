@@ -1796,10 +1796,16 @@ bool PostProcessPipeline::initFXAAResources() {
         return false;
     }
 
+    // The glow's blur worked out at the quarter-size corners (needs the glow
+    // image, and the sampler above).
+    initFXAABlur();
+
     // Descriptor set layout: binding 0 = the scene, 1 = the glow's blur
-    // source (the scene again where there is none; the shader is told).
-    VkDescriptorSetLayoutBinding bindings[2]{};
-    for (uint32_t b = 0; b < 2; ++b) {
+    // source (the scene again where there is none; the shader is told), 2 =
+    // the blur at the corners (the glow source again where there is none).
+    constexpr uint32_t kBindings = 3;
+    VkDescriptorSetLayoutBinding bindings[kBindings]{};
+    for (uint32_t b = 0; b < kBindings; ++b) {
         bindings[b].binding = b;
         bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         bindings[b].descriptorCount = 1;
@@ -1807,14 +1813,14 @@ bool PostProcessPipeline::initFXAAResources() {
     }
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 2;
+    layoutInfo.bindingCount = kBindings;
     layoutInfo.pBindings = bindings;
     vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fxaa_.descSetLayout);
 
     constexpr uint32_t setCount = FXAAState::DESC_SET_COUNT;
     VkDescriptorPoolSize poolSize{};
     poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSize.descriptorCount = setCount * 2;
+    poolSize.descriptorCount = setCount * kBindings;
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.maxSets = setCount;
@@ -1838,17 +1844,20 @@ bool PostProcessPipeline::initFXAAResources() {
     imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkDescriptorImageInfo glowInfo = imgInfo;
     if (fxaa_.glowImage.imageView) glowInfo.imageView = fxaa_.glowImage.imageView;
+    VkDescriptorImageInfo blurInfo = glowInfo;
+    if (fxaa_.blurImage.imageView) blurInfo.imageView = fxaa_.blurImage.imageView;
+    const VkDescriptorImageInfo* infos[kBindings] = {&imgInfo, &glowInfo, &blurInfo};
     for (auto& descSet : fxaa_.descSet) {
-        VkWriteDescriptorSet writes[2]{};
-        for (uint32_t b = 0; b < 2; ++b) {
+        VkWriteDescriptorSet writes[kBindings]{};
+        for (uint32_t b = 0; b < kBindings; ++b) {
             writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[b].dstSet = descSet;
             writes[b].dstBinding = b;
             writes[b].descriptorCount = 1;
             writes[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[b].pImageInfo = b == 0 ? &imgInfo : &glowInfo;
+            writes[b].pImageInfo = infos[b];
         }
-        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, kBindings, writes, 0, nullptr);
     }
 
     // Pipeline layout - push constants: vec4(rcpFrame.xy, sharpness,
@@ -1857,7 +1866,7 @@ bool PostProcessPipeline::initFXAAResources() {
     VkPushConstantRange pc{};
     pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     pc.offset = 0;
-    pc.size = 112;  // seven vec4 (the last the Enhanced shade's chroma and tint)
+    pc.size = 128;  // eight vec4 (the seventh the Enhanced shade's chroma and tint, the last the corner blur's)
     VkPipelineLayoutCreateInfo plCI{};
     plCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     plCI.setLayoutCount = 1;
@@ -1921,6 +1930,107 @@ void PostProcessPipeline::destroyFXAAResources() {
     destroyImage(device, alloc, fxaa_.sceneDepth);
     destroyImage(device, alloc, fxaa_.sceneColor);
     destroyImage(device, alloc, fxaa_.glowImage);
+    destroy(device, fxaa_.blurPipeline);
+    destroy(device, fxaa_.blurPipelineLayout);
+    destroy(device, fxaa_.blurPool);
+    fxaa_.blurSet = VK_NULL_HANDLE;
+    destroy(device, fxaa_.blurSetLayout);
+    destroyImage(device, alloc, fxaa_.blurImage);
+    fxaa_.blurReady = false;
+}
+
+void PostProcessPipeline::initFXAABlur() {
+    if (!fxaa_.glowImage.image || fxaa_.sceneSampler == VK_NULL_HANDLE) return;
+    VkDevice device = vkCtx_->getDevice();
+    VmaAllocator alloc = vkCtx_->getAllocator();
+    const VkExtent2D half = fxaa_.glowImage.extent;
+    const VkExtent2D quarter{std::max(1u, half.width / 2), std::max(1u, half.height / 2)};
+    auto fail = [&](const char* what) {
+        LOG_WARNING("FXAA: ", what, "; the glow takes its own taps");
+        destroy(device, fxaa_.blurPipeline);
+        destroy(device, fxaa_.blurPipelineLayout);
+        destroy(device, fxaa_.blurPool);
+        fxaa_.blurSet = VK_NULL_HANDLE;
+        destroy(device, fxaa_.blurSetLayout);
+        destroyImage(device, alloc, fxaa_.blurImage);
+    };
+
+    // One texel per corner of the quarter-size texels: one more each way.
+    fxaa_.blurImage = createImage(device, alloc, quarter.width + 1, quarter.height + 1,
+                                  VK_FORMAT_R16G16B16A16_SFLOAT,
+                                  VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    if (!fxaa_.blurImage.image) return fail("no corner blur image");
+
+    VkDescriptorSetLayoutBinding bindings[2]{};
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    VkDescriptorSetLayoutCreateInfo layoutInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layoutInfo.bindingCount = 2;
+    layoutInfo.pBindings = bindings;
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &fxaa_.blurSetLayout) != VK_SUCCESS) {
+        return fail("no corner blur set layout");
+    }
+
+    VkDescriptorPoolSize poolSizes[2]{};
+    poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[0].descriptorCount = 1;
+    poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    poolSizes[1].descriptorCount = 1;
+    VkDescriptorPoolCreateInfo poolInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = 1;
+    poolInfo.poolSizeCount = 2;
+    poolInfo.pPoolSizes = poolSizes;
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &fxaa_.blurPool) != VK_SUCCESS) {
+        return fail("no corner blur pool");
+    }
+    VkDescriptorSetAllocateInfo allocInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocInfo.descriptorPool = fxaa_.blurPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &fxaa_.blurSetLayout;
+    if (vkAllocateDescriptorSets(device, &allocInfo, &fxaa_.blurSet) != VK_SUCCESS) {
+        return fail("no corner blur set");
+    }
+    VkDescriptorImageInfo src{};
+    src.sampler = fxaa_.sceneSampler;
+    src.imageView = fxaa_.glowImage.imageView;
+    src.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo dst{};
+    dst.imageView = fxaa_.blurImage.imageView;
+    dst.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkWriteDescriptorSet writes[2]{};
+    for (uint32_t b = 0; b < 2; ++b) {
+        writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[b].dstSet = fxaa_.blurSet;
+        writes[b].dstBinding = b;
+        writes[b].descriptorCount = 1;
+        writes[b].descriptorType = bindings[b].descriptorType;
+        writes[b].pImageInfo = b == 0 ? &src : &dst;
+    }
+    vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+
+    VkPipelineLayoutCreateInfo plCI{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plCI.setLayoutCount = 1;
+    plCI.pSetLayouts = &fxaa_.blurSetLayout;
+    if (vkCreatePipelineLayout(device, &plCI, nullptr, &fxaa_.blurPipelineLayout) != VK_SUCCESS) {
+        return fail("no corner blur pipeline layout");
+    }
+    VkShaderModule compMod;
+    if (!compMod.loadFromFile(device, "assets/shaders/fxaa_blur.comp.spv")) {
+        return fail("no fxaa_blur.comp.spv");
+    }
+    VkComputePipelineCreateInfo cpCI{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    cpCI.stage = compMod.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
+    cpCI.layout = fxaa_.blurPipelineLayout;
+    const VkResult r = vkCreateComputePipelines(device, vkCtx_->getPipelineCache(), 1, &cpCI, nullptr,
+                                                &fxaa_.blurPipeline);
+    compMod.destroy();
+    if (r != VK_SUCCESS) return fail("no corner blur pipeline");
 }
 
 void PostProcessPipeline::prepareSceneForFXAA(VkImage scene) {
@@ -1929,6 +2039,7 @@ void PostProcessPipeline::prepareSceneForFXAA(VkImage scene) {
     // transition the pass always had.
     const bool blurWanted = (glowWanted() && (glowAmount_ > 0.0f || glowBlend_ > 0.0f || bloom_ > 0.0f)) ||
                             ghost_ > 0.001f || nether_ > 0.0f;
+    fxaa_.blurReady = false;
     if (!fxaa_.glowImage.image || !blurWanted) {
         transitionImageLayout(currentCmd_, scene,
             VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -1937,6 +2048,11 @@ void PostProcessPipeline::prepareSceneForFXAA(VkImage scene) {
         if (fxaa_.glowImage.image) {
             // Still readable (the shader skips it), whatever it held before.
             transitionImageLayout(currentCmd_, fxaa_.glowImage.image,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        }
+        if (fxaa_.blurImage.image) {
+            transitionImageLayout(currentCmd_, fxaa_.blurImage.image,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         }
@@ -1993,12 +2109,32 @@ void PostProcessPipeline::prepareSceneForFXAA(VkImage scene) {
     barrier(glow, 0, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    // Read by the final pass, and by the corner blur below.
     barrier(glow, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     barrier(scene, 0, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+    // The glow's blur and the bloom's gate at the quarter-size texel corners
+    // (fxaa_blur.comp), which the final pass reads in place of its taps.
+    if (fxaa_.blurPipeline && fxaa_.blurSet) {
+        const VkImage blur = fxaa_.blurImage.image;
+        // Whatever read it last frame is done before this writes it.
+        barrier(blur, 0, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        vkCmdBindPipeline(currentCmd_, VK_PIPELINE_BIND_POINT_COMPUTE, fxaa_.blurPipeline);
+        vkCmdBindDescriptorSets(currentCmd_, VK_PIPELINE_BIND_POINT_COMPUTE, fxaa_.blurPipelineLayout, 0, 1,
+                                &fxaa_.blurSet, 0, nullptr);
+        vkCmdDispatch(currentCmd_, (quarter.width + 1 + 7) / 8, (quarter.height + 1 + 7) / 8, 1);
+        barrier(blur, 0, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        fxaa_.blurReady = true;
+    }
 }
 
 void PostProcessPipeline::renderFXAAPass() {
@@ -2025,7 +2161,7 @@ void PostProcessPipeline::renderFXAAPass() {
     const auto nowMs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
     const bool wave = underwaterWave_ && glowWanted();
-    float pc[28] = {
+    float pc[32] = {
         1.0f / static_cast<float>(ext.width),
         1.0f / static_cast<float>(ext.height),
         sharpness,
@@ -2053,7 +2189,9 @@ void PostProcessPipeline::renderFXAAPass() {
         // The Enhanced daylight's low-end lift and saturation (0 off).
         hdrScene() ? enhancedExposure_ : 0.0f, hdrScene() ? enhancedSat_ : 0.0f,
         // The Enhanced shade's grey and chroma (1, 1, 1, 1 off).
-        enhancedShadeTint_.r, enhancedShadeTint_.g, enhancedShadeTint_.b, enhancedShade_
+        enhancedShadeTint_.r, enhancedShadeTint_.g, enhancedShadeTint_.b, enhancedShade_,
+        // Whether the corner blur holds this frame's sums (fxaa_blur.comp).
+        fxaa_.blurReady ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f
     };
     vkCmdPushConstants(currentCmd_, fxaa_.pipelineLayout,
                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), pc);
