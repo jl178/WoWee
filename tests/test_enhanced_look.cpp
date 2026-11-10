@@ -3,6 +3,7 @@
 // Enhanced preset row.
 #include <catch_amalgamated.hpp>
 
+#include "rendering/enhancements.hpp"
 #include "rendering/enhanced_grade.hpp"
 #include "rendering/enhanced_lights.hpp"
 #include "rendering/enhanced_palette.hpp"
@@ -135,6 +136,31 @@ TEST_CASE("Enhanced grade: fxaa.frag carries the same curves", "[enhanced]") {
         CHECK(ek[i] == Catch::Approx(enhanced_grade::kEasternKingdoms[i]));
         CHECK(kal[i] == Catch::Approx(enhanced_grade::kKalimdor[i]));
     }
+}
+#endif
+
+#ifdef WOWEE_SOURCE_DIR
+TEST_CASE("Enhanced ambient: Enhanced's half-Lambert ramp, in every lit model shader", "[enhanced]") {
+    // material3_mesh_ps / material3_wmo_ps: 0.4562..1.2333 in linear light,
+    // the same ramp as 0.7..1.1 display-encoded.
+    CHECK(std::pow(0.4562f, 1.0f / 2.2f) == Catch::Approx(enhanced_palette::kAmbientAway).margin(0.005f));
+    CHECK(std::pow(1.2333f, 1.0f / 2.2f) == Catch::Approx(enhanced_palette::kAmbientToward).margin(0.005f));
+    CHECK(enhanced_palette::ambientRamp(-1.0f) == Catch::Approx(0.7f));
+    CHECK(enhanced_palette::ambientRamp(0.0f) == Catch::Approx(0.9f));
+    CHECK(enhanced_palette::ambientRamp(1.0f) == Catch::Approx(1.1f));
+    CHECK(enhanced_palette::ambientRamp(-5.0f) == Catch::Approx(0.7f));
+    // The shaders branch on the bit and carry the same ends.
+    for (const char* name : {"m2.frag.glsl", "wmo.frag.glsl", "character.frag.glsl"}) {
+        std::ifstream f(std::string(WOWEE_SOURCE_DIR) + "/assets/shaders/" + name);
+        REQUIRE(f.good());
+        std::stringstream ss;
+        ss << f.rdbuf();
+        const std::string src = ss.str();
+        INFO(name);
+        CHECK(src.find("(localLightMeta.z & 128) != 0") != std::string::npos);
+        CHECK(src.find("mix(0.7, 1.1, 0.5 + 0.5 * clamp(") != std::string::npos);
+    }
+    CHECK(enh_bits::kEnhancedAmbient == 128u);
 }
 #endif
 

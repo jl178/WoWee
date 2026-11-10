@@ -348,6 +348,10 @@ inline constexpr uint32_t kSoftShadows    = 1u << 3;  ///< 9-tap disk instead of
 inline constexpr uint32_t kSmoothLeaves   = 1u << 4;  ///< alpha-to-coverage ramp instead of the 224/255 key
 inline constexpr uint32_t kHdrLight      = 1u << 5;  ///< HDR scene: lit shaders' clamp at 1 lifted (set by the renderer)
 inline constexpr uint32_t kLeafLight     = 1u << 6;  ///< m2.frag sunlight through foliage cards
+/// Enhanced's daylight in use (LightingManager::isEnhancedActive, set by the
+/// renderer): M2s, WMOs and units take Enhanced's ambient, turned toward the
+/// sun (enhanced_palette::kAmbientAway..kAmbientToward by half-Lambert).
+inline constexpr uint32_t kEnhancedAmbient = 1u << 7;
 }  // namespace enh_bits
 
 inline uint32_t shaderBits(const Enhancements& e) {

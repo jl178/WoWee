@@ -330,6 +330,9 @@ public:
     /// light enhanced_lights.hpp matches, the averaged trend
     /// (enhanced_palette.hpp) for the rest.
     void setEnhancedDaylight(bool on) { enhancedDaylight_ = on; }
+    /// Whether Enhanced's daylight is lighting the frame: the row on, on a map
+    /// Enhanced re-authored (0 or 1), not under water.
+    [[nodiscard]] bool isEnhancedActive() const { return enhancedActive_; }
     /// Whether the scene is HDR (RGBA16F, tone mapped): the Enhanced sun is
     /// then added to the ambient as light without holding the sum at one
     /// (enhanced_palette::linearLightDirect).

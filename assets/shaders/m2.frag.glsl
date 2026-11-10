@@ -435,6 +435,14 @@ void main() {
         // stand on. The stock client lights foliage like any other M2.
         vec3 ambientTerm = wmoInterior ? unpackUnorm4x8(vWmoLight.x).rgb
                                        : rtAmbient(rt, ambientColor.rgb);
+        // Enhanced's ambient (kEnhancedAmbient, 128; enhanced_palette::
+        // ambientRamp): material3_mesh_ps scales its ambient by a half-Lambert
+        // ramp toward the sun, 0.7 on the side turned away to 1.1 facing it in
+        // display-encoded light, so a model's shaded side is darker than its
+        // lit side's ambient - the crown of a tree reads round, its far side
+        // and underside deep.
+        if (!wmoInterior && (localLightMeta.z & 128) != 0)
+            ambientTerm *= mix(0.7, 1.1, 0.5 + 0.5 * clamp(nDotL, -1.0, 1.0));
         // Clamped at one per channel, as the stock vertex shaders clamp
         // ambient + diffuse * N.L before the texture (shaders/vertex/arbvp1/
         // diffuse_t1.bls: MIN R0, R0, 1).

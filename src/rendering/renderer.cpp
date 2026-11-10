@@ -771,9 +771,15 @@ void Renderer::updatePerFrameUBO() {
     // The HDR scene's lifted light clamp goes with the target actually being
     // in RGBA16F, not with the row alone (it stands down under FSR).
     const uint32_t hdrLightBit = vkCtx && vkCtx->isHdrScene() ? enh_bits::kHdrLight : 0u;
-    currentFrameData.localLightMeta = glm::ivec4(static_cast<int32_t>(localLightCount),
-                                                 std::bit_cast<int32_t>(fogExponent),
-                                                 static_cast<int32_t>(shaderBits(enh_) | hdrLightBit), 0);
+    // Enhanced's ambient goes with its daylight actually lighting the frame
+    // (maps 0 and 1, above water), not with the row alone.
+    const uint32_t enhancedAmbientBit =
+        lightingManager && lightingManager->isEnhancedActive() && enhanced_palette::ambientRampOn()
+            ? enh_bits::kEnhancedAmbient
+            : 0u;
+    currentFrameData.localLightMeta = glm::ivec4(
+        static_cast<int32_t>(localLightCount), std::bit_cast<int32_t>(fogExponent),
+        static_cast<int32_t>(shaderBits(enh_) | hdrLightBit | enhancedAmbientBit), 0);
     // w: the sun sprite's direction and the day weight, for the light through
     // leaves and grass (leaf_light.hpp); the light direction is not the sun.
     if (lightingManager)

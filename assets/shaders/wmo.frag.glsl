@@ -378,6 +378,11 @@ void main() {
     }
     float nDotL = clamp(dot(norm, normalize(-lightDir.xyz)), 0.0, 1.0);
     vec3 skyAmbient = rtAmbient(rt, ambientColor.rgb);
+    // Enhanced's ambient (kEnhancedAmbient, 128; enhanced_palette::ambientRamp):
+    // material3_wmo_ps scales the outdoor ambient by a half-Lambert ramp
+    // toward the sun, 0.7 turned away to 1.1 facing it (display-encoded).
+    if ((localLightMeta.z & 128) != 0)
+        skyAmbient *= mix(0.7, 1.1, 0.5 + 0.5 * clamp(dot(norm, normalize(-lightDir.xyz)), -1.0, 1.0));
     vec3 mohdAmbient = vec3(wmoAmbientR, wmoAmbientG, wmoAmbientB);
 
     bool hdrLight = (localLightMeta.z & 32) != 0;

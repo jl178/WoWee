@@ -678,6 +678,74 @@ the profiler's noise (the composite 1.95-2.36 ms windows either way, Iris
 Xe 1280x540). Sheets in the session scratchpad: `shade/sheet_goldshire.png`
 (Enhanced | before | now), `shade/sheet_regress.png`.
 
+## 6d. The ambient turned toward the sun
+
+Measured against Jered's three Goldshire captures (09:22 at the inn and the
+crossroads, 15:23 at the inn), region by region at matched views, the
+largest gaps left under the Enhanced preset were all the canopy's: it was as
+bright as the road under it (canopy/ground luminance 0.97-0.99 against
+Enhanced's 0.58-0.86), more saturated (foliage chroma 0.48-0.51 against
+0.34-0.40), its sunlit leaves brighter (90th percentile 0.44-0.46 against
+0.33-0.35) and yellower (canopy blue/luminance 0.42-0.62 against 0.67-0.72).
+Turning the leaf light off moved none of it (within 0.02); the HDR mid-tone
+lift does most of the brightening, but taking it out darkens the road with
+the leaves.
+
+**What Enhanced's shader does.** `material3_mesh_ps` (5446721, permutation 26
+read in full) lights a model with `PSGlobalLight`, eleven float4: rows 0-2
+the hemisphere ambient (sky, horizon, ground), row 3 the light's direction,
+row 6 its colour, row 10 the up axis. The ambient is the horizon colour
+lerped toward the sky's by `N.up` above the horizon and toward the ground's
+below it, and then **scaled by a half-Lambert ramp toward the sun**:
+
+    k        = mix(away, toward, 0.5 + 0.5 * dot(N, -lightDir))   (N.L signed)
+    lit      = ambient * k + sunColour * sat(N.L)
+    colour   = albedo * lit
+
+with `(away, toward)` = (0.4562, 1.2333) on its linear path and (0.7, 1.1)
+on its display-encoded one - the same ramp (0.4562^(1/2.2) = 0.700,
+1.2333^(1/2.2) = 1.100). `material3_wmo_ps` (5446718) carries the identical
+block (twelve permutations with both pairs); the terrain's
+`terrainlightmap` does not. So in Enhanced a model's side turned from the
+sun takes 0.7 of the ambient and its sunward side 1.1: a tree's crown reads
+round, its far side and underside deep, and the leaves' own sunlit chroma
+sits on a darker body.
+
+**Ported** (Enhanced preset only): `enh_bits::kEnhancedAmbient` (128), set by
+the renderer while Enhanced's daylight lights the frame
+(`LightingManager::isEnhancedActive`: the Daylight row, maps 0 and 1, above
+water); `m2.frag` (outdoor models), `wmo.frag` (the outdoor light mode) and
+`character.frag` (units outdoors) scale their ambient by
+`mix(0.7, 1.1, 0.5 + 0.5 * N.L)` (`enhanced_palette::ambientRamp`), the
+display-encoded pair, since Wowee's lit shaders work in display-encoded
+light. The hemisphere itself is not: Elwynn's default profile (LightParams
+7748) leaves Horizon/GroundAmbient at 0 on every key. `WOWEE_ENHANCED_AMBIENT=0`
+turns it off for side-by-side work. One mix and multiply per lit pixel, no
+texture or shadow reads (not profiled separately).
+
+Measured (the three matched views, the ramp off then on, one build; gap is
+Wowee against Enhanced, mean over the views):
+
+| region | Enhanced | off | on | gap off | gap on |
+|---|---|---|---|---|---|
+| canopy / ground luminance | 0.78 0.58 0.86 | 0.99 0.97 0.86 | 0.85 0.95 0.74 | +32% | +20% |
+| foliage chroma | 0.34 0.36 0.40 | 0.48 0.51 0.46 | 0.41 0.49 0.38 | +32% | +17% |
+| foliage 90th pct luminance | 0.33 0.35 0.33 | 0.44 0.46 0.38 | 0.41 0.46 0.33 | +29% | +20% |
+| canopy blue / luminance | 0.72 0.67 0.70 | 0.58 0.42 0.62 | 0.63 0.43 0.72 | -23% | -15% |
+| world 5th pct luminance | 0.18 0.20 0.17 | 0.14 0.18 0.14 | 0.13 0.17 0.11 | -16% | -26% |
+| foliage 10th pct luminance | 0.21 0.20 0.19 | 0.19 0.19 0.16 | 0.16 0.17 0.12 | -10% | -25% |
+| lit / shade | 1.91 2.26 2.39 | 2.37 2.19 2.38 | 2.54 2.29 2.65 | +7% | +15% |
+| ground luminance (terrain, unchanged) | 0.36 0.51 0.37 | 0.31 0.37 0.32 | 0.32 0.37 0.30 | -18% | -19% |
+
+The canopy rows close by a third to a half. What opens is the floor: the
+darkest tones of models go darker, where Enhanced's are lifted - and
+Enhanced's floor is lifted only at distance (the near road's 5th percentile
+is Wowee's within 0.01; the canopy and far band are 0.04-0.06 brighter), by
+a cool grey veil (section 9, gap 1 below). Elsewhere (Goldshire 17:51, the
+Barrens at noon, Elwynn's forest at 10:00) the frame's mean moves under
+0.01 and its 5th percentile 0.006-0.016 down. Sheets in the session
+scratchpad: `fgap/sheet_f.png` (off | on), `fgap/final_sheet.png`.
+
 ## 7. Ground clutter
 
 `GroundEffectTexture` is the 1.12 table: 1060 of the 1065 changed rows went
@@ -861,6 +929,19 @@ What still separates the two pictures, largest first:
    With the far field the Enhanced preset does too (low detail past 1900);
    what is left is the light data's own fog, which in 3.3.5 ends short of
    1900 in most zones (Enhanced's own keyframes, section 2b, are thinner).
+6. The mid-distance veil (measured after section 6d, the largest gap left
+   at the matched Goldshire views): Enhanced's darkest tones are lifted from
+   about 20 yards out - world 5th percentile 0.17-0.20 against 0.11-0.17,
+   the canopy's 10th 0.19-0.21 against 0.12-0.17 - while the near road's
+   matches, and the lift is a cool grey (canopy blue/luminance 0.67-0.72
+   against 0.43-0.72). The sun haze cannot give it as it stands: from 15
+   yards at 0.004/yd (18x) its light is the fog colour and the forward-
+   scattered sun, orange at 9:22, and the canopy went more saturated
+   (foliage chroma +43%) and yellower (blue -37%), not greyer; the froxel
+   mist at 2.6x lifts the floor to Enhanced's but in the sun's colour too.
+   What it needs is sky-coloured in-scattering near the camera, which is
+   what Enhanced's global fog layers inject (section 5) - their values are
+   still not decoded.
 
 ## 9b. The HDR/linear path ("HDR lighting (the reference client)")
 

@@ -470,6 +470,11 @@ void main() {
         // Outdoors: the world's ambient and diffuse bands and the sun, the
         // ambient boosted for units and clamped (0x7C1730, flag 0x8000).
         vec3 outAmb = rtAmbient(rt, min(ambientColor.rgb * amul, vec3(1.0)));
+        // Enhanced's ambient (kEnhancedAmbient, 128; enhanced_palette::
+        // ambientRamp): units are material3_mesh_ps models too - the ambient
+        // by a half-Lambert ramp toward the sun, 0.7 away to 1.1 facing it.
+        if ((localLightMeta.z & 128) != 0)
+            outAmb *= mix(0.7, 1.1, 0.5 + 0.5 * clamp(dot(norm, ldir), -1.0, 1.0));
         vec3 diffuseTint = vec3(diffuseTintR, diffuseTintG, diffuseTintB);
         vec3 outLit = outAmb + shadow * diff * lightColor.rgb * diffuseTint;
         // Indoors (0x7C1AD0): the building's colour split into a diffuse

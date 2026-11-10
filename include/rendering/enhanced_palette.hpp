@@ -53,6 +53,31 @@ inline constexpr Trend kSun{1.11f, 0.72f};
 /// chosen side by side against Enhanced's Goldshire and Northshire captures.
 inline constexpr float kHdrSunIntensity = 1.35f;
 
+/// Enhanced's ambient on models and buildings (material3_mesh_ps and
+/// material3_wmo_ps, docs/re/enhanced-lighting.md section 6d): the hemisphere
+/// ambient times a half-Lambert ramp toward the sun,
+/// mix(kAmbientAway, kAmbientToward, 0.5 + 0.5 N.L), N.L signed. Enhanced's
+/// shaders carry the ramp twice, 0.4562..1.2333 for its linear path and
+/// 0.7..1.1 for display-encoded light - the same ramp, 0.4562^(1/2.2) = 0.70
+/// and 1.2333^(1/2.2) = 1.10. Wowee's lit shaders work in display-encoded
+/// light, so they take the second. Mirrored in m2.frag, wmo.frag and
+/// character.frag (enh_bits::kEnhancedAmbient).
+inline constexpr float kAmbientAway = 0.7f;
+inline constexpr float kAmbientToward = 1.1f;
+/// WOWEE_ENHANCED_AMBIENT=0 leaves the ambient flat, for side-by-side
+/// comparison (read once).
+inline bool ambientRampOn() {
+    static const bool v = [] {
+        const char* e = std::getenv("WOWEE_ENHANCED_AMBIENT");
+        return !(e && *e == '0');
+    }();
+    return v;
+}
+inline float ambientRamp(float nDotL) {
+    const float t = 0.5f + 0.5f * (nDotL < -1.0f ? -1.0f : (nDotL > 1.0f ? 1.0f : nDotL));
+    return kAmbientAway + (kAmbientToward - kAmbientAway) * t;
+}
+
 /// kHdrSunIntensity, or for tuning side by side WOWEE_ENHANCED_SUN=<value>
 /// (read once).
 inline float hdrSunIntensity() {
