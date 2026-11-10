@@ -1409,14 +1409,46 @@ int lua_Region_GetPoint(lua_State* L) {
 /// WoW's IsObjectType is true for the type itself and everything it derives
 /// from - a Button is a Frame is a Region - and FrameXML relies on that: it
 /// asks whether something is a Region to decide it can be positioned at all.
+///
+/// Without regard to case, as the client compares them: FrameXML asks
+/// frame:IsObjectType("frame") in lower case (UIParent_ManageFramePosition,
+/// before it moves a frame the player or an addon placed), and an exact match
+/// answered false for every frame - so the chat window ElvUI had marked as
+/// user-placed was moved back to the stock spot on every layout pass.
 static bool objectTypeMatches(const std::string& actual, const std::string& asked) {
-    if (actual == asked) return true;
-    const bool isRegion = (actual == "Texture" || actual == "FontString");
-    if (isRegion) {
-        return asked == "LayeredRegion" || asked == "Region";
+    const auto lower = [](std::string v) {
+        for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return v;
+    };
+    // Each type's parent in the 3.3.5 widget hierarchy.
+    static const std::unordered_map<std::string, std::string> kParent = {
+        {"texture", "layeredregion"}, {"fontstring", "layeredregion"},
+        {"layeredregion", "region"}, {"frame", "region"}, {"region", "uiobject"},
+        {"button", "frame"}, {"checkbutton", "button"}, {"lootbutton", "button"},
+        {"model", "frame"}, {"playermodel", "model"}, {"dressupmodel", "playermodel"},
+        {"tabardmodel", "playermodel"}, {"cooldown", "frame"}, {"colorselect", "frame"},
+        {"editbox", "frame"}, {"gametooltip", "frame"}, {"messageframe", "frame"},
+        {"scrollingmessageframe", "frame"}, {"minimap", "frame"}, {"movieframe", "frame"},
+        {"scrollframe", "frame"}, {"simplehtml", "frame"}, {"slider", "frame"},
+        {"statusbar", "frame"}, {"questpoiframe", "frame"}, {"worldframe", "frame"},
+    };
+    const std::string want = lower(asked);
+    std::string at = lower(actual);
+    // A FontString is a FontInstance as well, which is not on the main line.
+    if (at == "fontstring" && want == "fontinstance") return true;
+    for (int guard = 0; guard < 8 && !at.empty(); ++guard) {
+        if (at == want) return true;
+        const auto it = kParent.find(at);
+        if (it == kParent.end()) {
+            // A type this table does not know is a frame of some kind.
+            at = (at == "uiobject") ? std::string() : std::string("frame");
+            if (at == want) return true;
+            if (at.empty()) break;
+            continue;
+        }
+        at = it->second;
     }
-    // Everything else this creates is a Frame or derives from one.
-    return asked == "Frame" || asked == "Region";
+    return false;
 }
 
 int lua_Region_GetObjectType(lua_State* L) {
