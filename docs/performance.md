@@ -334,7 +334,7 @@ discarded under the HDR scene). Each change keeps the picture:
   (the select read both), and nothing where its weight is 0. A table
   indexed per pixel is a memory read on this GPU, not a register.
 - The glow's blur is bilinear between the quarter-size texels' corners
-  (every tap is half a texel off), so `fxaa_blur.comp` works out the
+  (every tap is half a texel off), so `fxaa_blur.frag` works out the
   corner sums once a frame (0.09 ms) and the pass takes one tap of them.
   Their alpha is the brightest texel round each corner, and under the HDR
   bloom's floor the bloom's taps are skipped (0.18-0.2 ms on its own).
@@ -349,6 +349,36 @@ Tried and left: neighbours' luma through quad derivatives (slower, 1.38 ->
 1.58 ms), skipping the water reflection and refraction copy with no water
 surface in the frustum (at the Enhanced view distance some always is), the
 fog inject (already half rate).
+
+### Second round (same day, same setup)
+
+Taking pieces out again: the final pass's FXAA edge path (the pixels past
+its contrast test) cost 0.4-0.6 ms, but fewer search steps barely moved it
+(12 -> 5 steps -0.03 to -0.07 ms; 3 steps -0.07 ms and 0.6-1.8% of pixels
+off by more than 8 levels, so not taken). The shader's size did: the screen
+effect was written out after each of FXAA's three exits and inlined three
+times. With one call at the end the pass is 0.1-0.2 ms cheaper, the same
+picture. The corner blur is now a fragment pass (`fxaa_blur.frag`) rather
+than a compute dispatch; on this GPU the switch to compute and back cost
+more than the work.
+
+The fill and bounce pass, outdoors: of its 0.48-0.53 ms the bounce grid's
+reads were ~0.22 (the wall looks 0.12 of it), the sun's shadow ~0.16, the
+pass with nothing drawn 0.025. Exact savings: a build without the occlusion
+spiral (`ambient_fill.frag.spv`, used while the occlusion row is off) and
+one wall look an axis instead of four (a face turns toward one side of an
+axis at most): -0.045 ms. Half resolution was not tried: the pass's factor
+changes by up to 15% across every sun-shadow edge and every crease between
+a wall and the ground, which a depth-aware upsample does not see.
+
+| ms | inn | Goldshire | Trade | Crystal Lake | Barrens |
+|---|---|---|---|---|---|
+| final pass (`fxaa`) | 1.05 -> 0.92 | 1.51 -> 1.08 | 0.92 -> 0.74 | 0.83 -> 0.69 | 0.90 -> 0.72 |
+| fill and bounce light | 0 | 0.73 -> 0.61 | 0.50 -> 0.45 | 0.52 -> 0.48 | 0.48 -> 0.44 |
+| frame's GPU | 5.43 / 5.52 | 12.4 -> 11.4 | 8.47 -> 8.23 | 9.85 -> 9.78 | 7.49 -> 7.29 |
+
+(Goldshire's GPU clock wandered between 1.3 and 1.5 GHz in these runs; its
+and the inn's totals are within their run-to-run spread.)
 
 ## The enhancement set's budget (2026-11-04)
 
