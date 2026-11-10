@@ -219,15 +219,15 @@ TEST_CASE("a frame of the meter window makes no garbage", "[meterwindow]") {
         collectgarbage('collect')
         collectgarbage('stop')
         -- A first stretch to let the interpreter grow its call stack once,
-        -- which it does on a collect and is not the window's doing.
-        for _ = 1, 100 do tick(driver, 0.016) end
-        -- And one stretch the same as the measured one: the first run of
-        -- this loop grows the interpreter once more (a single ~1 KB step a
-        -- few ticks in, flat after it), which is the interpreter settling,
-        -- not garbage a frame makes.
-        for _ = 1, 2000 do tick(driver, 0.016) end
+        -- which it does on a collect and is not the window's doing. Run
+        -- through the same function as the measured stretch, so the frames
+        -- are as deep on the Lua stack as they will be there: from a loop a
+        -- slot or two lower, the stack can still have one doubling to do
+        -- (1104 bytes, once) when the measuring starts.
+        local function run(n) for _ = 1, n do tick(driver, 0.016) end end
+        run(100)
         local before = collectgarbage('count')
-        for _ = 1, 2000 do tick(driver, 0.016) end
+        run(2000)
         local grown = collectgarbage('count') - before
         collectgarbage('restart')
         return format('%.3f', grown)
