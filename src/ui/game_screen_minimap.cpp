@@ -169,6 +169,17 @@ namespace {
         return slot.ds;
     }
 
+    /// The art a marker is drawn from: what the Minimap frame's Set*Texture
+    /// named, or the stock file.
+    const char* markerArt(const wowee::rendering::Minimap* mm,
+                          wowee::rendering::Minimap::Art art, const char* stock) {
+        if (mm) {
+            const std::string& p = mm->artPath(art);
+            if (!p.empty()) return p.c_str();
+        }
+        return stock;
+    }
+
     inline ImTextureID texId(VkDescriptorSet ds) {
         return (ImTextureID)(uintptr_t)ds;
     }
@@ -847,7 +858,7 @@ void GameScreen::renderMinimapNpcDots(const MinimapFrame& frame, const EntityLis
     // Tracked creatures are the stock pass's (renderMinimapBlips); this is
     // only this client's optional "every creature" overlay.
     if (!settingsPanel_.minimapNpcDots_) return;
-    VkDescriptorSet icons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+    VkDescriptorSet icons = minimapArt(markerArt(services_.renderer ? services_.renderer->getMinimap() : nullptr, wowee::rendering::Minimap::Art::Blip, kObjectIconsPath), services_.assetManager, services_.window);
     if (!icons) return;
     const float size = kBlipSize * minimapArtScale(frame.mapRadius);
 
@@ -873,7 +884,7 @@ void GameScreen::renderMinimapRares(const MinimapFrame& frame, const EntityList&
     // This is independent of generic NPC dots so enabling rare tracking consistently
     // shows spawned rares on both maps without adding every nearby creature.
     if (settingsPanel_.showRareTracker_) {
-        VkDescriptorSet icons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+        VkDescriptorSet icons = minimapArt(markerArt(services_.renderer ? services_.renderer->getMinimap() : nullptr, wowee::rendering::Minimap::Art::Blip, kObjectIconsPath), services_.assetManager, services_.window);
         if (!icons) return;
         const float size = kBlipSize * minimapArtScale(frame.mapRadius);
         for (const auto& entity : minimapUnits) {
@@ -908,7 +919,7 @@ void GameScreen::renderMinimapRares(const MinimapFrame& frame, const EntityList&
 // with the stock art: a gold blip, dimmed.
 void GameScreen::renderMinimapLootCorpses(const MinimapFrame& frame, const EntityList& minimapUnits) {
     if (!settingsPanel_.minimapNpcDots_) return;
-    VkDescriptorSet icons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+    VkDescriptorSet icons = minimapArt(markerArt(services_.renderer ? services_.renderer->getMinimap() : nullptr, wowee::rendering::Minimap::Art::Blip, kObjectIconsPath), services_.assetManager, services_.window);
     if (!icons) return;
     const float size = kBlipSize * minimapArtScale(frame.mapRadius);
     {
@@ -952,7 +963,7 @@ void GameScreen::renderMinimapObjectDots(const MinimapFrame& frame, const Entity
     const MinimapTracking tracking = playerTracking(gameHandler);
     const bool allDots = settingsPanel_.minimapNpcDots_;
     if (!allDots) return;
-    VkDescriptorSet icons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+    VkDescriptorSet icons = minimapArt(markerArt(services_.renderer ? services_.renderer->getMinimap() : nullptr, wowee::rendering::Minimap::Art::Blip, kObjectIconsPath), services_.assetManager, services_.window);
     if (!icons) return;
     const float size = kBlipSize * minimapArtScale(frame.mapRadius);
 
@@ -998,7 +1009,7 @@ void GameScreen::renderMinimapChests(const MinimapFrame& frame, const EntityList
     // servers, so explicitly exclude the existing mining/herbalism classification.
     if (settingsPanel_.showChestTracker_) {
         // The gold blip, as Find Treasure draws a chest in the stock client.
-        VkDescriptorSet icons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+        VkDescriptorSet icons = minimapArt(markerArt(services_.renderer ? services_.renderer->getMinimap() : nullptr, wowee::rendering::Minimap::Art::Blip, kObjectIconsPath), services_.assetManager, services_.window);
         if (!icons) return;
         const float size = kBlipSize * minimapArtScale(frame.mapRadius);
         for (const auto& entity : minimapGameObjects) {
@@ -1035,7 +1046,7 @@ void GameScreen::renderMinimapQuestKills(const MinimapFrame& frame, const Entity
                                         const QuestStatusMap& statuses,
                                         game::GameHandler& gameHandler) {
     if (!settingsPanel_.minimapNpcDots_) return;
-    VkDescriptorSet icons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+    VkDescriptorSet icons = minimapArt(markerArt(services_.renderer ? services_.renderer->getMinimap() : nullptr, wowee::rendering::Minimap::Art::Blip, kObjectIconsPath), services_.assetManager, services_.window);
     if (!icons) return;
     const float blipSize = kBlipSize * minimapArtScale(frame.mapRadius);
     // Quest kill objective markers - highlight live NPCs matching active quest kill objectives
@@ -1253,8 +1264,8 @@ void GameScreen::renderMinimapBlips(const MinimapFrame& frame, game::GameHandler
 
     const float scale = minimapArtScale(frame.mapRadius);
     const float size = ms::kBlipSize * scale;
-    VkDescriptorSet blips = minimapArt(kPartyRaidBlipsPath, services_.assetManager, services_.window);
-    VkDescriptorSet icons = minimapArt(kObjectIconsPath, services_.assetManager, services_.window);
+    VkDescriptorSet blips = minimapArt(markerArt(services_.renderer ? services_.renderer->getMinimap() : nullptr, wowee::rendering::Minimap::Art::ClassBlip, kPartyRaidBlipsPath), services_.assetManager, services_.window);
+    VkDescriptorSet icons = minimapArt(markerArt(services_.renderer ? services_.renderer->getMinimap() : nullptr, wowee::rendering::Minimap::Art::Blip, kObjectIconsPath), services_.assetManager, services_.window);
     for (const auto& pb : st.party) {
         float sx = 0.0f, sy = 0.0f;
         if (!frame.project(pb.render, sx, sy)) continue;
@@ -1394,7 +1405,7 @@ void GameScreen::renderMinimapPois(const MinimapFrame& frame, game::GameHandler&
     const float radius = frame.view.viewRadius;
     const float scale = minimapArtScale(frame.mapRadius);
     if (!arrows) {
-        VkDescriptorSet poiIcons = minimapArt(kPoiIconsPath, services_.assetManager, services_.window);
+        VkDescriptorSet poiIcons = minimapArt(markerArt(services_.renderer ? services_.renderer->getMinimap() : nullptr, wowee::rendering::Minimap::Art::Icon, kPoiIconsPath), services_.assetManager, services_.window);
         if (!poiIcons) return;
         for (const auto& p : pois) {
             if ((p.flags & ms::kPoiIconOnMinimap) == 0) continue;
@@ -1433,9 +1444,14 @@ void GameScreen::renderMinimapPois(const MinimapFrame& frame, game::GameHandler&
         const Poi& p = pois[candidateOf[static_cast<size_t>(picked[k])]];
         // Indoors only the client's own slots and AreaPOI flag 0x100 point out.
         if (indoors && ((p.kind == 0 && (p.flags & 0x100) == 0) || p.kind == 3)) continue;
-        const char* path = p.kind == 2 ? kCorpseArrowPath
-                         : p.kind == 0 ? "Interface\\Minimap\\Rotating-MinimapArrow.blp"
-                                       : "Interface\\Minimap\\Rotating-MinimapGuideArrow.blp";
+        const auto* artMap = services_.renderer ? services_.renderer->getMinimap() : nullptr;
+        const char* path = p.kind == 2
+            ? markerArt(artMap, wowee::rendering::Minimap::Art::CorpseArrow, kCorpseArrowPath)
+            : p.kind == 0
+                ? markerArt(artMap, wowee::rendering::Minimap::Art::StaticPoiArrow,
+                            "Interface\\Minimap\\Rotating-MinimapArrow.blp")
+                : markerArt(artMap, wowee::rendering::Minimap::Art::PoiArrow,
+                            "Interface\\Minimap\\Rotating-MinimapGuideArrow.blp");
         VkDescriptorSet tex = minimapArt(path, services_.assetManager, services_.window);
         if (!tex) continue;
         const float angle = ms::rimAngle(p.render.x - frame.playerRender.x, p.render.y - frame.playerRender.y);
@@ -1584,7 +1600,7 @@ void GameScreen::renderMinimapPlayerArrow(const MinimapFrame& frame) {
     // Facing 0 is north (up), a quarter turn counter-clockwise west (left).
     const float nx = -std::sin(turn);
     const float ny = -std::cos(turn);
-    if (VkDescriptorSet arrow = minimapArt(kPlayerArrowPath, services_.assetManager,
+    if (VkDescriptorSet arrow = minimapArt(markerArt(services_.renderer ? services_.renderer->getMinimap() : nullptr, wowee::rendering::Minimap::Art::Player, kPlayerArrowPath), services_.assetManager,
                                            services_.window)) {
         const float artScale = minimapArtScale(frame.mapRadius);
         drawRotated(frame.drawList, arrow, frame.centerX, frame.centerY,

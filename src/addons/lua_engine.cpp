@@ -3998,6 +3998,16 @@ int lua_Minimap_SetPlayerTextureHeight(lua_State* L) {
     return 0;
 }
 
+/// The Minimap frame's art setters (CGMinimapFrame): which file the blips, the
+/// party and raid class blips, the POI icons, the player arrow and the three
+/// rim arrows are drawn from. Kept on the widget and handed to the map, which
+/// draws them. Index is rendering::Minimap::Art's.
+template <size_t Index>
+int lua_Minimap_SetArt(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) w->minimapArt[Index] = luaL_optstring(L, 2, "");
+    return 0;
+}
+
 /// The QuestPOIFrame ("Blob") setters WorldMapBlobFrame_OnLoad calls, and that
 /// WorldMapFrame_SetOpacity calls again with the alphas scaled by the map's
 /// opacity slider. Kept on the widget; WidgetRenderer::drawQuestBlobs reads
@@ -8169,6 +8179,13 @@ void LuaEngine::registerCoreAPI() {
         {"GetPingPosition", lua_Minimap_GetPingPosition},
         {"SetPlayerTextureWidth",  lua_Minimap_SetPlayerTextureWidth},
         {"SetPlayerTextureHeight", lua_Minimap_SetPlayerTextureHeight},
+        {"SetBlipTexture",          lua_Minimap_SetArt<0>},
+        {"SetClassBlipTexture",     lua_Minimap_SetArt<1>},
+        {"SetIconTexture",          lua_Minimap_SetArt<2>},
+        {"SetPlayerTexture",        lua_Minimap_SetArt<3>},
+        {"SetPOIArrowTexture",      lua_Minimap_SetArt<4>},
+        {"SetStaticPOIArrowTexture", lua_Minimap_SetArt<5>},
+        {"SetCorpsePOIArrowTexture", lua_Minimap_SetArt<6>},
         {"DrawQuestBlob",   lua_QuestBlobFrame_DrawQuestBlob},
         {"SetFillTexture",   lua_QuestBlobFrame_SetFillTexture},
         {"SetBorderTexture", lua_QuestBlobFrame_SetBorderTexture},

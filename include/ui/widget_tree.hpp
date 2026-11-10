@@ -21,6 +21,7 @@
 // readable against Blizzard's own documentation, rather than mirrored.
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -767,6 +768,11 @@ struct Widget {
     /// arrow's size in interface units. Zero is "not set", which the map
     /// draws at the 40x40 MinimapPing_OnLoad asks for.
     float minimapPlayerTexW = 0.0f, minimapPlayerTexH = 0.0f;
+    /// Minimap:SetBlipTexture, SetClassBlipTexture, SetIconTexture,
+    /// SetPlayerTexture, SetPOIArrowTexture, SetStaticPOIArrowTexture and
+    /// SetCorpsePOIArrowTexture, in rendering::Minimap::Art order; empty is the
+    /// stock art. Handed to the map by the frame loop like the arrow's size.
+    std::array<std::string, 7> minimapArt{};
 
     /// A QuestPOIFrame ("Blob") - WorldMapBlobFrame - and how it shades the
     /// quest areas: SetFillTexture / SetBorderTexture name the art,

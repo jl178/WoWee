@@ -5798,6 +5798,11 @@ void Application::render() {
                         // marker pass that draws the arrow. Zero (never set)
                         // keeps the stock 40.
                         map->setPlayerArrowSize(mm->minimapPlayerTexW, mm->minimapPlayerTexH);
+                        // And the art its Set*Texture methods named.
+                        for (size_t a = 0; a < mm->minimapArt.size(); ++a) {
+                            map->setArtPath(static_cast<rendering::Minimap::Art>(a),
+                                            mm->minimapArt[a]);
+                        }
 
                         // MinimapCompassTexture turns against the map
                         // (0x0057D5B0, with minus the facing) while the map

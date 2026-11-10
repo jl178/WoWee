@@ -15,6 +15,7 @@
 #include <vector>
 #include <future>
 #include <algorithm>
+#include <array>
 
 namespace wowee {
 namespace pipeline { class AssetManager; }
@@ -144,6 +145,20 @@ public:
     }
     [[nodiscard]] float playerArrowWidth() const { return playerArrowW_; }
     [[nodiscard]] float playerArrowHeight() const { return playerArrowH_; }
+
+    /// The art the map's markers are drawn from, as the Minimap frame's
+    /// SetBlipTexture, SetClassBlipTexture, SetIconTexture, SetPlayerTexture,
+    /// SetPOIArrowTexture, SetStaticPOIArrowTexture and SetCorpsePOIArrowTexture
+    /// set it. Empty is the stock file. Held here for the same reason the
+    /// arrow's size is: the marker pass reads the map, not the widget.
+    enum class Art : uint8_t { Blip, ClassBlip, Icon, Player, PoiArrow, StaticPoiArrow,
+                               CorpseArrow, Count };
+    void setArtPath(Art art, const std::string& path) {
+        art_[static_cast<size_t>(art)] = path;
+    }
+    [[nodiscard]] const std::string& artPath(Art art) const {
+        return art_[static_cast<size_t>(art)];
+    }
 
     /// Where the map is drawn, in pixels from the top-left of the window.
     ///
@@ -324,6 +339,7 @@ private:
     static constexpr float kDefaultPlayerArrowSize = 40.0f;
     float playerArrowW_ = kDefaultPlayerArrowSize;
     float playerArrowH_ = kDefaultPlayerArrowSize;
+    std::array<std::string, static_cast<size_t>(Art::Count)> art_{};
 };
 
 } // namespace rendering
