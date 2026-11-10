@@ -1,4 +1,5 @@
 #include "rendering/terrain_manager.hpp"
+#include "pipeline/minimap_trs.hpp"
 #include "rendering/wmo_liquid_stream.hpp"
 
 #include <vector>
@@ -294,39 +295,8 @@ far_field::Atlas TerrainManager::buildFarFieldAtlas(pipeline::AssetManager* asse
     namespace ff = far_field;
     const auto t0 = std::chrono::steady_clock::now();
     if (!assets || layout.empty()) return {};
-    const auto lower = [](std::string v) {
-        std::transform(v.begin(), v.end(), v.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return v;
-    };
-    const auto stripBlp = [](std::string& v) {
-        if (v.size() > 4 && (v.compare(v.size() - 4, 4, ".blp") == 0 || v.compare(v.size() - 4, 4, ".BLP") == 0))
-            v.resize(v.size() - 4);
-    };
-    // md5translate.trs: "<map>\map<x>_<y>.blp<TAB><hash>.blp" lines under
-    // "dir:" headers, as Minimap::parseTRS reads it.
-    std::unordered_map<std::string, std::string> trs;
-    {
-        const std::vector<uint8_t> data = assets->readFile("Textures\\Minimap\\md5translate.trs");
-        const std::string prefix = lower(map) + "\\";
-        std::string line;
-        size_t i = 0;
-        while (i < data.size()) {
-            size_t j = i;
-            while (j < data.size() && data[j] != '\n') ++j;
-            line.assign(reinterpret_cast<const char*>(data.data()) + i, j - i);
-            i = j + 1;
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            const size_t tab = line.find('\t');
-            if (tab == std::string::npos) continue;
-            std::string key = lower(line.substr(0, tab));
-            if (key.compare(0, prefix.size(), prefix) != 0) continue;
-            stripBlp(key);
-            std::string hash = line.substr(tab + 1);
-            stripBlp(hash);
-            trs[key.substr(prefix.size())] = std::move(hash);
-        }
-    }
+    // md5translate.trs, as Minimap::parseTRS reads it (minimap_trs.hpp).
+    const std::unordered_map<std::string, std::string> trs = pipeline::readMinimapTrs(assets, map);
     // WOWEE_FARFIELD_TRANSPOSE=1 lays each picture in turned over its
     // diagonal (a check of the orientation against the near ground).
     static const bool kTranspose = core::envFlagEnabled("WOWEE_FARFIELD_TRANSPOSE", false);

@@ -51,7 +51,10 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 SKIP = 77
 
 # GCC-only, or meaningless for a parse: dropped with no argument.
-DROP = ("-Winvalid-pch", "-fno-fat-lto-objects", "-Wno-odr", "-MD", "-MMD")
+DROP = ("-Winvalid-pch", "-fno-fat-lto-objects", "-Wno-odr", "-MD", "-MMD",
+        # GCC-only: its flow-sensitive false positives kept as warnings.
+        "-Wno-error=restrict", "-Wno-error=stringop-overflow",
+        "-Wno-error=stringop-overread", "-Wno-error=array-bounds")
 DROP_PREFIX = ("-flto", "-fconcepts-diagnostics-depth")
 # Dropped together with the argument after them.
 DROP_WITH_ARG = ("-o", "-MT", "-MF", "-MQ")

@@ -10,6 +10,7 @@
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "pipeline/asset_manager.hpp"
+#include "pipeline/minimap_trs.hpp"
 #include "pipeline/blp_loader.hpp"
 
 #include <algorithm>
@@ -257,41 +258,6 @@ void BounceGrid::shutdown() {
 
 namespace {
 
-std::string lower(std::string v) {
-    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return v;
-}
-
-void stripBlp(std::string& v) {
-    if (v.size() > 4 && lower(v.substr(v.size() - 4)) == ".blp") v.resize(v.size() - 4);
-}
-
-// md5translate.trs: "<map>\map<x>_<y>.blp<TAB><hash>.blp" lines (as
-// TerrainManager::buildFarFieldAtlas reads it), for one map.
-std::unordered_map<std::string, std::string> readTrs(pipeline::AssetManager* assets, const std::string& map) {
-    std::unordered_map<std::string, std::string> trs;
-    const std::vector<uint8_t> data = assets->readFile("Textures\\Minimap\\md5translate.trs");
-    const std::string prefix = lower(map) + "\\";
-    std::string line;
-    size_t i = 0;
-    while (i < data.size()) {
-        size_t j = i;
-        while (j < data.size() && data[j] != '\n') ++j;
-        line.assign(reinterpret_cast<const char*>(data.data()) + i, j - i);
-        i = j + 1;
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        const size_t tab = line.find('\t');
-        if (tab == std::string::npos) continue;
-        std::string key = lower(line.substr(0, tab));
-        if (key.compare(0, prefix.size(), prefix) != 0) continue;
-        stripBlp(key);
-        std::string hash = line.substr(tab + 1);
-        stripBlp(hash);
-        trs[key.substr(prefix.size())] = std::move(hash);
-    }
-    return trs;
-}
-
 constexpr int kMinimapTexels = 128;  // a tile's picture, ~4.2 yards a texel
 
 }  // namespace
@@ -349,7 +315,7 @@ void BounceGrid::update(const glm::vec3& camera, float dt, const M2Renderer* m2,
     job_ = std::async(std::launch::async, [in = std::move(in), mm, assets, gatherMs, canopies,
                                            buildings]() mutable {
         const auto t1 = std::chrono::steady_clock::now();
-        if (mm->trs.empty()) mm->trs = readTrs(assets, mm->map);
+        if (mm->trs.empty()) mm->trs = pipeline::readMinimapTrs(assets, mm->map);
         // The tiles the grid covers (at most 2x2 for 512 yards), decoded and
         // boxed down once each.
         const float T = core::coords::TILE_SIZE;
