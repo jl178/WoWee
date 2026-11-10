@@ -467,6 +467,14 @@ wowee::ui::Widget* widgetOf(lua_State* L, int index) {
     return tree->get(widgetIdOf(L, index));
 }
 
+/// __WoweeMarkLevelHolder(frame): the bootstrap's UIParent and WorldFrame,
+/// which hold the interface and are not frames the client has; see
+/// Widget::levelHolder.
+static int lua_WoweeMarkLevelHolder(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) w->levelHolder = true;
+    return 0;
+}
+
 /// The same widget, with its rect resolved first.
 ///
 /// For the getters that answer a measurement. A rect used to be whatever the
@@ -1326,7 +1334,8 @@ int lua_Region_GetEffectiveScale(lua_State* L) {
 }
 int lua_Frame_GetFrameLevel(lua_State* L) {
     const auto* w = widgetOf(L, 1);
-    lua_pushnumber(L, w ? w->effLevel : 0);
+    // Never below 0, which only the engine's holders sit under.
+    lua_pushnumber(L, w ? std::max(w->effLevel, 0) : 0);
     return 1;
 }
 /// GetPoint(n) → point, relativeTo, relativePoint, x, y.
@@ -4250,9 +4259,10 @@ int lua_Frame_IsMouseEnabled(lua_State* L) {
 }
 
 int lua_Frame_SetFrameStrata(lua_State* L) {
-    if (auto* w = widgetOf(L, 1)) {
-        w->strata = wowee::ui::parseStrata(luaL_optstring(L, 2, "MEDIUM"));
-        w->strataExplicit = true;
+    auto* tree = wowee::addons::getWidgetTree(L);
+    const uint32_t id = widgetIdOf(L, 1);
+    if (tree && id && widgetOf(L, 1)) {
+        tree->setStrata(id, wowee::ui::parseStrata(luaL_optstring(L, 2, "MEDIUM")));
     }
     return 0;
 }
@@ -4264,8 +4274,10 @@ int lua_Frame_SetFrameStrata(lua_State* L) {
 /// the ones the XML puts in FULLSCREEN_DIALOG. Anything branching on it was
 /// deciding from a constant.
 int lua_Frame_GetFrameStrata(lua_State* L) {
+    // The strata it is in - its own or the one it inherited.
     const auto* w = widgetOf(L, 1);
-    lua_pushstring(L, w ? wowee::ui::strataName(w->strata) : "MEDIUM");
+    lua_pushstring(L, w ? wowee::ui::strataName(w->strataExplicit ? w->strata : w->effStrata)
+                        : "MEDIUM");
     return 1;
 }
 
@@ -7764,6 +7776,8 @@ void LuaEngine::registerCoreAPI() {
     lua_setglobal(L_, "__WoweeFrameMT");
     lua_pushcfunction(L_, lua_WoweeRealFrame);
     lua_setglobal(L_, "__WoweeRealFrame");
+    lua_pushcfunction(L_, lua_WoweeMarkLevelHolder);
+    lua_setglobal(L_, "__WoweeMarkLevelHolder");
     lua_pushcfunction(L_, lua_EnumerateFrames);
     lua_setglobal(L_, "EnumerateFrames");
     lua_pushcfunction(L_, lua_WoweeSetClientDrawn);
@@ -9231,6 +9245,10 @@ void LuaEngine::registerCoreAPI() {
         "UIPanelWindows = {}\n"
         "WorldFrame = CreateFrame('Frame', 'WorldFrame')\n"
         "WorldFrame:SetAllPoints()\n"
+        // Holders, not frames: what FrameXML hangs off them starts at level
+        // 0, as a parentless frame does in the client.
+        "__WoweeMarkLevelHolder(UIParent)\n"
+        "__WoweeMarkLevelHolder(WorldFrame)\n"
         // Two frames the real client builds in C and the world map then uses
         // without checking. FrameXML says so itself, twice, in a comment
         // naming CWorldMap::CreatePlayerArrowFrame.

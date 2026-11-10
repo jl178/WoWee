@@ -18,6 +18,16 @@ namespace ui {
 
 namespace {
 
+/// The level of the two widgets that hold the interface - the screen and the
+/// UIParent this tree makes before any XML. Neither is a frame in the client:
+/// a frame with no parent sits at level 0 (CSimpleFrame::SetParent(nil),
+/// 0x004911B0, sets it there), and so does FrameXML's own UIParent. Their
+/// children are therefore placed one above this, at 0, and everything under
+/// UIParent counts up from there as it does in the client. Addons that set
+/// absolute levels (ElvUI's unit frames put health at 10 and power at 5 and
+/// expect the frame itself to be below both) depend on the count.
+constexpr int kHolderLevel = -1;
+
 // WOWEE_LAYOUT_DIRTY_PROFILE=1: which setter, on which frame, moved the layout
 // generation - the reason the full pass cannot be skipped on a frame where
 // nothing visibly changed. Reported with the layout timings every ten seconds.
@@ -224,6 +234,9 @@ void WidgetTree::reset() {
     // rather than naming something WoW has no word for.
     rootId_ = create(WidgetKind::Frame, 0, "");
     uiParentId_ = create(WidgetKind::Frame, rootId_, "UIParent");
+    // Below every frame: see kHolderLevel.
+    widgets_[rootId_].effLevel = kHolderLevel;
+    widgets_[uiParentId_].effLevel = kHolderLevel;
 }
 
 uint32_t WidgetTree::create(WidgetKind kind, uint32_t parent, const std::string& name) {
@@ -730,6 +743,27 @@ void WidgetTree::shiftExplicitLevels(uint32_t id, int delta) {
     }
 }
 
+void WidgetTree::setStrata(uint32_t id, FrameStrata strata) {
+    Widget* w = get(id);
+    if (!w) return;
+    w->strata = strata;
+    w->strataExplicit = true;
+    w->effStrata = strata;
+    // Everything inside inherits it from here on - the same as being set to
+    // it, since the client sets every one of them.
+    std::vector<uint32_t> stack(w->children.begin(), w->children.end());
+    while (!stack.empty()) {
+        const uint32_t cid = stack.back();
+        stack.pop_back();
+        Widget* c = get(cid);
+        if (!c) continue;
+        c->strataExplicit = false;
+        c->effStrata = strata;
+        stack.insert(stack.end(), c->children.begin(), c->children.end());
+    }
+    markLayoutDirty();
+}
+
 void WidgetTree::raise(uint32_t id) {
     Widget* w = get(id);
     if (!w) return;
@@ -1001,7 +1035,7 @@ void WidgetTree::layout(float pixelW, float pixelH) {
     if (rootW.visible != rootW.shown) noteVisibilityCandidate(rootId_);
     setVisible(rootW, rootW.shown);
     rootW.effStrata = rootW.strata;
-    rootW.effLevel = 0;
+    rootW.effLevel = kHolderLevel;
     rootW.effScale = 1.0f;
 
     // UIParent fills the screen and is laid out here rather than by anchors:
@@ -1020,7 +1054,7 @@ void WidgetTree::layout(float pixelW, float pixelH) {
         if (ui->visible != ui->visibleChain) noteVisibilityCandidate(uiParentId_);
         setVisible(*ui, ui->visibleChain);
         ui->effStrata = ui->strata;
-        ui->effLevel = 0;
+        ui->effLevel = kHolderLevel;
         ui->effScale = 1.0f;
         // The ultrawide HUD's area, before anything is anchored to it.
         hudActive_ = false;
@@ -1278,6 +1312,9 @@ void WidgetTree::layoutWidgetSelf(uint32_t id, float screenW, float screenH) {
         !(w->levelExplicit && w->levelBelowParent)) {
         w->effLevel = parent->effLevel + 1;
     }
+    // A stand-in that holds the interface rather than being part of it; see
+    // kHolderLevel and Widget::levelHolder.
+    if (w->levelHolder) w->effLevel = kHolderLevel;
     // Multiplied down the chain, so scaling a window scales everything in it.
     w->effScale  = (parent ? parent->effScale : 1.0f) * w->scale;
     const float es = w->effScale;

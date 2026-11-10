@@ -263,6 +263,11 @@ struct Widget {
     /// level minus one, holding the border and fill the parent's art sits
     /// on), so the floor the layout keeps under children does not apply.
     bool levelBelowParent = false;
+    /// One of the frames the engine makes before FrameXML to hold the
+    /// interface (the first UIParent and WorldFrame). Not frames in the
+    /// client, so they take no level of their own: what hangs off them starts
+    /// at 0, as a parentless frame does in the client.
+    bool levelHolder = false;
     DrawLayer layer = DrawLayer::Artwork;
     int subLevel = 0;
 
@@ -897,6 +902,10 @@ public:
     /// takes what is inside it along. Public because SetFrameLevel needs the
     /// same behaviour.
     void shiftExplicitLevels(uint32_t id, int delta);
+    /// SetFrameStrata: the frame and everything inside it go to that strata,
+    /// whatever any of them set before (CSimpleFrame::SetFrameStrata,
+    /// 0x00491020, sets each child's in turn).
+    void setStrata(uint32_t id, FrameStrata strata);
 
     /// The frame currently following the cursor, if any.
     ///
