@@ -4170,35 +4170,77 @@ static bool frameScriptSet(lua_State* L, int frameIndex, const char* name) {
     return has;
 }
 
-/// Run a frame's OnShow now, from inside Show().
+/// The frame and every frame under it that is shown, each child's whole
+/// subtree before its parent - the order the client's show and hide
+/// recursions run their handlers in. CSimpleFrame's show (0x4918F0) marks the
+/// frame visible, recurses into its shown child frames (vtable +0xCC, itself)
+/// and only then runs its own OnShow (vtable +0x70, 0x4902D0); the hide
+/// (0x491830) is the same shape with +0xC8 and OnHide (+0x74, 0x490300).
+/// Collected before anything runs, since a handler is free to create frames.
+static void collectShownSubtree(wowee::ui::WidgetTree* tree, uint32_t id,
+                                std::vector<uint32_t>& out, int depth = 0) {
+    const auto* w = tree->get(id);
+    if (!w || depth > 64) return;
+    for (uint32_t c : w->children) {
+        const auto* cw = tree->get(c);
+        if (cw && cw->kind == wowee::ui::WidgetKind::Frame && cw->shown) {
+            collectShownSubtree(tree, c, out, depth + 1);
+        }
+    }
+    out.push_back(id);
+}
+
+/// Run a frame's script by widget id, reporting an error the way every other
+/// script call does rather than unwinding through Show or Hide.
+static void runFrameScriptById(lua_State* L, uint32_t id, const char* script) {
+    lua_getglobal(L, "__WoweeFramesByWid");
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
+    lua_rawgeti(L, -1, static_cast<int>(id));
+    lua_remove(L, -2);
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
+    const int frame = lua_gettop(L);
+    lua_getfield(L, frame, "__scripts");
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, script);
+        if (lua_isfunction(L, -1)) {
+            lua_pushvalue(L, frame);
+            if (pcallScript(L, script, 1, 0) != 0) {
+                LOG_WARNING("[Lua] ", script, " error: ",
+                            lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
+                lua_pop(L, 1);
+            }
+        } else {
+            lua_pop(L, 1);
+        }
+    }
+    lua_settop(L, frame - 1);
+}
+
+/// OnShow for a frame that has just started running, and for every shown
+/// frame under it, from inside Show() - which is when the client runs them.
 ///
-/// The visibility pass that normally fires it runs once a frame, and that is
+/// The visibility pass that used to fire them runs once a frame, and that is
 /// too late for anything whose next step depends on what the handler did.
 /// ContainerFrame_GenerateFrame is the case that showed it: it writes
 /// `bags[bagsShown + 1] = frame:GetName()`, anchors the list, and only then
 /// calls Show - and `bagsShown` is incremented by ContainerFrame_OnShow. With
 /// the handler deferred, every bag opened in the same breath wrote itself to
-/// index 1 over the last one, so the list never held more than one name and
-/// only that one was ever anchored. Opening the bags at a vendor put all of
-/// them in the same place, one on top of another.
+/// index 1 over the last one. The children's handlers were still left to that
+/// pass, so they ran after the code that showed their parent had moved on,
+/// and after the parent's own OnShow rather than before it.
 ///
-/// The real client runs OnShow as part of Show, so this is the faithful
-/// order rather than a workaround for that one function.
-static void fireOnShowNow(lua_State* L, int frameIndex, wowee::ui::Widget* w) {
-    const int abs = frameIndex > 0 ? frameIndex : lua_gettop(L) + frameIndex + 1;
-    lua_getfield(L, abs, "__scripts");
-    if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
-    lua_getfield(L, -1, "OnShow");
-    if (!lua_isfunction(L, -1)) { lua_pop(L, 2); return; }
-    lua_pushvalue(L, abs);                       // self
-    // Errors are reported the same way every other script call reports them
-    // rather than unwinding through Show.
-    if (pcallScript(L, "OnShow", 1, 0) != 0) {
-        LOG_WARNING("[Lua] OnShow error: ", lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
-        lua_pop(L, 1);
+/// The pass is told each has been said (onShowFired), so it does not say it
+/// again when the layout catches up.
+static void fireOnShowNow(lua_State* L, wowee::ui::WidgetTree* tree, uint32_t rootId) {
+    std::vector<uint32_t> order;
+    collectShownSubtree(tree, rootId, order);
+    for (uint32_t id : order) {
+        auto* w = tree->get(id);
+        if (!w) continue;
+        w->onShowFired = true;
+        w->shownToggles = 0;
+        runFrameScriptById(L, id, "OnShow");
     }
-    lua_pop(L, 1);                               // __scripts
-    w->onShowFired = true;
 }
 
 int lua_Region_Show(lua_State* L) {
@@ -4232,55 +4274,39 @@ int lua_Region_Show(lua_State* L) {
     // Only when this call is what made it shown, and only when every ancestor
     // is shown too - the same condition the deferred pass uses, read off the
     // flags Show and Hide set rather than off the layout, which has not run.
-    // A clean show only. `panel:Hide(); panel:Show()` is the interface asking
-    // for a rebuild, and the deferred pass answers that pair together, in
-    // order, on purpose - Hide fires no handler of its own, so running OnShow
-    // here would put it before the OnHide that is owed. One toggle means this
-    // Show is the only thing that happened since the last pass.
-    if (w && becameShown && w->shownToggles <= 1 && ancestorsShown(L, w)) {
-        fireOnShowNow(L, 1, w);
+    // Whenever this call is what started it running, however many times it
+    // was hidden and shown since the last pass: Hide says its OnHide at once
+    // too (fireOnHideNow), so no earlier handler is left owed for this one to
+    // overtake. While the client is still building a frame from XML or a
+    // template, only the frame itself, as before.
+    if (w && becameShown && ancestorsShown(L, w)) {
+        if (auto* tree = wowee::addons::getWidgetTree(L)) {
+            if (taint::constructing()) {
+                w->onShowFired = true;
+                w->shownToggles = 0;
+                runFrameScriptById(L, w->id, "OnShow");
+            } else {
+                fireOnShowNow(L, tree, w->id);
+            }
+        }
     }
     return 0;
 }
 /// OnHide for a frame that has just stopped being shown, and for every
-/// frame under it that was shown with it, at once - which is when the client
-/// runs them (CSimpleFrame::Hide). The deferred pass is told it has been
-/// said (reportedVisible), so it does not say it again.
+/// frame under it that was shown with it, at once and children first - which
+/// is when and how the client runs them (CSimpleFrame's hide, 0x491830). The
+/// deferred pass is told it has been said (reportedVisible), so it does not
+/// say it again.
 static void fireOnHideNow(lua_State* L, wowee::ui::WidgetTree* tree, uint32_t rootId) {
-    std::vector<uint32_t> order{rootId};
-    for (size_t i = 0; i < order.size(); ++i) {
-        const auto* w = tree->get(order[i]);
-        if (!w) continue;
-        for (uint32_t c : w->children) {
-            const auto* cw = tree->get(c);
-            if (cw && cw->kind == wowee::ui::WidgetKind::Frame && cw->shown) order.push_back(c);
-        }
-    }
+    std::vector<uint32_t> order;
+    collectShownSubtree(tree, rootId, order);
     for (uint32_t id : order) {
         auto* w = tree->get(id);
         if (!w) continue;
         w->reportedVisible = false;
         w->onShowFired = false;
-        lua_getglobal(L, "__WoweeFramesByWid");
-        if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
-        lua_rawgeti(L, -1, static_cast<int>(id));
-        lua_remove(L, -2);
-        if (!lua_istable(L, -1)) { lua_pop(L, 1); continue; }
-        const int frame = lua_gettop(L);
-        lua_getfield(L, frame, "__scripts");
-        if (lua_istable(L, -1)) {
-            lua_getfield(L, -1, "OnHide");
-            if (lua_isfunction(L, -1)) {
-                lua_pushvalue(L, frame);
-                if (pcallScript(L, "OnHide", 1, 0) != 0) {
-                    LOG_WARNING("[Lua] OnHide error: ", lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
-                    lua_pop(L, 1);
-                }
-            } else {
-                lua_pop(L, 1);
-            }
-        }
-        lua_settop(L, frame - 1);
+        w->shownToggles = 0;
+        runFrameScriptById(L, id, "OnHide");
     }
 }
 
