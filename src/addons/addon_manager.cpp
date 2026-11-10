@@ -51,6 +51,23 @@ bool AddonManager::initialize(game::GameHandler* gameHandler, const LuaServices&
     luaServices_.isAddOnLoaded = [this](const std::string& name) {
         return isAddOnLoadedByName(name);
     };
+    luaServices_.addOnLoadBlock = [this](const std::string& name) -> std::string {
+        const auto same = [](const std::string& a, const std::string& b) {
+            return a.size() == b.size() &&
+                   std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+                       return std::tolower(static_cast<unsigned char>(x)) ==
+                              std::tolower(static_cast<unsigned char>(y));
+                   });
+        };
+        for (const auto* list : {&addons_, &lodAddons_}) {
+            for (const auto& a : *list) {
+                if (same(a.addonName, name)) return versionBlock(a);
+            }
+        }
+        return {};
+    };
+    luaServices_.setAddonVersionCheck = [this](bool on) { setAddonVersionCheck(on); };
+    luaServices_.isAddonVersionCheckEnabled = [this]() { return isAddonVersionCheckEnabled(); };
     luaServices_.setAddOnEnabled = [this](const std::string& name, bool enabled) {
         setAddonEnabled(name, enabled);
     };
@@ -520,6 +537,15 @@ void AddonManager::loadAllAddons() {
             }
         }
         startupDone.insert(key);
+        if (const std::string block = versionBlock(addon); !block.empty()) {
+            LOG_WARNING("AddonManager: not loading '", addon.addonName, "': ", block,
+                        " (its interface is ",
+                        addon.directives.count("Interface") ? addon.directives.at("Interface")
+                                                            : std::string("unstated"),
+                        ", this client's ", clientInterface_, ")");
+            skipped++;
+            return false;
+        }
         const bool ok = loadAddon(addon);
         if (ok) loaded++; else failed++;
         return ok;
@@ -569,8 +595,29 @@ void AddonManager::loadEnabledState() {
         if (eq == std::string::npos) continue;
         std::string name = line.substr(0, eq);
         std::string val = line.substr(eq + 1);
+        if (name == "__checkAddonVersion") { versionCheck_ = (val != "0"); continue; }
         if (!name.empty()) addonEnabled_[name] = (val == "1");
     }
+}
+
+// The client's rule (0x005F7EE9, the manifest check behind GetAddOnInfo and
+// the loader): a manifest older than 2.0 can never run on 3.x (INCOMPATIBLE,
+// whatever the setting), and one for any interface but the client's own is
+// out of date (INTERFACE_VERSION) - kept out unless the player has ticked
+// "Load out of date AddOns", which clears checkAddonVersion. Newer counts as
+// out of date too: the check is for equality. The stock interface's own
+// Blizzard_ addons are this client's by definition and are never held back.
+std::string AddonManager::versionBlock(const TocFile& addon) const {
+    if (clientInterface_ == 0) return {};
+    const std::string key = lowered(addon.addonName);
+    if (key.rfind("blizzard_", 0) == 0) return {};
+    int v = 0;
+    if (const auto it = addon.directives.find("Interface"); it != addon.directives.end()) {
+        v = std::atoi(it->second.c_str());
+    }
+    if (clientInterface_ >= 30000 && v < 20000) return "INCOMPATIBLE";
+    if (v != clientInterface_ && versionCheck_) return "INTERFACE_VERSION";
+    return {};
 }
 
 void AddonManager::saveEnabledState() const {
@@ -584,6 +631,7 @@ void AddonManager::saveEnabledState() const {
     for (const auto& addon : addons_) {
         out << addon.addonName << "=" << (isAddonEnabled(addon.addonName) ? "1" : "0") << "\n";
     }
+    if (!versionCheck_) out << "__checkAddonVersion=0\n";
 }
 
 std::string AddonManager::getSavedVariablesPath(const TocFile& addon) const {
@@ -741,6 +789,8 @@ bool AddonManager::loadFrameXml(const std::string& frameXmlDir) {
     }
     const bool legacyHandlers = interfaceVersion == 0 || interfaceVersion < 30000;
     setLegacyHandlerGlobals(legacyHandlers);
+    // What every addon's own ## Interface is held against (versionBlock).
+    clientInterface_ = interfaceVersion;
     // Published, because some of FrameXML's own signatures changed between
     // expansions and the snippets this client runs against them have to pick.
     // UIDropDownMenu_SetWidth is the one that bit: 1.12 takes (width, frame)
@@ -1877,6 +1927,10 @@ bool AddonManager::loadAddOnByName(const std::string& name, std::string& reason)
         return false;
     }
     if (!isAddonEnabled(found->addonName)) { reason = "DISABLED"; return false; }
+    if (const std::string block = versionBlock(*found); !block.empty()) {
+        reason = block;
+        return false;
+    }
 
     // Its dependencies first, as the client does: ElvUI_OptionsUI requires
     // ElvUI, and a load-on-demand part may require another one.

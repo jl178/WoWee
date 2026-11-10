@@ -2157,12 +2157,34 @@ static int lua_GetAddOnInfo(lua_State* L) {
     lua_remove(L, -4);              // the addon info entry
     lua_remove(L, -4);              // the registry table
 
+    // Whether it can load: an addon for another interface version cannot,
+    // and says why the way the client does.
+    std::string block;
+    if (auto* svc = getLuaServices(L); svc && svc->addOnLoadBlock && lua_isstring(L, -3)) {
+        block = svc->addOnLoadBlock(lua_tostring(L, -3));
+    }
     lua_pushnil(L);                 // 4: url - not in a 3.3.5 manifest
-    lua_pushboolean(L, 1);          // 5: loadable
-    lua_pushnil(L);                 // 6: reason it is not, and it is
+    lua_pushboolean(L, block.empty() ? 1 : 0);  // 5: loadable
+    if (block.empty()) lua_pushnil(L); else lua_pushstring(L, block.c_str());  // 6: reason
     lua_pushstring(L, "INSECURE");  // 7: security
     lua_pushnil(L);                 // 8: newVersion
     return 8;
+}
+
+/// SetAddonVersionCheck(on) / IsAddonVersionCheckEnabled() - the "Load out of
+/// date AddOns" box, inverted: on keeps addons for other interface versions
+/// out, which is the client's default. Takes effect at the next load.
+static int lua_SetAddonVersionCheck(lua_State* L) {
+    if (auto* svc = getLuaServices(L); svc && svc->setAddonVersionCheck) {
+        svc->setAddonVersionCheck(lua_toboolean(L, 1) != 0);
+    }
+    return 0;
+}
+static int lua_IsAddonVersionCheckEnabled(lua_State* L) {
+    auto* svc = getLuaServices(L);
+    lua_pushboolean(L, (!svc || !svc->isAddonVersionCheckEnabled ||
+                        svc->isAddonVersionCheckEnabled()) ? 1 : 0);
+    return 1;
 }
 
 // GetAddOnMetadata(addonNameOrIndex, key) → value
@@ -7059,6 +7081,8 @@ void registerSystemLuaAPI(lua_State* L) {
                 {"CombatLog_Object_IsA", lua_CombatLog_Object_IsA},
                 {"GetNumAddOns",      lua_GetNumAddOns},
                 {"GetAddOnInfo",      lua_GetAddOnInfo},
+                {"SetAddonVersionCheck", lua_SetAddonVersionCheck},
+                {"IsAddonVersionCheckEnabled", lua_IsAddonVersionCheckEnabled},
                 // Turning an addon off, which the "an addon did something it
                 // is not allowed to" popup offers as its first button before
                 // reloading. Answered with nothing, that button reloaded and

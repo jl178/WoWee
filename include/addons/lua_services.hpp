@@ -277,6 +277,14 @@ struct LuaServices {
     std::function<bool(const std::string& name, std::string& reason)> loadAddOn;
     /// Whether a named addon has been loaded, for IsAddOnLoaded.
     std::function<bool(const std::string& name)> isAddOnLoaded;
+    /// Why an addon will not load though it is present and enabled - the
+    /// client's INTERFACE_VERSION or INCOMPATIBLE - or empty when it will.
+    std::function<std::string(const std::string& name)> addOnLoadBlock;
+    /// SetAddonVersionCheck / IsAddonVersionCheckEnabled: whether addons
+    /// written for another interface version are kept out ("Load out of
+    /// date AddOns" unticked, the client's default).
+    std::function<void(bool)> setAddonVersionCheck;
+    std::function<bool()> isAddonVersionCheckEnabled;
 
     /// Write every loaded addon's SavedVariables out now.
     ///

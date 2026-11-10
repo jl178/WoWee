@@ -69,6 +69,12 @@ public:
     /// case, because the interface asks for "Blizzard_TalentUI" and the
     /// directory on a case-sensitive filesystem is blizzard_talentui.
     bool loadAddOnByName(const std::string& name, std::string& reason);
+    /// Whether an addon's manifest is for this client's interface, as the
+    /// client decides it: empty when it is (or when version checking is off
+    /// and the addon is merely out of date), otherwise the client's reason.
+    [[nodiscard]] std::string versionBlock(const TocFile& addon) const;
+    void setAddonVersionCheck(bool on) { versionCheck_ = on; saveEnabledState(); }
+    [[nodiscard]] bool isAddonVersionCheckEnabled() const { return versionCheck_; }
     /// Load every load-on-demand addon whose ## LoadWith names this one.
     void loadAddOnsLoadingWith(const std::string& name);
     [[nodiscard]] bool isAddOnLoadedByName(const std::string& name) const;
@@ -126,6 +132,13 @@ private:
 
     // addonName -> enabled. Absent means enabled (default on).
     std::unordered_map<std::string, bool> addonEnabled_;
+    /// The interface version of the FrameXML this client runs (30300 for
+    /// 3.3.5a), read off its manifest; 0 until FrameXML has loaded, which
+    /// leaves every addon loadable.
+    int clientInterface_ = 0;
+    /// The checkAddonVersion setting: on unless the player asked for out of
+    /// date addons to be loaded.
+    bool versionCheck_ = true;
     std::string frameXmlDir_;
     /// The same directory as it is actually spelled on disk.
     ///
