@@ -565,6 +565,7 @@ function(compile_shaders TARGET_NAME)
         "terrain_horizon_far.frag.glsl|terrain_horizon_far_color.frag.spv|-DHORIZON_LIT -DHORIZON_COLOR"
         "character.vert.glsl|character_tess.vert.spv|-DCHAR_TESS"
         "ambient_occlusion.frag.glsl|ambient_bounce.frag.spv|-DBOUNCE_GRID"
+        "ambient_occlusion.frag.glsl|ambient_fill.frag.spv|-DBOUNCE_GRID -DFILL_ONLY"
         "water_hd.frag.glsl|water_fw.frag.spv|-DENHANCED_WATER"
     )
     foreach(VARIANT ${SHADER_VARIANTS})

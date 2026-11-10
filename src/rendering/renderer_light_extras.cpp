@@ -110,7 +110,11 @@ void Renderer::decideContactShadows() {
         bounceOffFrames_ = 0;
     }
     bounceFrame_ = decideDepthLightPass(enh_.ambientOcclusion || enh_.fillLight || bounce, ambientOcclusion_,
-                                        bounce ? "assets/shaders/ambient_bounce.frag.spv"
+                                        // Without the occlusion, the build without its
+                                        // spiral (FILL_ONLY): the same picture, a smaller
+                                        // shader.
+                                        bounce ? (enh_.ambientOcclusion ? "assets/shaders/ambient_bounce.frag.spv"
+                                                                        : "assets/shaders/ambient_fill.frag.spv")
                                                : "assets/shaders/ambient_occlusion.frag.spv",
                                         "Ambient occlusion",
                                         static_cast<int>(ContactShadowPass::Blend::Multiply2x),

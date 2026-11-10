@@ -224,7 +224,16 @@ void main() {
     float radiusYd = kRadius * min(1.0, maxPx / max(radiusPx, 1e-3));
     radiusPx = min(radiusPx, maxPx);
     int flags = int(pc.target.w + 0.5);
+#ifdef FILL_ONLY
+    // Built a third time with FILL_ONLY (ambient_fill.frag.spv) for the fill
+    // and bounce light with the occlusion off, the Enhanced preset: the
+    // spiral and the quad's pooling then leave the shader, whose size was
+    // a tenth of the pass's cost on the Iris Xe. The same picture as the
+    // full build with flag 1 clear.
+    const bool aoOn = false;
+#else
     bool aoOn = (flags & 1) != 0;
+#endif
     bool fillOn = (flags & 2) != 0;
 #ifdef BOUNCE_GRID
     // The bounce light runs the fill with or without its row.
@@ -378,16 +387,21 @@ void main() {
                 toSun = toSunLen > 1e-4 ? toSun / toSunLen : vec2(0.0);
                 vec2 nh = n.xy * smoothSurface;
                 float wall = 0.0;
-                const vec2 dirs[4] = vec2[](vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0));
                 // The wall heights are carried 8 yards past each wall
                 // (bounce_grid.hpp): none spanning this height here, none
                 // within reach.
                 bool wallNear = g2.w > pos.z - 0.5 && g2.z < pos.z + 1.5;
-                for (int k = 0; k < 4 && wallNear; ++k) {
-                    float facing = max(dot(nh, dirs[k]), 0.0);
-                    float lit = max(dot(-dirs[k], toSun), 0.0);
+                // Along each axis this face turns toward one side at most
+                // (the other's facing is 0, and it adds nothing): one look an
+                // axis, toward that side, in the order the four were taken.
+                for (int a = 0; a < 2 && wallNear; ++a) {
+                    float toward = a == 0 ? nh.x : nh.y;
+                    float sgn = toward > 0.0 ? 1.0 : -1.0;
+                    vec2 dir = a == 0 ? vec2(sgn, 0.0) : vec2(0.0, sgn);
+                    float facing = max(dot(nh, dir), 0.0);
+                    float lit = max(dot(-dir, toSun), 0.0);
                     if (facing * lit <= 0.0) continue;
-                    vec2 uvk = uv + dirs[k] * (kWallReach / kGridSpan);
+                    vec2 uvk = uv + dir * (kWallReach / kGridSpan);
                     float present = textureLod(uBounceGrid, vec3(uvk, 1.0), 0.0).a;
                     vec2 wz = textureLod(uBounceGrid, vec3(uvk, 2.0), 0.0).zw;
                     float spans = smoothstep(wz.x - 1.5, wz.x - 0.5, pos.z) * smoothstep(pos.z - 0.5, pos.z + 1.5, wz.y);
