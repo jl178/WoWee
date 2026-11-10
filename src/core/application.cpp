@@ -6220,22 +6220,38 @@ void Application::render() {
                     }
                     bool shown = false;
                     auto it = unitModelViews_.find(id);
-                    if (frame->visible && frame->modelUnitGuid != 0) {
+                    const bool hasModel = frame->modelUnitGuid != 0 || !frame->modelPath.empty();
+                    if (frame->visible && hasModel) {
                         if (it == unitModelViews_.end() && unitModelViews_.size() < 8) {
                             it = unitModelViews_.emplace(id, std::make_unique<UnitModelView>()).first;
                         }
+                        // SetCamera(0) is the model's own portrait camera -
+                        // the face, which is what a unit frame's 3D portrait
+                        // asks for - and anything else the whole figure.
+                        const auto framing = frame->modelCamera == 0
+                            ? ui::UnitPortrait::Framing::Face
+                            : ui::UnitPortrait::Framing::FullBody;
                         if (it != unitModelViews_.end()) {
                             UnitModelView& mv = *it->second;
                             sizeFor(mv.view, frame);
-                            mv.view.setFraming(ui::UnitPortrait::Framing::FullBody);
+                            mv.view.setFraming(framing);
                             if (frame->modelFacing != mv.facing) {
                                 mv.view.rotate(frame->modelFacing - mv.facing);
                                 mv.facing = frame->modelFacing;
                             }
-                            // The player through the same path: their own
-                            // visible items answer for them, so no special case.
-                            shown = buildUnitFigure(mv.view, frame->modelUnitGuid,
-                                                    &frame->tryOnItems);
+                            if (frame->modelUnitGuid != 0) {
+                                // The player through the same path: their own
+                                // visible items answer for them, so no special case.
+                                shown = buildUnitFigure(mv.view, frame->modelUnitGuid,
+                                                        &frame->tryOnItems);
+                            } else {
+                                // SetModel's file: a model and nothing else - the
+                                // question mark a portrait shows for a unit out of
+                                // sight is one.
+                                shown = mv.view.updateCreature(frame->modelPath, {},
+                                                               assetManager.get(),
+                                                               renderer.get(), io.DeltaTime);
+                            }
                         }
                     }
                     frame->externalTexture =

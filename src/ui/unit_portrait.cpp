@@ -247,6 +247,16 @@ void UnitPortrait::rotate(float yawDelta) {
     if (preview_ && yawDelta != 0.0f) preview_->rotate(yawDelta);
 }
 
+void UnitPortrait::setFraming(Framing framing) {
+    if (framing == framing_) return;
+    framing_ = framing;
+    portraitPosed_ = false;
+    if (preview_ && preview_->isModelLoaded()) {
+        if (framing_ == Framing::Face) preview_->setPortraitFraming();
+        else                           preview_->resetView();
+    }
+}
+
 void UnitPortrait::shutdown(rendering::Renderer* renderer) {
     if (preview_ && registered_ && renderer) renderer->unregisterPreview(preview_.get());
     registered_ = false;

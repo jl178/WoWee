@@ -671,6 +671,24 @@ struct Widget {
     std::string modelUnit;
     uint64_t modelUnitGuid = 0;
 
+    /// The rest of a Model frame's state, as CSimpleModel keeps it.
+    /// modelCamera is SetCamera's index: 0 is the model's own portrait camera
+    /// (M2 camera 0, which frames the face), -1 none chosen (the frame's view
+    /// of the whole model). modelPath is SetModel's file, drawn when no unit
+    /// or creature is set.
+    int modelCamera = -1;
+    float modelScale = 1.0f;
+    float modelPosition[3] = {0.0f, 0.0f, 0.0f};
+    std::string modelPath;
+    bool modelFogSet = false;
+    float modelFogColor[3] = {0.0f, 0.0f, 0.0f};
+    float modelFogNear = 0.0f;
+    float modelFogFar = 1.0f;
+    /// SetLight's arguments: enabled, omni, direction xyz, ambient intensity
+    /// and rgb, diffuse intensity and rgb.
+    float modelLight[13] = {1, 0, 0, 0, -1, 1, 1, 1, 1, 1, 1, 1, 1};
+    float modelGlow = 0.0f;
+
     /// The colour a ColorSelect frame is showing, as r, g, b. Its own state
     /// rather than the frame's tint: a colour picker draws its wheel in every
     /// colour and this is only the one being chosen.

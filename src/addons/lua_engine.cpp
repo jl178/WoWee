@@ -820,6 +820,139 @@ int lua_Model_GetFacing(lua_State* L) {
     return 1;
 }
 
+// The rest of CSimpleModel's script methods: the camera, the model's own
+// scale and offset, the file it shows, its fog, light and glow. The render
+// loop reads them off the frame (Application, the unit model frames).
+int lua_Model_SetCamera(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) w->modelCamera = static_cast<int>(luaL_checkinteger(L, 2));
+    return 0;
+}
+int lua_Model_SetModelScale(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) {
+        const float s = static_cast<float>(luaL_checknumber(L, 2));
+        if (std::isfinite(s) && s > 0.0f) w->modelScale = s;
+    }
+    return 0;
+}
+int lua_Model_GetModelScale(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushnumber(L, w ? w->modelScale : 1.0);
+    return 1;
+}
+int lua_Model_SetPosition(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) {
+        for (int i = 0; i < 3; ++i) {
+            const float v = static_cast<float>(luaL_optnumber(L, 2 + i, 0.0));
+            w->modelPosition[i] = std::isfinite(v) ? v : 0.0f;
+        }
+    }
+    return 0;
+}
+int lua_Model_GetPosition(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    for (int i = 0; i < 3; ++i) lua_pushnumber(L, w ? w->modelPosition[i] : 0.0);
+    return 3;
+}
+/// SetModel(file): the M2 to show, by path. The .mdx and .mdl spellings
+/// older interfaces pass are the same file as .m2, as the client reads them.
+int lua_Model_SetModel(lua_State* L) {
+    auto* w = widgetOf(L, 1);
+    if (!w) return 0;
+    std::string path = luaL_checkstring(L, 2);
+    const size_t dot = path.find_last_of('.');
+    if (dot != std::string::npos) {
+        std::string ext = path.substr(dot);
+        for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (ext == ".mdx" || ext == ".mdl") path = path.substr(0, dot) + ".m2";
+    }
+    w->modelPath = path;
+    w->modelUnit.clear();
+    w->modelUnitGuid = 0;
+    w->modelDisplayId = 0;
+    if (auto* tree = wowee::addons::getWidgetTree(L)) tree->noteUnitModelFrame(w->id);
+    return 0;
+}
+int lua_Model_GetModel(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    if (!w || w->modelPath.empty()) { lua_pushnil(L); return 1; }
+    lua_pushstring(L, w->modelPath.c_str());
+    return 1;
+}
+int lua_Model_SetFogColor(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) {
+        for (int i = 0; i < 3; ++i)
+            w->modelFogColor[i] = static_cast<float>(luaL_optnumber(L, 2 + i, 0.0));
+        w->modelFogSet = true;
+    }
+    return 0;
+}
+int lua_Model_GetFogColor(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    for (int i = 0; i < 3; ++i) lua_pushnumber(L, w ? w->modelFogColor[i] : 0.0);
+    return 3;
+}
+int lua_Model_SetFogNear(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) {
+        w->modelFogNear = static_cast<float>(luaL_checknumber(L, 2));
+        w->modelFogSet = true;
+    }
+    return 0;
+}
+int lua_Model_GetFogNear(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushnumber(L, w ? w->modelFogNear : 0.0);
+    return 1;
+}
+int lua_Model_SetFogFar(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) {
+        w->modelFogFar = static_cast<float>(luaL_checknumber(L, 2));
+        w->modelFogSet = true;
+    }
+    return 0;
+}
+int lua_Model_GetFogFar(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushnumber(L, w ? w->modelFogFar : 1.0);
+    return 1;
+}
+int lua_Model_ClearFog(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) w->modelFogSet = false;
+    return 0;
+}
+/// SetLight(enabled, omni, dirX, dirY, dirZ, ambIntensity, ambR, ambG, ambB,
+/// dirIntensity, dirR, dirG, dirB), and GetLight answering the same thirteen.
+int lua_Model_SetLight(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) {
+        w->modelLight[0] = lua_toboolean(L, 2) ? 1.0f : 0.0f;
+        w->modelLight[1] = lua_toboolean(L, 3) ? 1.0f : 0.0f;
+        for (int i = 2; i < 13; ++i) {
+            if (!lua_isnoneornil(L, 2 + i))
+                w->modelLight[i] = static_cast<float>(lua_tonumber(L, 2 + i));
+        }
+    }
+    return 0;
+}
+int lua_Model_GetLight(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    static const float kDefault[13] = {1, 0, 0, 0, -1, 1, 1, 1, 1, 1, 1, 1, 1};
+    const float* v = w ? w->modelLight : kDefault;
+    lua_pushboolean(L, v[0] != 0.0f);
+    lua_pushboolean(L, v[1] != 0.0f);
+    for (int i = 2; i < 13; ++i) lua_pushnumber(L, v[i]);
+    return 13;
+}
+int lua_Model_SetGlow(lua_State* L) {
+    if (auto* w = widgetOf(L, 1)) w->modelGlow = static_cast<float>(luaL_optnumber(L, 2, 0.0));
+    return 0;
+}
+/// AdvanceTime(): moves the model's animation on by the time since the last
+/// frame drew. The views here animate themselves every frame, so there is
+/// nothing left over to advance.
+int lua_Model_AdvanceTime(lua_State* L) {
+    (void)L;
+    return 0;
+}
+
 int lua_Frame_SetMovable(lua_State* L) {
     if (auto* w = widgetOf(L, 1)) w->movable = lua_toboolean(L, 2) != 0;
     return 0;
@@ -2886,6 +3019,9 @@ int lua_Tooltip_SetUnit(lua_State* L) {
             w->modelUnit = unit;
             w->modelUnitGuid = (gh && !unit.empty())
                 ? wowee::addons::resolveUnitGuid(gh, unit) : 0;
+            // A unit replaces whatever file SetModel showed; ClearModel comes
+            // through here with no unit and clears both.
+            w->modelPath.clear();
             // Listed only once a unit is actually set: ClearModel on a frame
             // that never had one (a spell-effect Model) must not hand it to
             // the render loop, which would then blank its texture each frame.
@@ -7783,6 +7919,24 @@ void LuaEngine::registerCoreAPI() {
         {"SetRotation",     lua_Region_SetRotation},
         {"SetFacing",       lua_Model_SetFacing},
         {"GetFacing",       lua_Model_GetFacing},
+        {"SetCamera",       lua_Model_SetCamera},
+        {"SetModelScale",   lua_Model_SetModelScale},
+        {"GetModelScale",   lua_Model_GetModelScale},
+        {"SetPosition",     lua_Model_SetPosition},
+        {"GetPosition",     lua_Model_GetPosition},
+        {"SetModel",        lua_Model_SetModel},
+        {"GetModel",        lua_Model_GetModel},
+        {"SetFogColor",     lua_Model_SetFogColor},
+        {"GetFogColor",     lua_Model_GetFogColor},
+        {"SetFogNear",      lua_Model_SetFogNear},
+        {"GetFogNear",      lua_Model_GetFogNear},
+        {"SetFogFar",       lua_Model_SetFogFar},
+        {"GetFogFar",       lua_Model_GetFogFar},
+        {"ClearFog",        lua_Model_ClearFog},
+        {"SetLight",        lua_Model_SetLight},
+        {"GetLight",        lua_Model_GetLight},
+        {"SetGlow",         lua_Model_SetGlow},
+        {"AdvanceTime",     lua_Model_AdvanceTime},
         {"IsMovable",       lua_Frame_IsMovable},
         {"RegisterForDrag", lua_Frame_RegisterForDrag},
         {"StartMoving",     lua_Frame_StartMoving},

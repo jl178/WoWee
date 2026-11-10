@@ -86,9 +86,9 @@ public:
     /// of what decides a rebuild, so changing it is enough to apply it.
     void setBakedSkin(const std::string& path) { pendingBake_ = path; }
 
-    /// Set before the first update, since framing is applied when the model
-    /// loads and the model loads once.
-    void setFraming(Framing framing) { framing_ = framing; }
+    /// Applied when the model loads, and again at once if it changes while
+    /// one is loaded - a model frame told SetCamera(0) after SetUnit.
+    void setFraming(Framing framing);
 
     /// How big the offscreen image is, in pixels. Set before the first update,
     /// because the view is built once and keeps the size it was built at.
