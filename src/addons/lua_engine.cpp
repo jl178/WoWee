@@ -4305,6 +4305,7 @@ int lua_Frame_SetFrameLevel(lua_State* L) {
     const auto* parent = (tree && w->parent) ? tree->get(w->parent) : nullptr;
     w->levelBelowParent = parent && wanted < parent->effLevel;
     w->effLevel = wanted;
+    if (tree && id) tree->refreshLevels(id);
     return 0;
 }
 int lua_FontString_SetText(lua_State* L) {

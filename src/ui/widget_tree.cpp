@@ -321,10 +321,12 @@ void WidgetTree::setParent(uint32_t id, uint32_t newParent) {
         shiftExplicitLevels(id, newLevel - w->effLevel);
         w->strataExplicit = false;
         w->effStrata = get(newParent)->effStrata;
+        setDescendantStrata(id, w->effStrata);
         w->level = newLevel;
         w->levelExplicit = false;
         w->levelBelowParent = false;
         w->effLevel = newLevel;
+        refreshLevels(id);
     }
     // The new parent's subtree is no longer known to be off: this widget may
     // be on. Cleared up the chain so the full pass descends to it from
@@ -743,14 +745,46 @@ void WidgetTree::shiftExplicitLevels(uint32_t id, int delta) {
     }
 }
 
+void WidgetTree::refreshLevels(uint32_t id) {
+    const Widget* w = get(id);
+    if (!w) return;
+    // The same rule the layout applies (resolve), now: a level read or
+    // shifted before the next layout must not be one computed from where the
+    // parent used to be - SetFrameLevel shifts the children by the distance
+    // from the frame's current level, so a stale one moved them twice.
+    std::vector<uint32_t> stack(w->children.begin(), w->children.end());
+    while (!stack.empty()) {
+        const uint32_t cid = stack.back();
+        stack.pop_back();
+        Widget* c = get(cid);
+        if (!c) continue;
+        const Widget* p = get(c->parent);
+        if (!p) continue;
+        c->effLevel = c->levelExplicit ? c->level : p->effLevel + 1;
+        if (c->effLevel < p->effLevel && !(c->levelExplicit && c->levelBelowParent)) {
+            c->effLevel = p->effLevel + 1;
+        }
+        if (c->levelHolder) c->effLevel = kHolderLevel;
+        stack.insert(stack.end(), c->children.begin(), c->children.end());
+    }
+}
+
 void WidgetTree::setStrata(uint32_t id, FrameStrata strata) {
     Widget* w = get(id);
     if (!w) return;
     w->strata = strata;
     w->strataExplicit = true;
     w->effStrata = strata;
+    setDescendantStrata(id, strata);
+}
+
+void WidgetTree::setDescendantStrata(uint32_t id, FrameStrata strata) {
+    Widget* w = get(id);
+    if (!w) return;
     // Everything inside inherits it from here on - the same as being set to
-    // it, since the client sets every one of them.
+    // it, since the client sets every one of them. Now rather than at the
+    // next layout: a level shift before then compares strata, and stale ones
+    // would leave children behind.
     std::vector<uint32_t> stack(w->children.begin(), w->children.end());
     while (!stack.empty()) {
         const uint32_t cid = stack.back();
@@ -790,6 +824,8 @@ void WidgetTree::raise(uint32_t id) {
     shiftExplicitLevels(id, newLevel - w->effLevel);
     w->level = newLevel;
     w->levelExplicit = true;
+    w->effLevel = newLevel;
+    refreshLevels(id);
 }
 
 void WidgetTree::lower(uint32_t id) {
@@ -812,6 +848,8 @@ void WidgetTree::lower(uint32_t id) {
     shiftExplicitLevels(id, newLevel - w->effLevel);
     w->level = newLevel;
     w->levelExplicit = true;
+    w->effLevel = newLevel;
+    refreshLevels(id);
 }
 
 void WidgetTree::addPoint(uint32_t id, const Anchor& anchor) {

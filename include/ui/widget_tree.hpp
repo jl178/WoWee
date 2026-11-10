@@ -913,6 +913,11 @@ public:
     /// whatever any of them set before (CSimpleFrame::SetFrameStrata,
     /// 0x00491020, sets each child's in turn).
     void setStrata(uint32_t id, FrameStrata strata);
+    /// Bring the levels of everything inside the widget up to date with its
+    /// own, by the layout's rule, without waiting for the layout.
+    void refreshLevels(uint32_t id);
+    /// Everything inside the widget to that strata, the widget itself aside.
+    void setDescendantStrata(uint32_t id, FrameStrata strata);
 
     /// The frame currently following the cursor, if any.
     ///
