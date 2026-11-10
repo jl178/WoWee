@@ -1779,9 +1779,21 @@ void registerSpellLuaAPI(lua_State* L) {
                 // in two different files and it needs both. A stub here would
                 // be dead - the bootstrap runs after these are registered - and
                 // framexml_lua_override_check exists to catch exactly that.
+                // The active form's index on the stance bar, 0 for none - not
+                // the form field's value. [stance:n] and [form:n] compare
+                // against this; the form id (17 for Battle Stance) made
+                // [stance:1] false in every stance.
                 {"GetShapeshiftForm", [](lua_State* L) -> int {
             auto* gh = getGameHandler(L);
-            lua_pushnumber(L, gh ? gh->getShapeshiftFormId() : 0);
+            const uint8_t current = gh ? gh->getShapeshiftFormId() : 0;
+            int index = 0;
+            if (current != 0) {
+                const auto forms = game::knownShapeshiftForms(gh->getPlayerClass(), gh->getKnownSpells());
+                for (size_t i = 0; i < forms.size(); ++i) {
+                    if (forms[i].formId == current) { index = static_cast<int>(i) + 1; break; }
+                }
+            }
+            lua_pushnumber(L, index);
             return 1;
         }},
                 {"GetNumShapeshiftForms", [](lua_State* L) -> int {
