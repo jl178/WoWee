@@ -169,6 +169,13 @@ struct Widget {
     /// every widget, and a hash lookup each was paying for a comparison that
     /// two floats here answer directly.
     float lastReportedW = -1.0f, lastReportedH = -1.0f;
+    /// A size a script was handed by a measuring getter since the last pass,
+    /// when it differed from lastReported. The client resolves a rect when
+    /// asked and fires OnSizeChanged for every size the frame passes
+    /// through; a handler that measured a size on the way (AceGUI's tree
+    /// reads its height mid-relayout and sizes its list from it) is told
+    /// again once the frame settles, even if it settles where it started.
+    float answeredW = -1.0f, answeredH = -1.0f;
 
     /// The layout generation this widget's rect was last resolved in. Zero
     /// means never, which is older than any generation.

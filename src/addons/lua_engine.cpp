@@ -491,7 +491,14 @@ wowee::ui::Widget* measuredWidgetOf(lua_State* L, int index) {
     if (!tree) return nullptr;
     const uint32_t id = widgetIdOf(L, index);
     tree->resolveWidget(id);
-    return tree->get(id);
+    auto* w = tree->get(id);
+    // A size other than the one last reported: see Widget::answeredW.
+    if (w && w->kind == wowee::ui::WidgetKind::Frame && w->lastReportedW >= 0.0f &&
+        (w->rectW != w->lastReportedW || w->rectH != w->lastReportedH)) {
+        w->answeredW = w->rectW;
+        w->answeredH = w->rectH;
+    }
+    return w;
 }
 
 /// A name a script handed to an anchoring call, resolved to a widget.
@@ -12405,13 +12412,22 @@ void LuaEngine::updateSizeChanges() {
         const ui::Widget& w = *wp;
         if (w.id == 0 || w.kind != ui::WidgetKind::Frame) continue;
         const bool known = (w.lastReportedW >= 0.0f);
-        if (known && w.lastReportedW == w.rectW && w.lastReportedH == w.rectH) {
+        // A script measured a size in between that it has not been told
+        // has gone again (Widget::answeredW).
+        const bool answeredOther = w.answeredW >= 0.0f &&
+            (w.answeredW != w.rectW || w.answeredH != w.rectH);
+        if (known && !answeredOther && w.lastReportedW == w.rectW &&
+            w.lastReportedH == w.rectH) {
+            if (w.answeredW >= 0.0f) {
+                if (auto* mut = widgets_.get(w.id)) mut->answeredW = mut->answeredH = -1.0f;
+            }
             continue;
         }
         // Written through the tree, since the loop reads a const view.
         if (auto* mut = widgets_.get(w.id)) {
             mut->lastReportedW = w.rectW;
             mut->lastReportedH = w.rectH;
+            mut->answeredW = mut->answeredH = -1.0f;
         }
         // Nothing is fired the first time a frame is measured: every frame in
         // the interface would report a change on the first layout, which says
@@ -12423,11 +12439,23 @@ void LuaEngine::updateSizeChanges() {
         lua_pushinteger(L_, static_cast<lua_Integer>(w.id));
         lua_rawget(L_, -2);
         if (lua_istable(L_, -1)) {
-            lua_getfield(L_, -1, "OnSizeChanged");
+            // The handler SetScript installed, which lives in __scripts like
+            // every other script. This read the frame's own OnSizeChanged
+            // field, which nothing sets, so no handler installed the ordinary
+            // way was ever called - AceGUI's tree sizing its list among them.
+            lua_getfield(L_, -1, "__scripts");
+            if (lua_istable(L_, -1)) {
+                lua_getfield(L_, -1, "OnSizeChanged");
+            } else {
+                lua_pushnil(L_);
+            }
+            lua_remove(L_, -2);
             if (lua_isfunction(L_, -1)) {
+                // In the frame's own units, as GetWidth and GetHeight answer.
+                const float es = w.effScale > 0.0f ? w.effScale : 1.0f;
                 lua_pushvalue(L_, -2);
-                lua_pushnumber(L_, w.rectW);
-                lua_pushnumber(L_, w.rectH);
+                lua_pushnumber(L_, w.rectW / es);
+                lua_pushnumber(L_, w.rectH / es);
                 if (pcallScript(L_, "OnSizeChanged", 3, 0) != 0) {
                     LOG_WARNING("OnSizeChanged error: ",
                                 luaL_optstring(L_, -1, "?"));
