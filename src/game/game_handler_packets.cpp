@@ -1444,13 +1444,15 @@ void GameHandler::registerCoreOpcodes() {
                 type = static_cast<uint8_t>((packed >> 24) & 0xFF);
                 id = packed & 0x00FFFFFFu;
             }
-            if (id == 0) continue;
+            // An equipment set's index starts at 0 (ACTION_BUTTON_EQSET).
+            if (id == 0 && type != 0x20) continue;
             ActionBarSlot slot;
             switch (type) {
                 case 0x00: slot.type = ActionBarSlot::SPELL; slot.id = id; break;
                 case 0x01: slot.type = ActionBarSlot::ITEM;  slot.id = id; break;  // Classic item
                 case 0x80: slot.type = ActionBarSlot::ITEM;  slot.id = id; break;  // TBC/WotLK item
                 case 0x40: slot.type = ActionBarSlot::MACRO; slot.id = id; break;  // macro (all expansions)
+                case 0x20: slot.type = ActionBarSlot::EQUIPMENT_SET; slot.id = id; break;  // gear set (WotLK)
                 default:   continue;  // unknown - leave as-is
             }
             actionBar[i] = slot;

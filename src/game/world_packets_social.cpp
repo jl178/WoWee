@@ -658,7 +658,10 @@ network::Packet SetActionButtonPacket::build(uint8_t button, uint8_t type, uint3
         uint8_t packedType = 0x00; // spell
         if (type == 2 /* ITEM */)  packedType = 0x80;
         if (type == 3 /* MACRO */) packedType = 0x40;
-        uint32_t packed = (id == 0) ? 0 : (static_cast<uint32_t>(packedType) << 24) | (id & 0x00FFFFFF);
+        // ACTION_BUTTON_EQSET: a gear set by its index, which may be 0.
+        if (type == 4 /* EQUIPMENT_SET */) packedType = 0x20;
+        const bool clear = (type == 0 /* EMPTY */) || (id == 0 && type != 4);
+        uint32_t packed = clear ? 0 : (static_cast<uint32_t>(packedType) << 24) | (id & 0x00FFFFFF);
         packet.writeUInt32(packed);
         LOG_DEBUG("Built CMSG_SET_ACTION_BUTTON (TBC/WotLK): button=", static_cast<int>(button),
                   " packed=0x", std::hex, packed, std::dec);

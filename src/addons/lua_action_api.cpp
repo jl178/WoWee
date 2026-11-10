@@ -81,7 +81,11 @@ enum class CursorType { NONE, SPELL, ITEM, MACRO, MERCHANT, MONEY, GUILDBANK,
                         /// Ammunition lifted off the ammo slot (Wow.exe cursor
                         /// kind 9): s_cursorId is the item entry, and nothing is
                         /// held in any slot - the arrows stay in the quiver.
-                        AMMO };
+                        AMMO,
+                        /// A gear set off the equipment manager (Wow.exe cursor
+                        /// kind 13, 0x520DC0): s_cursorId is the set's index,
+                        /// which may be 0, so this kind is held whatever the id.
+                        EQUIPMENTSET };
 static CursorType s_cursorType = CursorType::NONE;
 static uint32_t   s_cursorId   = 0;    // spellId, itemId, or action slot
 static int        s_cursorSlot = 0;    // source slot for placement
@@ -97,6 +101,24 @@ static uint32_t   s_cursorSplit = 0;
 static void setCursorType(lua_State* L, CursorType type);
 /// The pet bar's half of the cursor, defined with clearCursorItem below.
 static void pickUpPetAction(lua_State* L, game::GameHandler* gh, uint32_t packed);
+
+namespace {
+/// The equipment set with this index (0x5AE5C0 looks a set up the same way).
+const game::EquipmentSetInfo* equipmentSetById(game::GameHandler* gh, uint32_t setId) {
+    if (!gh) return nullptr;
+    for (const auto& set : gh->getEquipmentSets()) {
+        if (set.setId == setId) return &set;
+    }
+    return nullptr;
+}
+
+/// A set's icon as a texture path; the manager stores the bare icon name.
+std::string equipmentSetIconPath(const game::EquipmentSetInfo& set) {
+    if (set.iconName.empty()) return "Interface\\Icons\\INV_Misc_QuestionMark";
+    if (set.iconName.find('\\') != std::string::npos) return set.iconName;
+    return "Interface\\Icons\\" + set.iconName;
+}
+}  // namespace
 /// Where the cursor's item came from, in wire bag/slot space. Declared here
 /// because the guild bank pickup above needs it and it is defined further down
 /// with the other cursor helpers.
@@ -462,6 +484,11 @@ static int lua_GetActionTexture(lua_State* L) {
                 return 1;
             }
         }
+    } else if (action.type == game::ActionBarSlot::EQUIPMENT_SET) {
+        if (const auto* set = equipmentSetById(gh, action.id)) {
+            lua_pushstring(L, equipmentSetIconPath(*set).c_str());
+            return 1;
+        }
     }
     lua_pushnil(L);
     return 1;
@@ -607,6 +634,15 @@ static int lua_GetActionInfo(lua_State* L) {
             lua_pushnumber(L, action.id);
             lua_pushstring(L, "macro");
             return 3;
+        case game::ActionBarSlot::EQUIPMENT_SET: {
+            // "equipmentset" and the set's name, nothing more (0x5A9156); a
+            // slot naming a set that has since been deleted answers nothing.
+            const auto* set = equipmentSetById(gh, action.id);
+            if (!set) return 0;
+            lua_pushstring(L, "equipmentset");
+            lua_pushstring(L, set->name.c_str());
+            return 2;
+        }
         default:
             return 0;
     }
@@ -757,6 +793,10 @@ static int lua_UseAction(lua_State* L) {
         auto* svc = getLuaServices(L);
         const std::string& body = gh->getMacroText(action.id);
         if (svc && svc->runMacroText && !body.empty()) svc->runMacroText(body);
+    } else if (action.type == game::ActionBarSlot::EQUIPMENT_SET) {
+        // A gear set on the bar puts the set on, as its button in the
+        // equipment manager does.
+        if (equipmentSetById(gh, action.id)) gh->useEquipmentSet(action.id);
     }
     return 0;
 }
@@ -809,6 +849,14 @@ static int lua_GetCursorInfo(lua_State* L) {
             lua_pushstring(L, "macro");
             lua_pushnumber(L, s_cursorId);
             return 2;
+        case CursorType::EQUIPMENTSET: {
+            // "equipmentset" and the name (0x5154E1).
+            const auto* set = equipmentSetById(getGameHandler(L), s_cursorId);
+            if (!set) return 0;
+            lua_pushstring(L, "equipmentset");
+            lua_pushstring(L, set->name.c_str());
+            return 2;
+        }
         case CursorType::MONEY:
             // containerframe.lua branches on this exact string to decide that
             // a click in a bag is money being put back.
@@ -872,11 +920,13 @@ static int lua_PickupAction(lua_State* L) {
     const auto typeForCursor = [](CursorType c) {
         return c == CursorType::SPELL ? game::ActionBarSlot::SPELL
              : c == CursorType::ITEM  ? game::ActionBarSlot::ITEM
+             : c == CursorType::EQUIPMENTSET ? game::ActionBarSlot::EQUIPMENT_SET
                                       : game::ActionBarSlot::MACRO;
     };
-    const bool holding = heldId != 0 &&
-                         (held == CursorType::SPELL || held == CursorType::ITEM ||
-                          held == CursorType::MACRO);
+    const bool holding = held == CursorType::EQUIPMENTSET ||
+                         (heldId != 0 &&
+                          (held == CursorType::SPELL || held == CursorType::ITEM ||
+                           held == CursorType::MACRO));
 
     if (holding) {
         gh->setActionBarSlot(slot - 1, typeForCursor(held), heldId);
@@ -896,6 +946,8 @@ static int lua_PickupAction(lua_State* L) {
         // anywhere.
         setCursorType(L, (existing.type == game::ActionBarSlot::SPELL) ? CursorType::SPELL :
                        (existing.type == game::ActionBarSlot::ITEM)  ? CursorType::ITEM :
+                       (existing.type == game::ActionBarSlot::EQUIPMENT_SET)
+                           ? CursorType::EQUIPMENTSET :
                        CursorType::MACRO);
         s_cursorId = existing.id;
         s_cursorSlot = slot;
@@ -918,6 +970,11 @@ static int lua_PickupAction(lua_State* L) {
             const auto* info = gh->getItemInfo(existing.id);
             wowee::ui::frameXmlSetCursorItem(
                 info ? gh->getItemIconPath(info->displayInfoId) : std::string());
+        } else if (existing.type == game::ActionBarSlot::EQUIPMENT_SET) {
+            const auto* set = equipmentSetById(gh, existing.id);
+            wowee::ui::frameXmlSetCursorItem(
+                set ? equipmentSetIconPath(*set)
+                    : std::string("Interface\\Icons\\INV_Misc_QuestionMark"));
         } else {
             std::string icon = gh->getMacroIcon(existing.id);
             if (icon.empty()) icon = "Interface\\Icons\\INV_Misc_QuestionMark";
@@ -941,12 +998,56 @@ static int lua_PickupAction(lua_State* L) {
 // PickupAction while holding something is exactly that swap, so this is it.
 // With nothing placeable held it does nothing, and leaves the cursor alone.
 static int lua_PlaceAction(lua_State* L) {
-    const bool holding = s_cursorId != 0 &&
-                         (s_cursorType == CursorType::SPELL ||
-                          s_cursorType == CursorType::ITEM ||
-                          s_cursorType == CursorType::MACRO);
+    const bool holding = s_cursorType == CursorType::EQUIPMENTSET ||
+                         (s_cursorId != 0 &&
+                          (s_cursorType == CursorType::SPELL ||
+                           s_cursorType == CursorType::ITEM ||
+                           s_cursorType == CursorType::MACRO));
     if (!holding) return 0;
     return lua_PickupAction(L);
+}
+
+/// A gear set onto the cursor, to be dropped on an action button (0x520DC0):
+/// the set by its index, its icon on the pointer.
+static void pickUpEquipmentSet(lua_State* L, game::GameHandler* gh,
+                               const game::EquipmentSetInfo& set) {
+    // Whatever was held is put down first, as ClearCursor does.
+    clearCursorItem(L);
+    setCursorType(L, CursorType::EQUIPMENTSET);
+    s_cursorId = set.setId;
+    s_cursorSlot = 0;
+    s_cursorBag = game::slots::kCursorNoSource;
+    cursorItemSlot() = {};
+    wowee::ui::frameXmlSetCursorItem(equipmentSetIconPath(set));
+    auto* svc = getLuaServices(L);
+    auto* ac = svc ? svc->audioCoordinator : nullptr;
+    if (auto* sfx = ac ? ac->getUiSoundManager() : nullptr) sfx->playByName("INTERFACESOUND_CURSORGRABOBJECT");
+    (void)gh;
+}
+
+/// PickupEquipmentSet(index) - the set at that place in the manager's list,
+/// 1-based (0x5AF2C0 -> 0x5AE580). No taint test on the way, unlike the
+/// by-name one.
+static int lua_PickupEquipmentSet(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const int index = static_cast<int>(luaL_checknumber(L, 1));
+    if (!gh) return 0;
+    const auto& sets = gh->getEquipmentSets();
+    if (index < 1 || index > static_cast<int>(sets.size())) return 0;
+    pickUpEquipmentSet(L, gh, sets[static_cast<size_t>(index - 1)]);
+    return 0;
+}
+
+/// PickupEquipmentSetByName(name) - the same by name (0x5AF250), what the
+/// equipment manager's set buttons call from OnDragStart.
+static int lua_PickupEquipmentSetByName(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const char* name = luaL_checkstring(L, 1);
+    if (!gh) return 0;
+    for (const auto& set : gh->getEquipmentSets()) {
+        if (set.name == name) { pickUpEquipmentSet(L, gh, set); break; }
+    }
+    return 0;
 }
 
 // PickupSpell(bookSlot, bookType) - picks up a spell from the spellbook
@@ -2723,6 +2824,13 @@ void registerActionLuaAPI(lua_State* L) {
             const auto& bar = gh->getActionBar();
             if (slot >= static_cast<int>(bar.size())) { lua_pushnil(L); return 1; }
             const auto& action = bar[static_cast<size_t>(slot)];
+            // A gear set's button reads its name (0x5A7E12), as a macro's does.
+            if (action.type == game::ActionBarSlot::EQUIPMENT_SET) {
+                const auto* set = equipmentSetById(gh, action.id);
+                if (!set) { lua_pushnil(L); return 1; }
+                lua_pushstring(L, set->name.c_str());
+                return 1;
+            }
             if (action.type != game::ActionBarSlot::MACRO) { lua_pushnil(L); return 1; }
             const std::string name = gh->getMacroName(action.id);
             if (name.empty()) { lua_pushnil(L); return 1; }
@@ -2737,6 +2845,8 @@ void registerActionLuaAPI(lua_State* L) {
                     return 1;
                 }},
                 {"GetActionTexture",    lua_GetActionTexture},
+                {"PickupEquipmentSet",  lua_PickupEquipmentSet},
+                {"PickupEquipmentSetByName", lua_PickupEquipmentSetByName},
                 {"IsCurrentAction",     lua_IsCurrentAction},
                 {"IsUsableAction",      lua_IsUsableAction},
                 {"IsActionInRange",     lua_IsActionInRange},

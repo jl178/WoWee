@@ -35,9 +35,12 @@ struct AuraSlot {
  * Action bar slot
  */
 struct ActionBarSlot {
-    enum Type : uint8_t { EMPTY = 0, SPELL = 1, ITEM = 2, MACRO = 3 };
+    /// EQUIPMENT_SET is a gear set dragged off the equipment manager
+    /// (ACTION_BUTTON_EQSET, 0x20 on the wire); its id is the set's index,
+    /// which starts at 0 - so for it an id of 0 is a set, not an empty slot.
+    enum Type : uint8_t { EMPTY = 0, SPELL = 1, ITEM = 2, MACRO = 3, EQUIPMENT_SET = 4 };
     Type type = EMPTY;
-    uint32_t id = 0;              // spellId, itemId, or macroId
+    uint32_t id = 0;              // spellId, itemId, macroId or equipment set index
     float cooldownRemaining = 0.0f;
     float cooldownTotal = 0.0f;
 

@@ -1709,6 +1709,8 @@ void GameScreen::processTargetInput(game::GameHandler& gameHandler) {
                         gameHandler.useItemById(bar[slot].id);
                     } else if (bar[slot].type == game::ActionBarSlot::MACRO) {
                         chatPanel_.executeMacroText(gameHandler, gameHandler.getMacroText(bar[slot].id));
+                    } else if (bar[slot].type == game::ActionBarSlot::EQUIPMENT_SET) {
+                        gameHandler.useEquipmentSet(bar[slot].id);
                     }
                 }
             }
