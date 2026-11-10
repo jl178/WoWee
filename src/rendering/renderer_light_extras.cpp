@@ -145,7 +145,13 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
             extra = glm::vec4(bounceGrid_->origin(), bounceGrid_->ready() ? 1.0f : 0.0f, 0.0f);
             gridSet = bounceGrid_->set();
         }
-        if (ambientOcclusion_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.7f * wx, flags, extra,
+        // Without the occlusion the pass is the fill and the bounce light
+        // alone, and every term of both is outdoor light, scaled by 1 -
+        // the indoor factor (ambient_occlusion.frag): wholly indoors each
+        // pixel comes out within the shader's own discard band of 1. The
+        // pass stays made for the way out.
+        const bool fillOnlyIndoors = !enh_.ambientOcclusion && !(flags & 16) && indoorFactor_ >= 0.999f;
+        if (!fillOnlyIndoors && ambientOcclusion_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.7f * wx, flags, extra,
                                            gridSet)) {
             vkCtx->gpuMark(cmd, "ambient occlusion");
         }
