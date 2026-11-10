@@ -677,7 +677,7 @@ void Renderer::updatePerFrameUBO() {
         // indoors the player is.
         const glm::vec3 unitIndoorAmbient = glm::max(interiorAmbient_ * 2.0f, glm::vec3(0.35f));
         currentFrameData.lightDir = glm::vec4(lp.directionalDir, unitIndoorAmbient.r);
-        currentFrameData.lightColor = glm::vec4(lp.diffuseColor, unitIndoorAmbient.g);
+        currentFrameData.lightColor = glm::vec4(lp.diffuseColor * lp.sunScale, unitIndoorAmbient.g);
         currentFrameData.ambientColor = glm::vec4(lp.ambientColor, unitIndoorAmbient.b);
         // The HDR scene's sun is brighter by day (enhanced_tonemap::kSunLight,
         // Enhanced's F052), on everything the sun lights; the tone map takes
@@ -721,8 +721,13 @@ void Renderer::updatePerFrameUBO() {
     // yards, a tenth of that at 40 - so shortening the distance for sharper
     // shadows also all but erased them. The depth bias is the shaders' own,
     // from the surface's angle to the light and one texel of the map (z).
+    // Under Enhanced's daylight its own shadow opacity
+    // (enhanced_palette::shadowOpacity: held at 3.3.5's 0.3 for now, Enhanced's
+    // measured 0.46 darkened the evening and forest views;
+    // docs/re/enhanced-lighting.md 2e).
     const float skyShadowOpacity =
-        lightingManager ? lightingManager->getLightingParams().shadowOpacity : 0.8f;
+        lightingManager && lightingManager->isEnhancedActive() ? enhanced_palette::shadowOpacity()
+        : lightingManager ? lightingManager->getLightingParams().shadowOpacity : 0.8f;
     const float shadowStrength = glm::clamp(skyShadowOpacity * shadowStrengthSetting_, 0.0f, 1.0f);
     // z carries one texel of the shadow map. The shaders used to hold that as
     // a constant for 4096, and the map is 512 to 4096 by the quality level.
@@ -4156,7 +4161,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             enhanced_palette::shadeTint(tonelp.ambientColor, shadeOn),
             // The softer shoulder goes with the stronger sun: outdoors, by
             // day, under Enhanced's daylight (enhanced_tonemap::kEnhancedKnee).
-            enhancedTone ? glm::mix(enhanced_tonemap::tuning().knee, enhanced_tonemap::kEnhancedKnee,
+            enhancedTone ? glm::mix(enhanced_tonemap::tuning().knee, enhanced_tonemap::enhancedKnee(),
                                    outdoor * enhanced_palette::dayShare(tonelp.sunDir.z))
                         : 0.0f);
     }

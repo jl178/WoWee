@@ -360,6 +360,25 @@ TEST_CASE("Enhanced sun: stock bearing, lower noon, earlier dusk", "[enhanced][s
     CHECK(std::asin(enhancedSunDirection(9.37f * 120.0f).z) * 57.29578f == Catch::Approx(37.2f).margin(1.5f));
 }
 
+TEST_CASE("Enhanced light: from the sun by day, stock at night", "[enhanced][sun]") {
+    namespace fp = enhanced_palette;
+    const glm::vec3 stockTravel = stockLightDirection(9.37f * 120.0f);
+    const glm::vec3 toSun = enhancedSunDirection(9.37f * 120.0f);
+    const glm::vec3 day = fp::sunLightDirection(stockTravel, toSun);
+    CHECK(glm::dot(day, -toSun) == Catch::Approx(1.0f).margin(1e-4f));
+    // The sun under the horizon: the stock light, which stays up all night.
+    const glm::vec3 nightStock = stockLightDirection(1.0f * 120.0f);
+    const glm::vec3 nightSun = enhancedSunDirection(1.0f * 120.0f);
+    REQUIRE(nightSun.z < 0.0f);
+    const glm::vec3 night = fp::sunLightDirection(nightStock, nightSun);
+    CHECK(glm::dot(night, nightStock) == Catch::Approx(1.0f).margin(1e-4f));
+    CHECK(night.z < 0.0f);  // still travelling down
+    // Unit length while it eases in at dawn.
+    const glm::vec3 dawn = fp::sunLightDirection(stockLightDirection(6.05f * 120.0f),
+                                                 enhancedSunDirection(6.05f * 120.0f));
+    CHECK(glm::length(dawn) == Catch::Approx(1.0f).margin(1e-4f));
+}
+
 TEST_CASE("HDR sun: brighter by day only", "[enhanced]") {
     namespace tm = enhanced_tonemap;
     // Sun below the horizon (its light travels upward): Light.dbc's own.

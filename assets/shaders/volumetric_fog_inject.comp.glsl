@@ -181,6 +181,8 @@ void gatherGroupLights() {
 }
 
 // Henyey-Greenstein, scaled so scattering evenly in every direction is 1.
+const float kEnhancedSunPullback = 0.85;
+
 float phaseHG(float cosTheta, float g) {
     float g2 = g * g;
     return (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * g * cosTheta, 1e-4), 1.5);
@@ -242,7 +244,21 @@ void main() {
     vec3 travel = normalize(lightDir.xyz);
     float sunUp = smoothstep(0.0, 0.08, -travel.z);
     vec3 toCamera = normalize(vol.rayOrigin.xyz - p);
-    float phase = mix(1.0, phaseHG(dot(travel, toCamera), 0.75), 0.65);
+    // Under Enhanced's daylight (localLightMeta.z bit 128) the light comes
+    // from the sun's disc itself (enhanced_palette::sunLightDirection), so the
+    // forward lobe sits on it: tighter and with less even scattering, the
+    // bright air round the disc falls off as quickly as round Enhanced's sun
+    // (docs/re/enhanced-lighting.md 2e). Elsewhere the stock light stays
+    // beside the sun and keeps the wider lobe.
+    bool enhancedSun = (localLightMeta.z & 128) != 0;
+    float cosSun = dot(travel, toCamera);
+    float phase = enhancedSun ? mix(1.0, phaseHG(cosSun, 0.9), 0.5)
+                             : mix(1.0, phaseHG(cosSun, 0.75), 0.65);
+    // And within about 20 degrees of the disc the lobe gives way to even
+    // scattering, softly (from 25 degrees to 5): the air right round
+    // Enhanced's sun is no brighter than its sky (enhanced_02's ring falls to
+    // half within 4 degrees), where the lobe laid a wide near-white disc.
+    if (enhancedSun) phase = mix(phase, 1.0, kEnhancedSunPullback * smoothstep(0.906, 0.996, cosSun));
     vec3 light = fogColor.rgb * vol.lighting.z;
     if (sunUp > 0.0) {
         light += lightColor.rgb * (sunVisibility(p) * phase * sunUp * vol.lighting.x);

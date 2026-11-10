@@ -96,6 +96,11 @@ void main() {
 
     // Wrapped diffuse, so the unlit side falls off softly rather than going
     // black - grass is thin enough to pass light through.
+    // Under Enhanced's daylight (bit 128) the blades take the ground's light,
+    // as clutter is lit from the terrain under it (and as Wowee's M2 clutter
+    // already is): with the light from the sun's disc, a high noon sun
+    // otherwise left upright blades in their own half-light.
+    if ((localLightMeta.z & 128) != 0) n = vec3(0.0, 0.0, 1.0);
     float ndl = dot(n, normalize(-lightDir.xyz));
     float wrapped = clamp(ndl * 0.5 + 0.5, 0.0, 1.0);
 

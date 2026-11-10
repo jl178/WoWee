@@ -64,6 +64,20 @@ inline constexpr float kHdrSunIntensity = 1.35f;
 /// character.frag (enh_bits::kEnhancedAmbient).
 inline constexpr float kAmbientAway = 0.7f;
 inline constexpr float kAmbientToward = 1.1f;
+/// The sun's light scaled by how much higher or lower Enhanced's sun stands
+/// than 3.3.5's light at this hour (the ratio of their vertical
+/// components, held to 0.5..1.5): the ground keeps the light it had under
+/// the stock direction - which every other exposure in this file was set
+/// against - while the shadows and the sides lit come from the sun. At
+/// noon Enhanced's sun is 65 degrees up against the stock light's 37 (x0.67),
+/// at 9:22 37 against 30 (x0.82), at 17:51 17 against 20 (x1.2).
+/// docs/re/enhanced-lighting.md 2e.
+inline float sunIrradianceScale(const glm::vec3& stockTravel, const glm::vec3& travel) {
+    if (travel.z > -1e-3f || stockTravel.z > -1e-3f) return 1.0f;
+    const float r = stockTravel.z / travel.z;
+    return r < 0.5f ? 0.5f : (r > 1.5f ? 1.5f : r);
+}
+
 /// WOWEE_ENHANCED_AMBIENT=0 leaves the ambient flat, for side-by-side
 /// comparison (read once).
 inline bool ambientRampOn() {
@@ -171,6 +185,36 @@ inline float dayShare(float sunDirZ) {
     float t = sunDirZ / 0.15f;
     t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
     return t * t * (3.0f - 2.0f * t);
+}
+
+/// How much of the sunlit colour a full shadow takes under Enhanced's daylight
+/// (the renderer's shadowParams.y): measured on Jered's 09:23 capture, where
+/// a tree's shade on the crossroads' flagstones is (0.37, 0.31, 0.16) against
+/// (0.77, 0.55, 0.27) in the sun beside it - 0.48-0.59 a channel, 0.54 in
+/// luminance. 3.3.5's terrain keeps 0.7 (its 77/255 shadow grey). The
+/// shaders' floor is 1 - this (terrain.frag; WMO, M2 and units by
+/// mix(1, shadow, this)). docs/re/enhanced-lighting.md 2e.
+/// Held at 3.3.5's 0.3 for now: 0.46 took the road's lit/shade from 1.57 to
+/// 2.2 (Enhanced 1.9-2.3) but the evening and forest views 25% darker.
+inline constexpr float kShadowOpacity = 0.30f;
+/// kShadowOpacity, or WOWEE_ENHANCED_SHADOW_OPACITY=<value> (read once).
+inline float shadowOpacity() {
+    static const float v = [] {
+        const char* e = std::getenv("WOWEE_ENHANCED_SHADOW_OPACITY");
+        return (e && *e) ? static_cast<float>(std::atof(e)) : kShadowOpacity;
+    }();
+    return v;
+}
+
+/// Enhanced's sun lights the world from where it stands (its shadows fall
+/// from the sun; docs/re/enhanced-lighting.md 2e): the way the light travels
+/// is -toSun by day, eased from 3.3.5's `stockTravel` over the sun's first
+/// 9 degrees (dayShare), so the night keeps the stock moonlight direction.
+inline glm::vec3 sunLightDirection(const glm::vec3& stockTravel, const glm::vec3& toSun) {
+    const float w = dayShare(toSun.z);
+    const glm::vec3 d = glm::mix(stockTravel, -toSun, w);
+    const float len = glm::length(d);
+    return len > 1e-4f ? d / len : stockTravel;
 }
 
 /// How far the grey the shade keeps takes the ambient's hue (its luminance

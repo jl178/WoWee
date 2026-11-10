@@ -340,6 +340,12 @@ void main() {
     vec3 norm = normalize(Normal);
     bool foliageTwoSided = (alphaTest == 2);
     if (!foliageTwoSided && !gl_FrontFacing) norm = -norm;
+    // Under Enhanced's daylight (bit 128) a leaf card seen from its back is
+    // lit as its back: with the light from the sun's disc, cards turned to
+    // the sun but seen from the shade side glowed as if lit (the yellow
+    // crowns against the sun at 15:23); the light through them is the leaf
+    // light's own term.
+    if (foliageTwoSided && !gl_FrontFacing && (localLightMeta.z & 128) != 0) norm = -norm;
     // Ground clutter is crossed vertical cards; lit by their own normals they
     // caught the low sun twice as well as the ground. Shade them as the
     // terrain under them, as the stock client does.
@@ -475,7 +481,11 @@ void main() {
             float back = 0.25 + 0.75 * clamp(-dot(nEye, ldir), 0.0, 1.0);
             float through = lobe * back * shadow * max(sun.w, 0.0) * texColor.a;
             vec3 leafTint = albedo * (0.4 + 0.6 * albedo);
-            vec3 transmit = leafTint * sunColor * (1.3 * through);
+            // 0.25 under Enhanced's daylight (bit 128): with the world's light
+            // from the sun's disc the sunward cards are lit already, and at
+            // 1.3 the crowns against the sun went 26% over Enhanced's chroma.
+            float leafStrength = (localLightMeta.z & 128) != 0 ? 0.25 : 1.3;
+            vec3 transmit = leafTint * sunColor * (leafStrength * through);
             // Never past a bright leaf: the tone map's knee is 0.8 and the
             // bloom takes what is over it, so the sum stops at 1.0 a channel
             // (or where the leaf already was, if brighter).

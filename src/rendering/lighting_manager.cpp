@@ -807,6 +807,19 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     // (stock_day_night::kEnhancedSunPhi).
     currentParams_.sunDir = enhancedActive_ ? enhancedSunDirection(timeHalfMinutesExact)
                                            : stockSunDirection(timeHalfMinutesExact);
+    // And Enhanced's sun lights the world from where it stands: its shadows
+    // are cast from the sun (the road through Goldshire lies in the sun at
+    // 9:22, under 3.3.5's lower north-west light the trees shade all of it).
+    // By day only, eased in over the sun's first 9 degrees, so the night
+    // keeps 3.3.5's moonlight direction (enhanced_palette::sunLightDirection).
+    currentParams_.sunScale = 1.0f;
+    if (enhancedActive_) {
+        const glm::vec3 stockTravel = currentParams_.directionalDir;
+        currentParams_.directionalDir =
+            enhanced_palette::sunLightDirection(stockTravel, currentParams_.sunDir);
+        currentParams_.sunScale =
+            enhanced_palette::sunIrradianceScale(stockTravel, currentParams_.directionalDir);
+    }
 
     // The sky model list (0x7f3230's last loop), then the night stars the
     // stock client draws wherever no sky model does: Stars.mdx, the

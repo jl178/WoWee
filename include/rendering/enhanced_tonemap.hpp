@@ -52,6 +52,14 @@ inline float toScene(float d, float knee = kKnee) {
 /// and the mid-tones below 0.5 are untouched (docs/re/enhanced-lighting.md 2d).
 /// Indoors, at night and without the Enhanced daylight the knee stays kKnee.
 inline constexpr float kEnhancedKnee = 0.5f;
+/// kEnhancedKnee, or WOWEE_ENHANCED_KNEE=<value> for tuning (read once).
+inline float enhancedKnee() {
+    static const float v = [] {
+        const char* e = std::getenv("WOWEE_ENHANCED_KNEE");
+        return (e && *e) ? static_cast<float>(std::atof(e)) : kEnhancedKnee;
+    }();
+    return v;
+}
 
 /// The sun's disc and glare, drawn additive over the dome, at this many
 /// times their stock colour: in the 8-bit scene they clipped to a flat disc

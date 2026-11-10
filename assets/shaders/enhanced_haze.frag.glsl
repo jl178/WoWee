@@ -60,7 +60,10 @@ const float kSkyDistance = 5000.0;   // how far a sky pixel's ray runs
 // little elsewhere. The sky's own share is small and taken from the fog
 // colour, which is grey under cloud - most of what made the wall grey.
 const float kSkyScatter = 0.35;      // of the fog colour, light from the sky
-const float kSunScatter = 0.8;       // of the sun colour, at even scattering
+// 0.65 (was 0.8): with the world's light now from Enhanced's sun (the
+// Enhanced daylight), the forward lobe sits on the sun's disc rather than
+// beside it, and at 0.8 the sky round the sun had 15% more near-white.
+const float kSunScatter = 0.65;      // of the sun colour, at even scattering
 const float kG = 0.7;
 const float kMaxLight = 0.88;        // the 8-bit scene's brightest haze channel
 const float kMaxLightHdr = 1.5;      // and the HDR scene's (enhanced_tonemap::kHazeCap)

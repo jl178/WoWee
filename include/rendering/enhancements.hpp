@@ -350,7 +350,8 @@ inline constexpr uint32_t kHdrLight      = 1u << 5;  ///< HDR scene: lit shaders
 inline constexpr uint32_t kLeafLight     = 1u << 6;  ///< m2.frag sunlight through foliage cards
 /// Enhanced's daylight in use (LightingManager::isEnhancedActive, set by the
 /// renderer): M2s, WMOs and units take Enhanced's ambient, turned toward the
-/// sun (enhanced_palette::kAmbientAway..kAmbientToward by half-Lambert).
+/// sun (enhanced_palette::kAmbientAway..kAmbientToward by half-Lambert), and
+/// the terrain's shadow floor follows shadowParams.y below stock's 0.7.
 inline constexpr uint32_t kEnhancedAmbient = 1u << 7;
 }  // namespace enh_bits
 

@@ -24,6 +24,9 @@ struct LightingParams {
     /// climbs to the zenith and sets (see stock_day_night.hpp). Follows the
     /// clock alone, so it is neither blended nor smoothed. Defaults to noon.
     glm::vec3 sunDir{0.057f, 0.057f, 0.997f};
+    /// Under Enhanced's daylight, the sun's light times this
+    /// (enhanced_palette::sunIrradianceScale); 1 otherwise. Not blended.
+    float sunScale = 1.0f;
 
     glm::vec3 fogColor{0.5f, 0.6f, 0.7f};          // Fog color
     float fogStart = 100.0f;                        // Fog start distance

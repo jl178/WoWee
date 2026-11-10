@@ -419,6 +419,72 @@ scratchpad: `fgap/sheet_k.png` (the Barrens, the inn and into the sun:
 before | 2x sun, knee 0.8 | now), `fgap/sheet_g.png` (Enhanced | before |
 now), `fgap/sheet_g_regress.png`.
 
+## 2e. Lit and shadowed from Enhanced's sun
+
+Section 2d found that Enhanced's sun tables keep 3.3.5's bearing, so the
+light was left on the stock table. The captures say otherwise about what
+it lights: at 9:23 Enhanced's crossroads road lies in the sun with tree
+shade in patches, golden flagstones (hue 34-37 degrees) beside warm shade;
+under 3.3.5's light (north-west, 30 degrees up at 9:22) the trees shade the
+whole road, held at 70% by the stock floor - a flat red-brown (28-32).
+Lighting the world from the sun's disc instead (by day; Enhanced's sun is
+37 degrees up at 9:22, 65 at noon, 17 at 17:51) puts the road in the sun
+and dapples it as Enhanced's is. So, under Enhanced's daylight
+(`LightingManager`, `enhanced_palette::sunLightDirection`):
+
+- The world's light and its shadows come from the sun, eased in over the
+  sun's first 9 degrees so the night keeps 3.3.5's moonlight direction.
+- The sun's light is scaled by the ratio of the stock light's vertical
+  component to the sun's (`sunIrradianceScale`, 0.5-1.5: x0.67 at noon,
+  x0.82 at 9:22, x1.2 at 17:51), so flat ground keeps the light every
+  earlier exposure here was set against; `kSunLight` stays 2. Without it
+  either the Barrens' noon road (65 degrees against 37) passed its old
+  brightness or, at a flat 1.25, the evening and forest views fell 12-16%.
+- The froxel mist's forward lobe, now on the sun's disc rather than beside
+  it, is tighter (g 0.9, half even) and gives way to even scattering
+  within about 20 degrees of the disc (a smoothstep from 25 to 5 degrees,
+  85%): with it on the disc the bright air round the sun was a wide
+  near-white field (4.6% of the view over 0.92). Radial luminance by 20 px
+  from the disc: Enhanced 1.00 0.88 0.65 0.56 0.47, before 0.94 0.88 0.79
+  0.73 0.68, now 0.92 0.81 0.72 0.65 0.61 (the mist off: 0.88 0.83 0.67
+  0.63 0.58 - the rest is the sky and the glare).
+- Two-sided leaf cards seen from their back are lit as their back (the
+  sunward cards seen from the shade glowed as if lit), and the leaf light
+  is 0.25 (1.3 elsewhere); grass blades take the ground's light.
+- The terrain's shadow floor follows the sky's opacity
+  (`enhanced_palette::shadowOpacity`), held at 3.3.5's 0.3. Enhanced's shade
+  on the crossroads' flagstones keeps 54% of its sunlit colour (opacity
+  0.46): that gave the road Enhanced's lit/shade (2.2) and warm shade but
+  took the evening and forest views 11-25% darker (0.36: forest -11.5%).
+
+The inn-side crowns that read yellow are Enhanced's own: its obj0 ADT
+places the same models at the same spots and scales (ElwynnTreeMid01 at
+(-9482.6, 46.0) x0.86 and (-9485.2, 44.9) x1.23), the model's geometry is
+3.3.5's, and its textures are the same art at 1024 px (canopy texels
+0.39 0.39 0.09 mean in both). Only CanopylessTree01's textures and one
+ElwynnTreeCanopy04 were re-authored nearby. So they stay in the measure.
+
+Measured by region (the lit and shaded road, the verge, the crowns, the
+far band; `fgap/regions.py` in the session scratchpad) and the merge bars,
+against the commit before this one:
+
+| | before | now |
+|---|---|---|
+| Barrens noon road mean / p95 / p99 | 0.573 / 0.717 / 0.739 | 0.571 / 0.715 / 0.738 |
+| into the sun, pixels over 0.92 | 4.22% | 1.31% |
+| Goldshire 17:51 (evening) mean | | +3.0% |
+| Elwynn forest 10:00 mean | | -6.2% |
+| crown chroma gap | +18.7% | +20.8% |
+| lit road luminance gap | -19% | -6% (blue/luminance +22% -> +8%) |
+| gap sum (section 2d's 20 rows) | 319 | 292 |
+
+Left as it is: the forest view is 6% darker - a slope facing the camera
+under Enhanced's higher 10:00 sun (44 degrees against the stock light's
+31), which the flat-ground scaling does not hold; no Enhanced capture of
+that view says whether darker is right. And the crowns' chroma is about
++20% (+15% with the leaf light off). Sheets in the session scratchpad:
+`fgap/sheet_y5.png` (Enhanced | before | now), `fgap/sheet_y5_regress.png`.
+
 ## 3. Colour grading
 
 `ffxcolorgrading.bls` (FDID 2990792) samples the finished picture, clamps it
