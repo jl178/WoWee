@@ -4193,12 +4193,17 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
     // which WMO doodads) are drawn, and whether the camera stands in an
     // interior with no portal open to the outdoors - in which case the client
     // draws no sky, no terrain and nothing outside (0x79a870, 0x7ad1f0).
+    // Whether the terrain is cut away under the camera: the world ray
+    // 0x795d40 casts first meets no ground there (see findCameraGroup).
     std::optional<float> groundUnderCamera;
+    bool groundIsHole = false;
     if (terrainManager && camera) {
-        groundUnderCamera = terrainManager->getHeightAt(camera->getPosition().x, camera->getPosition().y);
+        const glm::vec3 cp = camera->getPosition();
+        groundUnderCamera = terrainManager->getHeightAt(cp.x, cp.y);
+        groundIsHole = groundUnderCamera && terrainManager->isHoleAt(cp.x, cp.y);
     }
     const bool sealedIndoors = wmoRenderer && camera && !skipWMO &&
-                               wmoRenderer->computeVisibility(*camera, groundUnderCamera);
+                               wmoRenderer->computeVisibility(*camera, groundUnderCamera, groundIsHole);
     // The opening the outdoors shows through from an interior, in pixels:
     // terrain, grass, the sky and every map object outside are drawn only
     // inside it, as stock 0x79a790 narrows the outdoor pass.

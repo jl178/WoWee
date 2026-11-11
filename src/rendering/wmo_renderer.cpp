@@ -5433,7 +5433,7 @@ void WMORenderer::setM2Renderer(M2Renderer* renderer) {
 }
 
 bool WMORenderer::findCameraGroup(const glm::vec3& camPos, std::optional<float> groundBelow,
-                                  size_t& outInstance, uint32_t& outFileGroup) const {
+                                  size_t& outInstance, uint32_t& outFileGroup, bool groundIsHole) const {
     namespace sp = stock_wmo_portal;
     // 0x795d40 -> 0x7d59b0: a segment from the camera 1760 yards straight
     // down, against every map object; the nearest floor it meets decides. A
@@ -5452,8 +5452,15 @@ bool WMORenderer::findCameraGroup(const glm::vec3& camPos, std::optional<float> 
     // 0x795d40 casts against the world first (0x7a39f0) and hands the hit
     // on as the farthest a map object floor may be (0x7d59b0's param_3):
     // ground nearer than any WMO floor means the camera is outside.
+    // Not where the terrain is cut by a hole: the world ray meets no ground
+    // there, but the heightfield runs on across it, and under Goldshire's
+    // inn it stands a fifth of a yard over the floor. Taken as the ground,
+    // it called a camera over the inn's floor outside; the walk went from
+    // outside with the camera within the walls, and the inn was not drawn
+    // for a second or so after a teleport in. Over a hole the height only
+    // settles a camera that meets no floor at all (below).
     bool groundHit = false;
-    if (groundBelow && *groundBelow <= rayStart.z && rayStart.z - *groundBelow < best) {
+    if (groundBelow && !groundIsHole && *groundBelow <= rayStart.z && rayStart.z - *groundBelow < best) {
         best = rayStart.z - *groundBelow;
         groundHit = true;
     }
@@ -5523,6 +5530,9 @@ bool WMORenderer::findCameraGroup(const glm::vec3& camPos, std::optional<float> 
         return true;
     }
     if (groundHit) return false;  // the ground is the floor under the camera
+    // Over a hole with no map object floor under it: outside, as before the
+    // hole was taken into account, not the smallest box's interior below.
+    if (groundBelow && groundIsHole && *groundBelow <= rayStart.z) return false;
     // Nothing under the camera at all (a third-person camera pushed into a
     // wall or below a floor). The client would call that outside and draw no
     // interior; Wowee takes the smallest interior group box around the camera
@@ -5553,7 +5563,7 @@ bool WMORenderer::findCameraGroup(const glm::vec3& camPos, std::optional<float> 
     return bestVolume < std::numeric_limits<float>::max();
 }
 
-bool WMORenderer::computeVisibility(const Camera& camera, std::optional<float> groundBelow) {
+bool WMORenderer::computeVisibility(const Camera& camera, std::optional<float> groundBelow, bool groundIsHole) {
     namespace sp = stock_wmo_portal;
     static const bool walkOn = core::envFlagEnabled("WOWEE_WMO_PORTALS", true);
     // WOWEE_WMO_PORTALS_ALTERNATE=N: the walk on for N seconds, off for N,
@@ -5594,7 +5604,7 @@ bool WMORenderer::computeVisibility(const Camera& camera, std::optional<float> g
     // The group the camera stands in, if it stands in an interior one.
     size_t camInst = std::numeric_limits<size_t>::max();
     uint32_t camGroup = 0;
-    const bool inside = findCameraGroup(camPos, groundBelow, camInst, camGroup);
+    const bool inside = findCameraGroup(camPos, groundBelow, camInst, camGroup, groundIsHole);
     sp::Rect outdoor = sp::Rect::full();
     visSkybox_.clear();
     if (inside) {

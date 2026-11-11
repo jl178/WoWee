@@ -199,7 +199,10 @@ public:
     /// `groundBelow` is the terrain height under the camera, when there is
     /// terrain: 0x795d40 casts its ray against the world first and only
     /// takes a map object floor that is nearer than the ground.
-    bool computeVisibility(const Camera& camera, std::optional<float> groundBelow = std::nullopt);
+    /// `groundIsHole`: the terrain is cut away there (a building's hole), so
+    /// the height is the heightfield running on across it, not ground.
+    bool computeVisibility(const Camera& camera, std::optional<float> groundBelow = std::nullopt,
+                           bool groundIsHole = false);
     /// What computeVisibility found about the outdoors.
     bool outdoorSealed() const { return visSealed_; }
     /// The outdoors as seen from an interior, in pixels: the union of the
@@ -1320,7 +1323,7 @@ private:
     /// The group the camera stands over (0x795d40): the nearest floor under it
     /// within 1760 yards. Returns the instance index and its file group.
     bool findCameraGroup(const glm::vec3& camPos, std::optional<float> groundBelow,
-                         size_t& outInstance, uint32_t& outFileGroup) const;
+                         size_t& outInstance, uint32_t& outFileGroup, bool groundIsHole = false) const;
 
     // Collision query profiling - atomic because getFloorHeight is dispatched
     // on async threads from camera_controller while the main thread reads these.

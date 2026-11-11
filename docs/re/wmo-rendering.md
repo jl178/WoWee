@@ -438,7 +438,15 @@ them once a frame on the main thread, before the WMO, M2 and terrain culls.
 - `computeVisibility` (`src/rendering/wmo_renderer.cpp`):
   - finds the camera's group as 0x795d40 does, with the terrain height under
     the camera standing in for 0x7a39f0 and Wowee's collision triangles
-    (MOPY 0x08, or drawn and not detail) for the BSP;
+    (MOPY 0x08, or drawn and not detail) for the BSP. Not where the terrain
+    is cut by a hole: the world ray meets no ground there, but the
+    heightfield runs on across it, and under Goldshire's inn it stands 0.2
+    yards over the floor. Taken as the ground, it called a camera over the
+    inn's floor outside, the walk went from outside with the camera within
+    the walls, and the inn was not drawn for a second or so after a
+    teleport in, until the camera's ease brought it further in. Over a hole
+    with no map object floor under it the camera is still outside (not the
+    smallest interior box round it);
   - walks the camera's instance from inside (`walkFromInside`), then every
     other instance in the frustum from outside (`walkFromOutside`) - through
     the outdoor rectangle when the camera is inside - and adds the camera's
