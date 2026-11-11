@@ -345,7 +345,8 @@ void main() {
     // With the HDR scene (localLightMeta.z bit 32) the clamp lifts: a face
     // the sun and the sky together light past one keeps its hue and goes to
     // the tone map, instead of stopping flat in the brightest channel.
-    // Enhanced's daylight (kEnhancedAmbient, 128): the ground lit as its
+    // "Sky shade (the reference client)" under Enhanced's daylight (kSkyShade, 256,
+    // set by the renderer only with kEnhancedAmbient): the ground lit as its
     // terrain shader lights it (docs/re/enhanced-lighting.md 6e) - the sky's
     // ambient by Enhanced's half-Lambert ramp toward the sun, and the shadow
     // on the sun's light alone, where stock darkens ambient and sun together
@@ -354,7 +355,7 @@ void main() {
     // slope turned from the sun takes less and one turned to it more. What
     // the shade then lacks the bounce pass puts back where the sky and the
     // sunlit ground round it reach (ambient_occlusion.frag).
-    bool enhancedGround = (localLightMeta.z & 128) != 0;
+    bool enhancedGround = (localLightMeta.z & 256) != 0;
     vec3 groundAmbient = rtAmbient(rt, ambientColor.rgb);
     if (enhancedGround) {
         float ramp = mix(0.7, 1.1, 0.5 + 0.5 * clamp(dot(norm, lightDir2), -1.0, 1.0));
@@ -375,7 +376,20 @@ void main() {
         vec3 s3 = (layerFlags.w & 0x80) != 0 ? t3.rgb : t3.rgb * lit;
         result = s0 * w.x + s1 * w.y + s2 * w.z + s3 * w.w;
     }
-    if (!enhancedGround) result *= kStockShadowFloor + (1.0 - kStockShadowFloor) * shadow;
+    // Under Enhanced's daylight (kEnhancedAmbient, 128) the floor is
+    // 1 - shadowParams.y (enhanced_palette::shadowOpacity; Enhanced's shaded
+    // road keeps 54% of the sunlit road's colour, the default stays at
+    // stock's 70% for now), where stock holds it at 70% whatever the sky.
+    // With the sky shade there is no floor (above).
+    if (enhancedGround) {
+    } else if ((localLightMeta.z & 128) != 0) {
+        // (shadowParams.y is over the stock 0.3 here, so `shadow` above is
+        // the map's own 0..1.)
+        float floorK = 1.0 - clamp(shadowParams.y, 0.0, 1.0);
+        result *= floorK + (1.0 - floorK) * shadow;
+    } else {
+        result *= kStockShadowFloor + (1.0 - kStockShadowFloor) * shadow;
+    }
     // The highlight, masked by the blended `_s` alpha and the shadow, added
     // after the floor and not doubled (terrain1.bls: spec * tex.a * lit).
     result += Specular * finalColor.a * shadow;

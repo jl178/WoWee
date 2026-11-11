@@ -107,33 +107,42 @@ void Renderer::decideContactShadows() {
     if (bounce) {
         if (!bounceGrid_) bounceGrid_ = std::make_unique<BounceGrid>();
         bounce = bounceGrid_->ensure(vkCtx);
-        // Its build of the pass also reads the sky height field (set 3).
-        if (!skyField_) skyField_ = std::make_unique<SkyHeightField>();
-        bounce = bounce && skyField_->ensure(vkCtx, shadowRenderPass);
         bounceOffFrames_ = 0;
-    } else if ((bounceGrid_ || skyField_) && ++bounceOffFrames_ > 8) {
+    } else if (bounceGrid_ && ++bounceOffFrames_ > 8) {
         // Eight frames on, no frame in flight reads it; the pass that did
         // was remade without it when the row went off.
         std::shared_ptr<BounceGrid> prev(std::move(bounceGrid_));
-        std::shared_ptr<SkyHeightField> prevSky(std::move(skyField_));
-        vkCtx->deferAfterAllFrameFences([prev, prevSky]() mutable {
-            prev.reset();
-            prevSky.reset();
-        });
+        vkCtx->deferAfterAllFrameFences([prev]() mutable { prev.reset(); });
         bounceOffFrames_ = 0;
+    }
+    // "Sky shade (the reference client)" rides on the bounce light: its build of the
+    // pass (SKY_FIELD) also reads the sky height field, as set 3. Off, the
+    // pass is the bounce build as it was, and nothing draws the field.
+    bool sky = bounce && enh_.skyShade && shadowRenderPass != VK_NULL_HANDLE;
+    if (sky) {
+        if (!skyField_) skyField_ = std::make_unique<SkyHeightField>();
+        sky = skyField_->ensure(vkCtx, shadowRenderPass);
+        skyOffFrames_ = 0;
+    } else if (skyField_ && ++skyOffFrames_ > 8) {
+        std::shared_ptr<SkyHeightField> prev(std::move(skyField_));
+        vkCtx->deferAfterAllFrameFences([prev]() mutable { prev.reset(); });
+        skyOffFrames_ = 0;
     }
     bounceFrame_ = decideDepthLightPass(enh_.ambientOcclusion || enh_.fillLight || bounce, ambientOcclusion_,
                                         // Without the occlusion, the build without its
                                         // spiral (FILL_ONLY): the same picture, a smaller
                                         // shader.
-                                        bounce ? (enh_.ambientOcclusion ? "assets/shaders/ambient_bounce.frag.spv"
-                                                                        : "assets/shaders/ambient_fill.frag.spv")
-                                               : "assets/shaders/ambient_occlusion.frag.spv",
+                                        sky ? (enh_.ambientOcclusion ? "assets/shaders/ambient_sky.frag.spv"
+                                                                     : "assets/shaders/ambient_sky_fill.frag.spv")
+                                        : bounce ? (enh_.ambientOcclusion ? "assets/shaders/ambient_bounce.frag.spv"
+                                                                          : "assets/shaders/ambient_fill.frag.spv")
+                                                 : "assets/shaders/ambient_occlusion.frag.spv",
                                         "Ambient occlusion",
                                         static_cast<int>(ContactShadowPass::Blend::Multiply2x),
                                         bounce ? bounceGrid_->setLayout() : VK_NULL_HANDLE,
-                                        bounce ? skyField_->setLayout() : VK_NULL_HANDLE) &&
+                                        sky ? skyField_->setLayout() : VK_NULL_HANDLE) &&
                    bounce;
+    skyFrame_ = bounceFrame_ && sky;
     // The Enhanced haze lays light over everything the opaque pass drew.
     decideDepthLightPass(enh_.sunHaze && indoorFactor_ < 0.99f, sunHaze_,
                          "assets/shaders/enhanced_haze.frag.spv", "Sun haze",
@@ -155,7 +164,10 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
         glm::vec4 sky(0.0f);
         VkDescriptorSet gridSet = VK_NULL_HANDLE;
         VkDescriptorSet skySet = VK_NULL_HANDLE;
-        if (bounceFrame_ && bounceGrid_ && skyField_ && skyField_->readable()) {
+        // The sky build binds the field, which is cleared before first use
+        // (readySkyField); until it is, the pass waits a frame.
+        const bool skyReady = !skyFrame_ || (skyField_ && skyField_->readable());
+        if (bounceFrame_ && bounceGrid_ && skyReady) {
             // The bounce light: flag 8; the grid's corner and whether it
             // holds a bake yet (until it does, the plain fill).
             bounceGrid_->recordUpload(cmd, vkCtx->getCurrentFrame());
@@ -164,14 +176,16 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
             flags |= 8 | (kBounceDebug ? 16 : 0);
             extra = glm::vec4(bounceGrid_->origin(), bounceGrid_->ready() ? 1.0f : 0.0f, 0.0f);
             gridSet = bounceGrid_->set();
-            // The sky height field: its corner, the height its depth 0
-            // stands for, and whether it holds a drawing yet.
-            sky = skyField_->params();
-            skySet = skyField_->set();
-            // WOWEE_SKY_DEBUG=1 darkens each pixel by what of the sky it
-            // sees, under Enhanced's daylight (flag 32).
-            static const bool kSkyDebug = std::getenv("WOWEE_SKY_DEBUG") != nullptr;
-            flags |= kSkyDebug ? 32 : 0;
+            if (skyFrame_) {
+                // The sky height field: its corner, the height its depth 0
+                // stands for, and whether it holds a drawing yet.
+                sky = skyField_->params();
+                skySet = skyField_->set();
+                // WOWEE_SKY_DEBUG=1 darkens each pixel by what of the sky it
+                // sees, under Enhanced's daylight (flag 32).
+                static const bool kSkyDebug = std::getenv("WOWEE_SKY_DEBUG") != nullptr;
+                flags |= kSkyDebug ? 32 : 0;
+            }
         }
         // Without the occlusion the pass is the fill and the bounce light
         // alone, and every term of both is outdoor light, scaled by 1 -
@@ -225,7 +239,7 @@ void Renderer::updateBounceGrid(float dt) {
 // frame. The candidates are asked with the world map's centre and radius,
 // which keeps their list. Under Enhanced's daylight only: nothing else reads it.
 void Renderer::renderSkyField() {
-    if (!skyField_ || !camera || currentCmd == VK_NULL_HANDLE || worldShadowCullRadius_ <= 0.0f) return;
+    if (!skyField_ || !skyFrame_ || !camera || currentCmd == VK_NULL_HANDLE || worldShadowCullRadius_ <= 0.0f) return;
     if (!lightingManager || !lightingManager->isEnhancedActive()) return;
     // WOWEE_SKY_FIELD=0: never drawn, so the pass leaves the sky term out
     // (for side-by-side work and for measuring its cost).

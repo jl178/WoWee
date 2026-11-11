@@ -783,9 +783,12 @@ void Renderer::updatePerFrameUBO() {
         lightingManager && lightingManager->isEnhancedActive() && enhanced_palette::ambientRampOn()
             ? enh_bits::kEnhancedAmbient
             : 0u;
+    // The sky shade's ground light (terrain.frag) goes with its pass being
+    // the sky build this frame, under Enhanced's daylight.
+    const uint32_t skyShadeBit = enhancedAmbientBit != 0u && skyFrame_ ? enh_bits::kSkyShade : 0u;
     currentFrameData.localLightMeta = glm::ivec4(
         static_cast<int32_t>(localLightCount), std::bit_cast<int32_t>(fogExponent),
-        static_cast<int32_t>(shaderBits(enh_) | hdrLightBit | enhancedAmbientBit), 0);
+        static_cast<int32_t>(shaderBits(enh_) | hdrLightBit | enhancedAmbientBit | skyShadeBit), 0);
     // w: the sun sprite's direction and the day weight, for the light through
     // leaves and grass (leaf_light.hpp); the light direction is not the sun.
     if (lightingManager)

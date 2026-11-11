@@ -787,6 +787,19 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "the camera moves 48 yd; the ambient pass's BOUNCE_GRID build reads it "
                  "(about 7 filtered taps a pixel)",
      .asBool = &Enhancements::bounceLight},
+    {.key = "skyshade", .label = "Sky shade (the reference client)", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
+     .tooltip = "With the bounce light: shade lit as in the reference client. The sun's\n"
+                "shadow takes the sun alone, so shade keeps the sky's cooler\n"
+                "colour; it is darker under the trees, and open ground in shade\n"
+                "takes light from the sky and the sunlit ground around it. Off\n"
+                "keeps the warm classic shade. Only outdoors and by day.",
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "sky_shade",
+     .controls = "SkyHeightField (made on first use): three 512x512 depth maps round the "
+                 "camera drawn with the shadow casters, two parts every 32 yd or 2 s; the "
+                 "ambient pass's SKY_FIELD build reads them (about 0.4 ms more at 1280x540 "
+                 "on an Iris Xe); terrain.frag's Enhanced light (enh_bits::kSkyShade)",
+     .asBool = &Enhancements::skyShade},
     {.key = "enhancedwater", .label = "Water (the reference client)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "Lakes, rivers, the sea and the canals as the reference client draws\n"

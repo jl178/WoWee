@@ -155,6 +155,15 @@ struct Enhancements {
     /// fill row off. Off is stock: no grid, the fill (if on) the same colour
     /// everywhere.
     bool  bounceLight = false;
+    /// With the bounce light, under Enhanced's daylight: the ground lit as
+    /// Enhanced's terrain shader lights it (the ambient by its ramp toward the
+    /// sun, the shadow on the sun alone, no 70% floor), and what of the sky
+    /// each point sees - from a height field drawn round the camera
+    /// (sky_height_field.hpp) - scaling its ambient and, in open shade, a
+    /// fill for Enhanced's probe GI (docs/re/enhanced-lighting.md section 6e).
+    /// Off is the bounce light as it was: no field drawn, the pass's
+    /// bounce build, the terrain's floor.
+    bool  skyShade = false;
 
     // ---- Water and weather -------------------------------------------------
     bool  shorelineFoam = false;
@@ -353,6 +362,9 @@ inline constexpr uint32_t kLeafLight     = 1u << 6;  ///< m2.frag sunlight throu
 /// sun (enhanced_palette::kAmbientAway..kAmbientToward by half-Lambert), and
 /// the terrain's shadow floor follows shadowParams.y below stock's 0.7.
 inline constexpr uint32_t kEnhancedAmbient = 1u << 7;
+/// The sky shade's ground light (terrain.frag): set by the renderer with
+/// kEnhancedAmbient while the ambient pass is the sky build.
+inline constexpr uint32_t kSkyShade = 1u << 8;
 }  // namespace enh_bits
 
 inline uint32_t shaderBits(const Enhancements& e) {

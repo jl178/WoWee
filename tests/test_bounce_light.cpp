@@ -197,3 +197,20 @@ TEST_CASE("bounce light: a Enhanced row, off in stock and the ladder, on in the 
     CHECK(kGraphicsPresets[kEnhancedPresetIndex].enh.bounceLight);
     for (int i = 0; i < kClassicPresetIndex; ++i) CHECK_FALSE(kGraphicsPresets[i].enh.bounceLight);
 }
+
+TEST_CASE("sky shade: a Enhanced row, off in stock and the ladder, on in the Enhanced preset",
+          "[enhanced][enhancements]") {
+    using namespace wowee::ui;
+    const EnhancementRow* row = findEnhancementRow("skyshade");
+    REQUIRE(row != nullptr);
+    CHECK(std::string(row->category) == kEnhPageEnhanced);
+    CHECK(row->stockValue == 0.0f);
+    CHECK(std::string(row->saveKey) == "sky_shade");
+    CHECK(Enhancements{}.skyShade == false);
+    CHECK(kGraphicsPresets[kEnhancedPresetIndex].enh.skyShade);
+    CHECK(kGraphicsPresets[kEnhancedPresetIndex].enh.bounceLight);
+    for (int i = 0; i < kClassicPresetIndex; ++i) CHECK_FALSE(kGraphicsPresets[i].enh.skyShade);
+    // Its own shader bit, set by the renderer, not by the row's switch.
+    CHECK((wowee::rendering::shaderBits(kGraphicsPresets[kEnhancedPresetIndex].enh) &
+           wowee::rendering::enh_bits::kSkyShade) == 0u);
+}

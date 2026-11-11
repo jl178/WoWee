@@ -416,12 +416,16 @@ private:
     bool bounceFrame_ = false;
     /// Main thread, in update: lands and starts the grid's bakes.
     void updateBounceGrid(float dt);
-    /// The sky over each point under Enhanced's daylight (sky_height_field.hpp):
-    /// made and let go with the bounce grid, drawn by renderSkyField inside
+    /// The sky over each point under Enhanced's daylight (sky_height_field.hpp),
+    /// the "Sky shade (the reference client)" row: made with the bounce light and the
+    /// row both on, let go eight frames after either goes off; whether this
+    /// frame's ambient pass is the sky build. Drawn by renderSkyField inside
     /// the shadow pass (before the unit map, whose movers' matrices follow
     /// the doodads' static list in the caster buffer), and cleared once by
     /// readySkyField so that it is never bound unwritten.
     std::unique_ptr<SkyHeightField> skyField_;
+    uint32_t skyOffFrames_ = 0;
+    bool skyFrame_ = false;
     // What the last world map part was culled with: the doodads' candidate
     // list is kept on these, so the height field asks with the same.
     glm::vec3 worldShadowCullCentre_{0.0f};

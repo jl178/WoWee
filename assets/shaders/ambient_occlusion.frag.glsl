@@ -69,6 +69,8 @@ layout(push_constant) uniform Push {
     vec4 target;       // xy the render extent, z unused (1), w debug
 #ifdef BOUNCE_GRID
     vec4 extra;        // xy the grid's corner (world), z 1 once it holds a bake
+#endif
+#ifdef SKY_FIELD
     vec4 sky;          // the sky height field: xy its corner (world), z the
                        // height its depth 0 stands for, w 1 once drawn
 #endif
@@ -102,7 +104,12 @@ const float kCanopyTint = 1.0;
 const float kWallReach = 3.0;
 const float kWallFill = 0.25;
 const vec3 kWallAlbedo = vec3(0.5, 0.42, 0.32);
+#endif
 
+#ifdef SKY_FIELD
+// Built a fourth and fifth time with BOUNCE_GRID and SKY_FIELD
+// (ambient_sky.frag.spv, ambient_sky_fill.frag.spv) for the "Sky shade (WoW
+// Enhanced)" row.
 // The sky over each point under Enhanced's daylight (sky_height_field.hpp;
 // docs/re/enhanced-lighting.md 6e): depth maps from straight above round the
 // camera - the tops of the buildings and doodads, the terrain alone - and
@@ -235,7 +242,7 @@ vec3 worldAt(ivec2 p) {
 
 float lum(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 
-#ifdef BOUNCE_GRID
+#ifdef SKY_FIELD
 // The highest top of the four texels round uv, as a world height (far
 // below the ground where nothing stands).
 float skyTop(vec2 uv) {
@@ -421,7 +428,7 @@ void main() {
     bool takeV = working && abs(dv - dist) < tol;
     float sumQ = sumH + (takeV ? sv : 0.0);
     float wQ = wH + (takeV ? wv : 0.0);
-#ifdef BOUNCE_GRID
+#ifdef SKY_FIELD
     // The sky's visibility under Enhanced's daylight (skyVisibilityLane),
     // pooled over the quad here, before any pixel of it may discard: a
     // neighbour more than a little off in depth is another surface and its
@@ -623,6 +630,8 @@ void main() {
         vec3 fPlain = clamp((ambPlain + dif) / max(before, vec3(1e-3)), 0.0, kFillMaxLift);
         f = mix(f, fPlain, keepPlain);
     }
+#endif
+#ifdef SKY_FIELD
     // Enhanced's daylight with the sky height field drawn (docs/re/
     // enhanced-lighting.md 6e). What the light at the pixel was is taken
     // apart again - the ambient by Enhanced's ramp toward the sun (held to

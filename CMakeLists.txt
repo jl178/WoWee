@@ -566,6 +566,8 @@ function(compile_shaders TARGET_NAME)
         "character.vert.glsl|character_tess.vert.spv|-DCHAR_TESS"
         "ambient_occlusion.frag.glsl|ambient_bounce.frag.spv|-DBOUNCE_GRID"
         "ambient_occlusion.frag.glsl|ambient_fill.frag.spv|-DBOUNCE_GRID -DFILL_ONLY"
+        "ambient_occlusion.frag.glsl|ambient_sky.frag.spv|-DBOUNCE_GRID -DSKY_FIELD"
+        "ambient_occlusion.frag.glsl|ambient_sky_fill.frag.spv|-DBOUNCE_GRID -DFILL_ONLY -DSKY_FIELD"
         "water_hd.frag.glsl|water_fw.frag.spv|-DENHANCED_WATER"
     )
     foreach(VARIANT ${SHADER_VARIANTS})

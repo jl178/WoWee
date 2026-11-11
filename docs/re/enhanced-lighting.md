@@ -1053,6 +1053,17 @@ little under a canopy. The bounce grid's crown discs (6b) could not stand in
 for it - they mark most of Elwynn as covered, so a fill keyed on them lifted
 nothing.
 
+All of it is the "Sky shade (the reference client)" row (`skyShade`, Enhanced page,
+on in the Enhanced preset), which needs the bounce light on. It flips live.
+Off is the bounce light exactly as it was: the pass's `BOUNCE_GRID` build
+(`ambient_bounce`/`ambient_fill.frag.spv`, byte for byte the commit before;
+the sky code is a third define, `SKY_FIELD`, in `ambient_sky`/
+`ambient_sky_fill.frag.spv`), no height field made or drawn, and the
+terrain's floor - the terrain's Enhanced light is its own bit,
+`enh_bits::kSkyShade`, set only while the pass is the sky build. Jered keeps
+the warm classic shade that way; on, the shaded road and the evening road go
+grey-blue.
+
 **Enhanced's terrain light.** Its terrain pixel shader (FDID 2990783,
 permutation 0) lights the ground as `material3_mesh_ps` lights models: the
 hemisphere ambient by the half-Lambert ramp toward the sun (6d's

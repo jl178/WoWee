@@ -129,6 +129,10 @@ constexpr rendering::Enhancements enhancedEnhancements() {
     // Enhanced's probe GI, by place (bounce_grid.hpp): the shade under the
     // trees green and dimmer, beside sunlit ground and walls warm.
     e.bounceLight = true;
+    // The shade by the sky each point sees (sky_height_field.hpp): Enhanced's
+    // terrain light, the ambient scaled by the open sky and a fill in open
+    // shade (docs/re/enhanced-lighting.md 6e).
+    e.skyShade = true;
     // Enhanced's ground is covered where 3.3.5's shows bare texture between
     // tufts. Its clutter data is 1.12's; the cover comes from its settings
     // (groundEffectDist 200) and models. Wowee's grass field stands in for
