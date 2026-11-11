@@ -355,6 +355,24 @@ The GPU's own pace wandered by up to a third between runs (whole-frame
 GPU time 10.4-14.4 ms for the same view), so only figures from one run
 compare closely; the deltas above are each from a single run.
 
+**What stands in the water.** The bed's absorption (blue gone within a
+yard), its olive shallows and its fade-in over the first half yard were set
+against the lake bed. On a unit standing in the lake they turned the body
+under the surface yellow and brighter than the skin above it, and left hard
+pale patches where it was within half a yard of the surface (the refraction
+also bent across the body to the bed behind it). Each pixel now looks a
+yard and a half and three yards to either side: when the bed there, carried
+on in a line to this pixel, lies more than about a yard deeper than what the
+pixel shows, what it shows stands in the water rather than lying under it.
+That takes the transmission in grey (the same luma), no olive tint, the
+surface over all of it, and no bend. A shore's slope carries on through
+the pixel and is not taken: from the capture's viewpoint the regions are
+unchanged (deep near 59 67 64 -> 59 66 64, middle, far and shallows equal)
+and so is the transect from the waterline (the ochre band 91 79 48 ->
+93 81 49 at 16 px, 86 76 51 -> 86 77 51 at 24 px). A first version that
+compared only the bed's depth beside the pixel took the shore's slope for
+an object and greyed the ochre band (to 80 73 63).
+
 **Cost** (lab server, Iris Xe, 1280x540, Enhanced preset at noon, the row off
 (HD water) and on in turn, four 8 s pairs a place, `WOWEE_FRAME_PROFILE=1`,
 the GPU's `water` pass, paired medians):

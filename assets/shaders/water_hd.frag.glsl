@@ -697,6 +697,33 @@ void main() {
             // Depth of water behind the surface, as Enhanced measures it: the
             // view depth of the bed past the surface's.
             float t = depthKnown ? max(sceneLin - waterLin, 0.0) : 60.0;
+            // Something standing in the water - a unit, a post, a hull -
+            // rather than the bed under it: on either side, the bed a yard
+            // and a half and three yards off, carried on in a line to this
+            // pixel, lies well deeper than it. A slope (a shore) carries on
+            // through the pixel and is not taken. The bed's absorption (blue
+            // gone within a yard: the shallows go ochre), its olive shallows
+            // and its fade-in over the first half yard were set against
+            // Enhanced's lake bed; on a body they turned what was under the
+            // surface yellow and brighter than the skin above it, and left
+            // pale patches where it is within half a yard of the surface.
+            // What stands in the water takes the water's transmission in
+            // grey and the surface over all of it.
+            float objectK = 0.0;
+            if (depthKnown && t < 4.0) {
+                float pxPerYd = abs(projection[1][1]) * 0.5 * push.screenSize.y / max(waterLin, 0.1);
+                float stepU = 1.5 * pxPerYd / push.screenSize.x;
+                float lift = 0.0;
+                for (int side = -1; side <= 1; side += 2) {
+                    float lin1 = linearizeDepth(texture(SceneDepth, clamp(screenUV + vec2(side * stepU, 0.0), vec2(0.001), vec2(0.999))).r, near, far);
+                    float lin2 = linearizeDepth(texture(SceneDepth, clamp(screenUV + vec2(side * 2.0 * stepU, 0.0), vec2(0.001), vec2(0.999))).r, near, far);
+                    // A tap on what stands above the surface says nothing.
+                    if (lin1 < waterLin || lin2 < waterLin) continue;
+                    float bedHere = 2.0 * (lin1 - waterLin) - (lin2 - waterLin);
+                    lift = max(lift, bedHere - t);
+                }
+                objectK = smoothstep(0.6, 1.5, lift);
+            }
             composeBed = hdParams.y > 0.5 && push.sceneValid > 0.5;
             if (composeBed) {
                 // Enhanced bends the bed by the surface's slope times the
@@ -705,7 +732,9 @@ void main() {
                 vec2 uvR = screenUV;
                 if (depthKnown) {
                     vec3 vN = mat3(view) * vec3(N.xy, 0.0);
-                    float k = 0.012 * min(t, 12.0) * (1.0 - smoothstep(30.0, 200.0, dist));
+                    // Not bent across a body to the bed behind it: that
+                    // printed patches of the bed inside its outline.
+                    float k = 0.012 * min(t, 12.0) * (1.0 - smoothstep(30.0, 200.0, dist)) * (1.0 - objectK);
                     vec2 cand = clamp(screenUV + vN.xy * k, vec2(0.001), vec2(0.999));
                     float candLin = linearizeDepth(texture(SceneDepth, cand).r, near, far);
                     if (candLin >= waterLin) {
@@ -718,6 +747,7 @@ void main() {
             // Absorption over the depth; the scene is display-encoded, so the
             // transmittance is taken to that encoding.
             vec3 T = pow(exp(-t * FW_CLARITY * L.absorb * L.density), vec3(1.0 / 2.2));
+            T = mix(T, vec3(dot(T, vec3(0.3, 0.55, 0.15))), objectK);
 
             // The light: Enhanced's sun term is gated by the sun's height
             // (smoothstep of (sin elevation + 0.1) * 5) and enters through
@@ -769,7 +799,7 @@ void main() {
             // Thin water over the bed reads olive in Enhanced's shallows
             // (G over R from a yard or two out); the veil starts in that
             // green and turns to the deep body's grey-teal as it thickens.
-            vec3 bodyF = albedo * veil * inLight * mix(FW_SHALLOW_TINT, vec3(1.0), veil);
+            vec3 bodyF = albedo * veil * inLight * mix(mix(FW_SHALLOW_TINT, vec3(1.0), veil), vec3(1.0), objectK);
 
             // Reflection: EnvBRDFApprox at F0 0.02 of the environment -
             // Light.dbc's sky by the ring rule, or the planar sky pass.
@@ -882,7 +912,7 @@ void main() {
 
             // Enhanced's composition: the bed through the water, then the
             // water's own light, faded in over the first half yard.
-            float s2 = depthKnown ? clamp(t * 2.0, 0.0, 1.0) : 1.0;
+            float s2 = depthKnown ? mix(clamp(t * 2.0, 0.0, 1.0), 1.0, objectK) : 1.0;
             vec3 X = bodyF + env * F + sunSpec + (1.0 - Fsun) * foamCol * cover;
             vec3 Tb = T * (1.0 - Fsun) * (1.0 - cover);
             fwBedT = vec3(1.0 - s2) + s2 * Tb;
