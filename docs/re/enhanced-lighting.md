@@ -1509,6 +1509,24 @@ Sheets: `sv/sheet3_teldrassil.png` (Ultra | sky shade off | before | now),
 `sv/sheet3_matched.png` (Enhanced | before | now), `sv/sheet3_regress.png`
 (before | now).
 
+**The crown chroma bar, held to fixed pixels.** The crown chroma gap rose
+from +17% (round two) to +51% (the baseline of round three). A bisect on
+the three matched views puts all of the rise on the canopy shafts (0b5540d,
+5c). On 9573bd7 with `WOWEE_ENHANCED_SHAFTS=0` the gap is +13%; the view
+away from the sun (cross) never moved. In the two views toward the sun
+(inn, 15:23) the shafts lay a gold mist over the top third of the frame. In
+the inn view that band goes from saturation 0.36, hue 56 to 0.46, hue 43,
+where Enhanced's is 0.36, hue 57, so the morning shafts overshoot; at 15:23
+they come close to Enhanced's gold (0.43 / 41 against 0.41 / 39). The bar
+made this look worse than it is. The crown region was picked by hue (foliage
+55-165) and saturation in each shot, so as the mist turned the leaves
+orange, half the region's pixels left the band and the most saturated ones
+were all that was left (+108% on 15:23 in one run). The bar now takes the
+crown pixels of a render without shafts (kd13, round two) and measures
+every shot's saturation on those same pixels (`fgap/bars2.py`
+`crown_gap`). On that mask round three's baseline is +44%, and +43% with
+round three.
+
 ## 7. Ground clutter
 
 `GroundEffectTexture` is the 1.12 table: 1060 of the 1065 changed rows went
