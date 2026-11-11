@@ -1829,6 +1829,46 @@ session scratchpad `shadows/`):
   off - and receive like the ground under them
   (`shadows/cmp_pl6_plants.png`).
 
+## 9f. The sky round the sun (dnsky)
+
+Enhanced's dome is drawn by `dnsky.bls` (pixel 2990767, vertex 2990994):
+the ring colours come in per vertex as 3.3.5's do (raised to 2.2 when the
+pipeline is linear), and the pixel shader then draws them toward a glow
+colour round the sun:
+
+    t     = saturate(dot(ray, sunDir) - c)                    cbuffer row 0.x
+    f     = saturate((t / (1 - c))^3)
+    k     = lerp(row2.w, row0.y, saturate(vertexHeight * 50))  horizon / above
+    sky  += f * k * (row2.rgb - sky)                          row 2: glow colour
+
+followed by a blue-noise dither. So the halo is a broad cubic cone with no
+edge, one strength on the horizon and one above it. The four numbers and the
+glow colour are filled on the CPU and were not read; LightData's SunColor is
+`#ffffff` on every key of the profiles looked at, and the sky bands
+themselves (Barrens 7626 at 17-18h: top `#213656`, middle `#7492c5`, band 1
+`#b2b1ad`, band 2 `#dbb68e`, smog `#f8bd72`, fog `#70697f`) are no paler than
+3.3.5's - the pale gold round Enhanced's low sun is this halo.
+
+**Ported** (Enhanced preset, `Enhancements::enhancedDaylight`, times
+`LightingParams::sunDisc` so Outland's planets keep none): `skybox.frag`
+does the same lerp, the glow colour the smog's hue at full brightness (1.6x
+in the HDR scene, where the tone map rolls it off; the frame's sky by the sun
+is gold, b/r 0.67, and a white glow took ours to 0.81), c 0, strength 0.8
+on the horizon and above, up with the day - and only toward a low sun: full
+under 12 degrees, gone by 30. That last is a fit, not Enhanced's: Jered's
+frames are low suns, and toward Goldshire's 9:22 sun (38 degrees) any halo
+only added near-white round the disc (1.20% -> 2.24% with a white one).
+Measured against the Barrens frame at 17:45 (sky by the sun / 30-40
+degrees off it, median luminance): Enhanced 234 / 220, before 208 / 162,
+after 216 / 172, blue/red 0.70 -> 0.74 (frame 0.67). Stronger settings do
+not close the rest: at full strength toward a 2.2x glow the sky by the sun
+reached 218 with its red at 233 and its brightest pixel at 237 against the
+frame's 255 and 248 - the ceiling is the final pass's tone curve, not the
+dome. The dusk frame (`yt_dusk_055028`, twisted trees and a lamp, an orange
+sun through them) is not Duskwood: Enhanced's Duskwood profile (7791) is teal
+on every key; its gold matches Elwynn's dusk (smog `#fea83c` at 20:40), where
+the halo now applies.
+
 ## 10. Not done, and why
 
 - Enhanced's ZoneLight polygons (section 2b), and its keyframes for the 11

@@ -7,10 +7,23 @@
 #include "core/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
+#include <algorithm>
 #include "rendering/stock_sky.hpp"
 
 namespace wowee {
 namespace rendering {
+
+namespace {
+// Enhanced's sun glow (dnsky), fitted against Jered's Barrens frame at 17:45:
+// the strength above and on the horizon, the cone's start (cosine to the
+// sun), the share left once the sun is 30 degrees up, and the glow colour's
+// brightness in the HDR scene.
+constexpr float kSunGlowAbove = 0.8f;
+constexpr float kSunGlowStart = 0.0f;
+constexpr float kSunGlowHorizon = 0.8f;
+constexpr float kSunGlowHigh = 0.0f;
+constexpr float kSunGlowGainHdr = 1.6f;
+}
 
 // Push constant struct - must match skybox.frag.glsl layout
 // The stock sky dome is LightIntBand 2-7 laid over fixed elevations - top at
@@ -25,9 +38,12 @@ struct SkyPushConstants {
     glm::vec4 band2Color;     // 5
     glm::vec4 smogColor;      // 6
     glm::vec4 fogColor;       // 7
-    glm::vec4 params;         // x = dawn/dusk highlight (stock_sky::highlight)
+    glm::vec4 params;         // x = dawn/dusk highlight (stock_sky::highlight),
+                              // y = Enhanced's sun glow above the horizon,
+                              // z = its start (cosine from the sun), w = on the horizon
+    glm::vec4 sunGlowColor;   // rgb: the colour the dome is drawn toward round the sun
 };
-static_assert(sizeof(SkyPushConstants) == 112, "SkyPushConstants size mismatch");
+static_assert(sizeof(SkyPushConstants) == 128, "SkyPushConstants size mismatch");
 
 Skybox::Skybox() = default;
 
@@ -48,11 +64,11 @@ bool Skybox::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout) {
     const auto& vertStage = shaders.vertStage;
     const auto& fragStage = shaders.fragStage;
 
-    // Push constant range: 7 x vec4 = 112 bytes
+    // Push constant range: 8 x vec4 = 128 bytes, the guaranteed minimum
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushRange.offset = 0;
-    pushRange.size = sizeof(SkyPushConstants);  // 80 bytes
+    pushRange.size = sizeof(SkyPushConstants);
 
     // Create pipeline layout with perFrameLayout (set 0) + push constants
     pipelineLayout = createPipelineLayout(device, {perFrameLayout}, {pushRange});
@@ -144,6 +160,27 @@ void Skybox::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyP
     // for LightParams with HighlightSky set.
     const float dayFraction = glm::fract(params.timeOfDay / 24.0f);
     push.params = glm::vec4(stock_sky::highlight(dayFraction, params.highlightSky), 0.0f, 0.0f, 0.0f);
+    // the reference client's dome (dnsky.bls, pixel shader 2990767): within the cone
+    // where the cosine to the sun passes a start c, the dome's colour is
+    // drawn toward a glow colour by ((cos - c) / (1 - c))^3 times a strength,
+    // one strength on the horizon and another from a little above it (its
+    // vertex height times 50, saturated). The numbers come from the CPU and
+    // were not read; they are set against Jered's Barrens frame toward a
+    // 17:45 sun, up with the day. Enhanced preset only (enhancedSunGlow).
+    if (params.enhancedSunGlow > 0.0f) {
+        const float day = glm::clamp(params.dayIntensity, 0.0f, 1.0f) * params.enhancedSunGlow;
+        push.params.y = kSunGlowAbove * day;
+        push.params.z = kSunGlowStart;
+        push.params.w = kSunGlowHorizon * day;
+        // The horizon's own gold (LightIntBand 6, the smog) at full
+        // brightness: the frame's sky by the sun is pale gold, never white.
+        const glm::vec3 smog = glm::max(params.skySmogColor, glm::vec3(0.0f));
+        const float top = std::max(std::max(smog.r, smog.g), std::max(smog.b, 1e-3f));
+        // Brighter than 1 only in the HDR scene, where the tone map rolls it
+        // off; in the 8-bit scene it stays at the smog's own brightness.
+        const float gain = params.sunGain > 1.0f ? kSunGlowGainHdr : 1.0f;
+        push.sunGlowColor = glm::vec4(smog / top * gain, kSunGlowHigh);
+    }
 
     // Bind pipeline
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);

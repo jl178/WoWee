@@ -28,7 +28,9 @@ layout(push_constant) uniform Push {
     vec4 band2Color;      // 5, ring 3 (3.7)
     vec4 smogColor;       // 6, ring 4 (1.8)
     vec4 fogColorPush;    // 7, the horizon and everything below it
-    vec4 params;          // x = dawn/dusk highlight (0x7f0530), yzw unused
+    vec4 params;          // x = dawn/dusk highlight (0x7f0530); y, w = Enhanced's sun
+                          // glow above and on the horizon (0 = stock), z its start
+    vec4 sunGlowColor;    // rgb: what the dome is drawn toward round the sun
 } push;
 
 layout(location = 0) in vec2 TexCoord;
@@ -111,6 +113,25 @@ void main() {
         g = sampleKeys6(kAzimuthGlow, az - floor(az));
     }
     vec3 sky = mix(ringColor(ring, g, h), ringColor(ring + 1, g, h), clamp(f, 0.0, 1.0));
+
+    // the reference client's dome (dnsky, pixel shader 2990767): toward the sun the
+    // colour is drawn toward the glow colour, by the cube of how far into
+    // the cone round the sun the ray is - a broad soft halo, no edge -
+    // the strength one value on the horizon and another just above it.
+    if (push.params.y > 0.0 || push.params.w > 0.0) {
+        vec3 toSun = -normalize(lightDir.xyz);
+        float into = clamp(dot(worldDir, toSun) - push.params.z, 0.0, 1.0);
+        if (into > 0.0) {
+            float f = clamp(pow(into / max(1.0 - push.params.z, 1e-3), 3.0), 0.0, 1.0);
+            float k = mix(push.params.w, push.params.y, clamp(worldDir.z * 50.0, 0.0, 1.0));
+            // Fit, not read: full while the sun is low (under 12 degrees),
+            // easing to sunGlowColor.w of it by 30 degrees up - Jered's frames
+            // are a low sun, and toward a high one (Goldshire at 9:22) the
+            // glow only added near-white round the disc.
+            k *= mix(1.0, push.sunGlowColor.w, smoothstep(0.208, 0.5, toSun.z));
+            sky += (push.sunGlowColor.rgb - sky) * (f * k);
+        }
+    }
 
     if (volumetricParams.x > 0.5) {
         vec4 air = fogVolumeSky(TexCoord);

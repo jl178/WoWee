@@ -69,6 +69,12 @@ struct SkyParams {
     /// more with the HDR scene, where the light above 1 is kept for the tone
     /// map and the bloom instead of clipping (enhanced_tonemap::kSunGain).
     float sunGain = 1.0f;
+    /// the reference client's sky shader (dnsky): the dome drawn toward the sun's
+    /// colour round the sun. 0 is the stock dome; set by the renderer under
+    /// the Enhanced daylight (Enhancements::enhancedDaylight), times how much
+    /// of the sun the sky shows (LightingParams::sunDisc: none round
+    /// Outland's planets).
+    float enhancedSunGlow = 0.0f;
 
     // Time
     float timeOfDay = 12.0f;    // 0-24 hours
