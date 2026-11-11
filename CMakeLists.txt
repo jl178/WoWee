@@ -997,6 +997,7 @@ set(WOWEE_SOURCES
     src/rendering/contact_shadow_pass.cpp
     src/rendering/renderer_light_extras.cpp
     src/rendering/bounce_grid.cpp
+    src/rendering/sky_height_field.cpp
     src/rendering/screen_capture.cpp
     src/rendering/loot_sparkles.cpp
     src/rendering/grass_renderer.cpp

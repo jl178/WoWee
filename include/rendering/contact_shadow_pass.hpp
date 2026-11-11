@@ -34,8 +34,10 @@ public:
     /// shader reads (the bounce light's grid), bound at record.
     explicit ContactShadowPass(const char* fragSpv = "assets/shaders/contact_shadow.frag.spv",
                                const char* name = "Contact shadows", Blend blend = Blend::Multiply,
-                               VkDescriptorSetLayout extraLayout = VK_NULL_HANDLE)
-        : fragSpv_(fragSpv), name_(name), blendMode_(blend), extraLayout_(extraLayout) {}
+                               VkDescriptorSetLayout extraLayout = VK_NULL_HANDLE,
+                               VkDescriptorSetLayout extraLayout2 = VK_NULL_HANDLE)
+        : fragSpv_(fragSpv), name_(name), blendMode_(blend), extraLayout_(extraLayout),
+          extraLayout2_(extraLayout2) {}
     [[nodiscard]] const char* fragSpv() const { return fragSpv_; }
     ~ContactShadowPass() { shutdown(); }
 
@@ -53,13 +55,20 @@ public:
     /// set 2 when the pass was made with an extra layout (and must be then).
     bool record(VkCommandBuffer cmd, const SoftParticlePass::Target& target, VkDescriptorSet perFrameSet,
                 const glm::mat4& invViewProj, float darkness, int flags = 0,
-                const glm::vec4& extra = glm::vec4(0.0f), VkDescriptorSet extraSet = VK_NULL_HANDLE);
+                const glm::vec4& extra = glm::vec4(0.0f), VkDescriptorSet extraSet = VK_NULL_HANDLE,
+                const glm::vec4& extra2 = glm::vec4(0.0f), VkDescriptorSet extraSet2 = VK_NULL_HANDLE);
 
 private:
+    /// Per-frame, depth, then set 2 and set 3 when made with them.
+    [[nodiscard]] uint32_t setCount() const {
+        return extraLayout_ == VK_NULL_HANDLE ? 2u : (extraLayout2_ == VK_NULL_HANDLE ? 3u : 4u);
+    }
     const char* fragSpv_;
     const char* name_;
     Blend blendMode_;
     VkDescriptorSetLayout extraLayout_ = VK_NULL_HANDLE;
+    // Set 3, after set 2 (the ambient pass's sky height field); only with a set 2.
+    VkDescriptorSetLayout extraLayout2_ = VK_NULL_HANDLE;
     VkContext* ctx_ = nullptr;
     SoftParticlePass depth_;
     VkPipelineLayout layout_ = VK_NULL_HANDLE;

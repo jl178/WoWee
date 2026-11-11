@@ -69,6 +69,8 @@ layout(push_constant) uniform Push {
     vec4 target;       // xy the render extent, z unused (1), w debug
 #ifdef BOUNCE_GRID
     vec4 extra;        // xy the grid's corner (world), z 1 once it holds a bake
+    vec4 sky;          // the sky height field: xy its corner (world), z the
+                       // height its depth 0 stands for, w 1 once drawn
 #endif
 } pc;
 
@@ -100,6 +102,57 @@ const float kCanopyTint = 1.0;
 const float kWallReach = 3.0;
 const float kWallFill = 0.25;
 const vec3 kWallAlbedo = vec3(0.5, 0.42, 0.32);
+
+// The sky over each point under Enhanced's daylight (sky_height_field.hpp;
+// docs/re/enhanced-lighting.md 6e): depth maps from straight above round the
+// camera - the tops of the buildings and doodads, the terrain alone - and
+// from straight below, the undersides of the buildings and doodads.
+layout(set = 3, binding = 0) uniform sampler2D uSkyTops;
+layout(set = 3, binding = 1) uniform sampler2D uSkyGround;
+layout(set = 3, binding = 2) uniform sampler2D uSkyFeet;
+const float kSkySpan = 256.0;          // sky_field::kSpan
+const float kSkyDepth = 400.0;         // sky_field::kDepth
+// The horizon is looked for along kSkyDirs directions, at these reaches
+// (yards): far enough to see past the crown of an oak from under it.
+const int kSkyDirs = 8;
+const int kSkyReaches = 3;
+const float kSkyReach[kSkyReaches] = float[](1.5, 5.0, 12.0);
+// Height a sample must stand above the point to count (the field's own
+// half-yard texels and the depth's slope bias).
+const float kSkyBias = 0.35;
+// How much of the sky behind it a slab takes: all of it - the gaps between
+// a crown's leaves are already holes in the maps (alpha-tested).
+const float kSkyDensity = 1.0;
+// The quad pools its looks across depths this close (yards, and per yard).
+const float kSkyQuadYards = 0.3;
+const float kSkyQuadPerYard = 0.05;
+// Under a closed sky the ground's ambient keeps this much of itself (the
+// light from all round that comes in under the crowns), a model's
+// kModelClosed (a trunk or a wall stands in the open air beside it).
+const float kSkyClosed = 0.7;
+const float kModelClosed = 0.9;
+// Enhanced's probe GI (giQuality 3) stands in as a fill with no facing - its
+// irradiance volume is read at the pixel and added (section 6) - on the
+// ground in shade. Only in the open: none at kOpenFrom of the sky seen,
+// all of it from kOpenTo.
+const float kOpenFrom = 0.3;
+const float kOpenTo = 0.9;
+const float kGiSky = 0.2;            // x the fog colour (the sky's horizon)
+const float kGiBounce = 0.6;         // x the sun x the ground's colour
+const float kGiBounceShaded = 0.8;   // of it with none of the ground round lit
+const float kGiSunRef = 0.6;         // sin of the sun's height it was set at
+const float kGiSunPow = 2.0;
+const float kGiBounceSat = 0.6;      // of the ground's chroma it keeps
+const float kGiCool = 0.35;          // of it in the sky's hue
+// The ground's lit share is read on two rings round the point (yards).
+const float kGiRing0 = 3.0;
+const float kGiRing1 = 8.0;
+// How far the shade may be lifted (the plain fill: kFillMaxLift).
+const float kEnhancedMaxLift = 2.5;
+// Shade is where the sun gives under kShadeFrom of the light, none past
+// kShadeTo: the fill is for shade.
+const float kShadeFrom = 0.05;
+const float kShadeTo = 0.2;
 #endif
 
 layout(location = 0) out vec4 outColor;
@@ -181,6 +234,88 @@ vec3 worldAt(ivec2 p) {
 }
 
 float lum(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+#ifdef BOUNCE_GRID
+// The highest top of the four texels round uv, as a world height (far
+// below the ground where nothing stands).
+float skyTop(vec2 uv) {
+    vec4 d = textureGather(uSkyTops, uv, 0);
+    return pc.sky.z - kSkyDepth * min(min(d.x, d.y), min(d.z, d.w));
+}
+
+// The lowest underside of the four (far above where nothing stands).
+float skyFoot(vec2 uv) {
+    vec4 d = textureGather(uSkyFeet, uv, 0);
+    return pc.sky.z - kSkyDepth + kSkyDepth * min(min(d.x, d.y), min(d.z, d.w));
+}
+
+// sin^2 of the elevation whose tangent is t, 0 at and below the horizon: the
+// share of a cosine-weighted hemisphere's slice below that elevation.
+float sin2Elev(float t) {
+    float tt = max(t, 0.0);
+    tt *= tt;
+    return tt / (1.0 + tt);
+}
+
+float skyGroundAt(vec2 uv) {
+    return pc.sky.z - kSkyDepth * textureLod(uSkyGround, uv, 0.0).r;
+}
+
+// What of the sky a point sees, weighted as an upward face takes it. Along
+// each direction, what stands at each reach is a slab from its underside to
+// its top, and hides the elevations between them: sin^2 of the top's
+// elevation less sin^2 of the underside's is that band's share of the
+// slice of a cosine-weighted hemisphere. A crown overhead hides the steep
+// sky and leaves the sky under its edge; a wall or a trunk, standing on the
+// ground, hides everything up to its top.
+//
+// The kSkyDirs directions are shared over the 2x2 quad: each pixel looks
+// along every fourth (from `lane`), and main pools the quad's, as the
+// occlusion pools its spiral - a quarter of the looks a pixel.
+float skyVisibilityLane(vec3 p, vec2 uv, int lane) {
+    float acc = 0.0;
+    for (int i = lane; i < kSkyDirs; i += 4) {
+        float a = (float(i) + 0.5) * (6.2831853 / float(kSkyDirs));
+        vec2 dir = vec2(cos(a), sin(a)) / kSkySpan;
+        float v = 1.0;
+        for (int k = 0; k < kSkyReaches; ++k) {
+            float r = kSkyReach[k];
+            vec2 q = uv + dir * r;
+            float hi = sin2Elev((skyTop(q) - p.z - kSkyBias) / r);
+            float lo = sin2Elev((skyFoot(q) - p.z) / r);
+            v *= 1.0 - kSkyDensity * max(hi - lo, 0.0);
+        }
+        acc += v;
+    }
+    return acc / float(kSkyDirs / 4);
+}
+
+// How much of the ground round p the sun reaches: one point on each of two
+// rings, turned by the pixel's place in its quad (the four of a quad look
+// four ways), each set on the ground there and tested against the world
+// map once.
+float groundSunlit(vec3 p, vec3 ldir, int lane) {
+    vec3 row0 = vec3(lightSpaceMatrix[0][0], lightSpaceMatrix[1][0], lightSpaceMatrix[2][0]);
+    vec3 row2 = vec3(lightSpaceMatrix[0][2], lightSpaceMatrix[1][2], lightSpaceMatrix[2][2]);
+    float texelYd = 2.0 * shadowTexel() / max(length(row0), 1e-9);
+    float sinA = sqrt(max(1.0 - ldir.z * ldir.z, 0.0));
+    float lift = texelYd * 2.5 * sinA + 0.1;
+    float bias = 0.25 * texelYd * length(row2);
+    float lit = 0.0;
+    for (int i = 0; i < 2; ++i) {
+        float r = i == 0 ? kGiRing0 : kGiRing1;
+        float a = float(i) * 3.1415927 + float(lane) * 1.5707963;
+        vec2 q = p.xy + vec2(cos(a), sin(a)) * r;
+        float gz = skyGroundAt((q - pc.sky.xy) / kSkySpan) + lift;
+        vec4 ls = lightSpaceMatrix * vec4(q, gz, 1.0);
+        vec3 pr = ls.xyz / ls.w;
+        pr.xy = pr.xy * 0.5 + 0.5;
+        bool inside = all(greaterThanEqual(pr, vec3(0.0))) && all(lessThanEqual(pr, vec3(1.0)));
+        lit += inside ? texture(uShadowMap, vec3(pr.xy, pr.z - bias)) : 1.0;
+    }
+    return lit * 0.5;
+}
+#endif
 
 float otherH(float v, bool odd) { float d = dFdxFine(v); return odd ? v - d : v + d; }
 float otherV(float v, bool odd) { float d = dFdyFine(v); return odd ? v - d : v + d; }
@@ -286,6 +421,53 @@ void main() {
     bool takeV = working && abs(dv - dist) < tol;
     float sumQ = sumH + (takeV ? sv : 0.0);
     float wQ = wH + (takeV ? wv : 0.0);
+#ifdef BOUNCE_GRID
+    // The sky's visibility under Enhanced's daylight (skyVisibilityLane),
+    // pooled over the quad here, before any pixel of it may discard: a
+    // neighbour more than a little off in depth is another surface and its
+    // looks are not taken. Only inside the field (fading out over its outer
+    // band), outdoors, and not on a leaf, which keeps the bounce light as it
+    // is (below).
+    int skyLane = (oddX ? 1 : 0) + (oddY ? 2 : 0);
+    vec2 skyUv = (pos.xy - pc.sky.xy) / kSkySpan;
+    float skyInside = 0.0;
+    float groundZ = 0.0;
+    float above = 0.0;
+    if (bounceOn && (localLightMeta.z & 128) != 0 && pc.sky.w > 0.5 && d < 1.0) {
+        vec2 se = min(skyUv, 1.0 - skyUv);
+        float edge = kSkyReach[kSkyReaches - 1] / kSkySpan;
+        skyInside = smoothstep(edge, edge + 0.08, min(se.x, se.y)) * (1.0 - clamp(shadowParams.w, 0.0, 1.0));
+        if (skyInside > 0.0) {
+            groundZ = skyGroundAt(skyUv);
+            above = pos.z - groundZ;
+            // A leaf: off the ground, inside something whose underside there
+            // (the lower of two looks a yard apart: a pixel on a trunk's side
+            // is at the edge of the trunk's own texels) is well above the
+            // ground - a crown; not a wall or a trunk, which stand on the
+            // ground, nor a unit, which is in none of the maps.
+            if (above > 1.0) {
+                const float r = 0.75 / kSkySpan;
+                vec2 o = (skyLane & 1) != 0 ? vec2(r, r) : vec2(r, -r);
+                float foot = min(skyFoot(skyUv + o), skyFoot(skyUv - o));
+                float leaf = smoothstep(1.0, 2.5, above) * smoothstep(1.5, 3.0, foot - groundZ) *
+                             smoothstep(-1.0, 0.0, skyTop(skyUv) - pos.z) * smoothstep(-1.5, -0.5, pos.z - foot);
+                skyInside *= 1.0 - leaf;
+            }
+        }
+    }
+    bool skyOn = skyInside > 0.0;
+    float visSum = skyOn ? skyVisibilityLane(pos, skyUv, skyLane) : 0.0;
+    float visW = skyOn ? 1.0 : 0.0;
+    float skyTol = kSkyQuadYards + kSkyQuadPerYard * dist;
+    float dS = skyOn ? dist : -1e6;
+    float vh = otherH(visSum, oddX), wh = otherH(visW, oddX), dhS = otherH(dS, oddX);
+    bool takeSkyH = skyOn && abs(dhS - dist) < skyTol;
+    float visH = visSum + (takeSkyH ? vh : 0.0);
+    float visWH = visW + (takeSkyH ? wh : 0.0);
+    float vv = otherV(visH, oddY), wv2 = otherV(visWH, oddY), dvS = otherV(dS, oddY);
+    bool takeSkyV = skyOn && abs(dvS - dist) < skyTol;
+    float visQuad = (visH + (takeSkyV ? vv : 0.0)) / max(visWH + (takeSkyV ? wv2 : 0.0), 1.0);
+#endif
     if (d >= 1.0 || nl2 < 1e-12) discard;
 
     float occlusion = 1.0;
@@ -440,6 +622,67 @@ void main() {
         // first part of the sun's share of its light.
         vec3 fPlain = clamp((ambPlain + dif) / max(before, vec3(1e-3)), 0.0, kFillMaxLift);
         f = mix(f, fPlain, keepPlain);
+    }
+    // Enhanced's daylight with the sky height field drawn (docs/re/
+    // enhanced-lighting.md 6e). What the light at the pixel was is taken
+    // apart again - the ambient by Enhanced's ramp toward the sun (held to
+    // flat ground's on terrain), the sun under its shadow (all of it on
+    // terrain, terrain.frag; 1 - shadowParams.y of it on models) - and put
+    // back with the ambient scaled by what of the sky the point sees:
+    // - the ground in shade takes a fill for Enhanced's probe GI: the sky's
+    //   light, and the sun off the ground round it - more where more of that
+    //   ground is in the sun - partly in the sky's hue, as Enhanced's shade
+    //   keeps it; under the trees (little open sky) none of it;
+    // - a model (a trunk, a wall, a unit) keeps the bounce light above, its
+    //   ambient scaled by its sky;
+    // - a leaf keeps the bounce light above as it is: the crowns' colour was
+    //   matched with it, and the warm bounce stays out of them.
+    if (skyInside > 0.0) {
+        float onGround = (1.0 - smoothstep(0.25, 0.75, above)) * smoothstep(0.5, 0.8, n.z);
+        float nl = dot(n, ldir);
+        float ramp = mix(0.7, 1.1, 0.5 + 0.5 * clamp(nl, -1.0, 1.0));
+        float rampFlat = mix(0.7, 1.1, 0.5 + 0.5 * clamp(ldir.z, -1.0, 1.0));
+        ramp = mix(ramp, ramp / rampFlat, onGround);
+        float sunKeep = mix(mix(1.0, sunLit, clamp(shadowParams.y, 0.0, 1.0)), sunLit, onGround);
+        vec3 ambF = amb * ramp;
+        vec3 difF = lightColor.rgb * (max(nl, 0.0) * sunKeep * (1.0 - indoor));
+        vec3 beforeF = max(ambF + difF, vec3(1e-3));
+        float vis = visQuad;
+        float skyK = mix(mix(kModelClosed, kSkyClosed, onGround), 1.0, vis);
+        // A model: the bounce light above, less the sky it does not see.
+        vec3 fModel = clamp(f + ambF * (occlusion * (skyK - 1.0)) / beforeF, 0.0, kFillMaxLift);
+        vec3 fF = fModel;
+        if (onGround > 0.0) {
+            vec3 gi = vec3(0.0);
+            float sunShare = clamp(lum(difF) / lum(beforeF), 0.0, 1.0);
+            float shade = 1.0 - smoothstep(kShadeFrom, kShadeTo, sunShare);
+            if (shade > 0.0) {
+                float sunUpF = smoothstep(0.0, 0.1, -normalize(lightDir.xyz).z);
+                vec2 uv = (pos.xy - pc.extra.xy) / kGridSpan;
+                vec2 e = min(uv, 1.0 - uv);
+                float inGrid = smoothstep(0.0, kGridEdge, min(e.x, e.y));
+                vec3 ground = mix(kGroundAlbedo, textureLod(uBounceGrid, vec3(uv, 0.0), 0.0).rgb, inGrid);
+                // Light that has crossed yards of ground, grass and
+                // trunks is greyer than the ground under the point.
+                ground = mix(vec3(lum(ground)), ground, kGiBounceSat);
+                // The sun on level ground round it, against its height
+                // at 9:22 (37 degrees) where the fill was set against
+                // Enhanced's shade; squared, as the light's colour is
+                // already scaled to hold level ground's light as the sun
+                // sinks (enhanced_palette::sunIrradianceScale).
+                float groundSun = pow(clamp(ldir.z, 0.0, 1.0) / kGiSunRef, kGiSunPow);
+                vec3 bounce = lightColor.rgb * ground *
+                              (kGiBounce * groundSun * mix(kGiBounceShaded, 1.0, groundSunlit(pos, ldir, skyLane)));
+                vec3 skyHue = amb / max(lum(amb), 1e-3);
+                bounce = mix(bounce, skyHue * lum(bounce), kGiCool);
+                float open = smoothstep(kOpenFrom, kOpenTo, vis);
+                gi = (fogColor.rgb * kGiSky + bounce) * (open * pc.target.z * occlusion * shade * sunUpF);
+            }
+            vec3 fGround = clamp((ambF * (occlusion * skyK) + difF + gi) / beforeF, 0.0, kEnhancedMaxLift);
+            fF = mix(fModel, fGround, onGround);
+        }
+        if ((flags & 32) != 0) fF = vec3(vis);
+        f = mix(f, fF, skyInside);
     }
 #endif
     if (all(lessThan(abs(f - 1.0), vec3(0.002)))) discard;

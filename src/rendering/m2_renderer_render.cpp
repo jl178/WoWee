@@ -3984,7 +3984,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     updateProf_.shadowCasters += castersDrawn[0] + castersDrawn[1];
     // The unit map's movers are a different count; the world map's alone
     // says whether a tree's shadow comes and goes.
-    if (wantStatic) {
+    if (wantStatic && !shadowCountQuiet_) {
         const uint32_t foliageNow = castersDrawn[1];
         const uint32_t foliageWas = lastFoliageCasters_;
         lastFoliageCasters_ = foliageNow;

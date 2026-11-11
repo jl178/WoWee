@@ -880,6 +880,9 @@ public:
     /// (the unit map, every frame) or both. `moverSpheres`, when given, gets
     /// each drawn mover's bounding sphere (centre, radius) for the unit
     /// map's mask. Call beginShadowFrame first, once a frame.
+    /// The sky height field (sky_height_field.hpp) draws the static casters
+    /// from above with this set, so they do not count as the world map's.
+    void setShadowCountQuiet(bool quiet) { shadowCountQuiet_ = quiet; }
     void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, float globalTime = 0.0f,
                       const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f,
                       ShadowCasterSet casters = ShadowCasterSet::All,
@@ -1313,6 +1316,9 @@ private:
     /// Foliage casters drawn into the shadow map last frame, for spotting a
     /// caster count that swings while nothing is moving.
     uint32_t lastFoliageCasters_ = 0;
+    /// renderShadow is drawing something other than the sun's world map (the
+    /// sky height field): its caster count says nothing about the map's.
+    bool shadowCountQuiet_ = false;
     VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;     // blend mode 1
     VkPipeline alphaPipeline_ = VK_NULL_HANDLE;         // blend mode 2
     VkPipeline additivePipeline_ = VK_NULL_HANDLE;      // blend mode 4 (SrcAlpha, One)

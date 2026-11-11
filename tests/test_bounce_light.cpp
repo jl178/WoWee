@@ -3,6 +3,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "rendering/bounce_grid.hpp"
+#include "rendering/sky_field.hpp"
 #include "rendering/enhancements.hpp"
 #include "ui/enhancement_rows.hpp"
 #include "ui/graphics_presets.hpp"
@@ -133,7 +134,57 @@ TEST_CASE("bounce grid: the shader reads the grid as it is baked", "[light][enha
     // The stock build has none of it.
     CHECK(src.find("#ifdef BOUNCE_GRID") != std::string::npos);
 }
+
+TEST_CASE("sky field: the shader reads the height field as it is drawn", "[light][enhanced]") {
+    std::ifstream f(std::string(WOWEE_SOURCE_DIR) + "/assets/shaders/ambient_occlusion.frag.glsl");
+    REQUIRE(f.good());
+    std::stringstream ss;
+    ss << f.rdbuf();
+    const std::string src = ss.str();
+    std::smatch m;
+    REQUIRE(std::regex_search(src, m, std::regex(R"(const float kSkySpan = ([\d.]+);)")));
+    CHECK(std::stof(m[1].str()) == Catch::Approx(wowee::rendering::sky_field::kSpan));
+    REQUIRE(std::regex_search(src, m, std::regex(R"(const float kSkyDepth = ([\d.]+);)")));
+    CHECK(std::stof(m[1].str()) == Catch::Approx(wowee::rendering::sky_field::kDepth));
+}
 #endif
+
+TEST_CASE("sky field: from straight above, the corner at uv 0 and depth down from the top", "[light][enhanced]") {
+    namespace sf = wowee::rendering::sky_field;
+    const glm::vec3 centre = sf::snappedCentre(glm::vec3(-9465.3f, 61.7f, 56.4f));
+    // Snapped to whole texels.
+    const float texel = sf::kSpan / static_cast<float>(sf::kTexels);
+    CHECK(std::fmod(std::abs(centre.x), texel) == Catch::Approx(0.0f).margin(1e-3));
+    CHECK(std::fmod(std::abs(centre.y), texel) == Catch::Approx(0.0f).margin(1e-3));
+    CHECK(centre.z == 56.0f);
+    const glm::mat4 p = sf::projection(centre);
+    const glm::vec2 corner = glm::vec2(centre) - 0.5f * sf::kSpan;
+    // The shader's uv is (xy - corner) / span; clip is uv * 2 - 1.
+    for (const glm::vec3 w : {glm::vec3(corner, 0.0f), glm::vec3(corner + sf::kSpan, 0.0f),
+                              glm::vec3(corner.x + 40.0f, corner.y + 200.0f, 0.0f)}) {
+        const glm::vec4 c = p * glm::vec4(w.x, w.y, centre.z + 3.0f, 1.0f);
+        const glm::vec2 uv = (glm::vec2(w) - corner) / sf::kSpan;
+        CHECK(c.w == Catch::Approx(1.0f));
+        CHECK(c.x == Catch::Approx(uv.x * 2.0f - 1.0f).margin(1e-4));
+        CHECK(c.y == Catch::Approx(uv.y * 2.0f - 1.0f).margin(1e-4));
+    }
+    // Depth 0 kAbove over the middle, 1 kDepth under that; the shader's
+    // height is top - depth * kDepth.
+    const float top = centre.z + sf::kAbove;
+    CHECK((p * glm::vec4(glm::vec2(centre), top, 1.0f)).z == Catch::Approx(0.0f).margin(1e-5));
+    CHECK((p * glm::vec4(glm::vec2(centre), top - sf::kDepth, 1.0f)).z == Catch::Approx(1.0f));
+    const float z = centre.z + 12.5f;
+    CHECK(top - (p * glm::vec4(glm::vec2(centre), z, 1.0f)).z * sf::kDepth == Catch::Approx(z));
+    // From below: the same square, depth up from the bottom (the shader's
+    // underside is top - kDepth + depth * kDepth), so the lowest surface wins.
+    const glm::mat4 b = sf::projection(centre, true);
+    const glm::vec4 cb = b * glm::vec4(corner.x + 40.0f, corner.y + 200.0f, z, 1.0f);
+    const glm::vec4 ca = p * glm::vec4(corner.x + 40.0f, corner.y + 200.0f, z, 1.0f);
+    CHECK(cb.x == Catch::Approx(ca.x));
+    CHECK(cb.y == Catch::Approx(ca.y));
+    CHECK(top - sf::kDepth + cb.z * sf::kDepth == Catch::Approx(z));
+    CHECK((b * glm::vec4(glm::vec2(centre), z - 1.0f, 1.0f)).z < cb.z);
+}
 
 TEST_CASE("bounce light: a Enhanced row, off in stock and the ladder, on in the Enhanced preset",
           "[enhanced][enhancements]") {

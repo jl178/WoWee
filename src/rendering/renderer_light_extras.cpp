@@ -4,10 +4,12 @@
 #include "rendering/renderer.hpp"
 
 #include "rendering/bounce_grid_gpu.hpp"
+#include "rendering/sky_height_field.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/terrain_manager.hpp"
+#include "rendering/terrain_renderer.hpp"
 #include "rendering/contact_shadow_pass.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "rendering/post_process_pipeline.hpp"
@@ -15,9 +17,11 @@
 #include "rendering/weather.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "core/logger.hpp"
+#include "core/env_flag.hpp"
 
 #include <glm/gtc/matrix_inverse.hpp>
 
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 
@@ -61,7 +65,8 @@ SoftParticlePass::Target depthLightPassTarget(VkContext* vkCtx, PostProcessPipel
 }  // namespace
 
 bool Renderer::decideDepthLightPass(bool want, DepthLightPassState& s, const char* fragSpv, const char* name,
-                                    int blend, VkDescriptorSetLayout extraLayout) {
+                                    int blend, VkDescriptorSetLayout extraLayout,
+                                    VkDescriptorSetLayout extraLayout2) {
     s.frame = false;
     s.done = false;
     want = want && depthLightPassPossible();
@@ -74,7 +79,8 @@ bool Renderer::decideDepthLightPass(bool want, DepthLightPassState& s, const cha
         }
         if (!s.pass) {
             s.pass = std::make_unique<ContactShadowPass>(fragSpv, name,
-                                                         static_cast<ContactShadowPass::Blend>(blend), extraLayout);
+                                                         static_cast<ContactShadowPass::Blend>(blend), extraLayout,
+                                                         extraLayout2);
         }
         want = s.pass->ensure(vkCtx, perFrameSetLayout, vkCtx->getSceneOverlayRenderPass());
     }
@@ -101,12 +107,19 @@ void Renderer::decideContactShadows() {
     if (bounce) {
         if (!bounceGrid_) bounceGrid_ = std::make_unique<BounceGrid>();
         bounce = bounceGrid_->ensure(vkCtx);
+        // Its build of the pass also reads the sky height field (set 3).
+        if (!skyField_) skyField_ = std::make_unique<SkyHeightField>();
+        bounce = bounce && skyField_->ensure(vkCtx, shadowRenderPass);
         bounceOffFrames_ = 0;
-    } else if (bounceGrid_ && ++bounceOffFrames_ > 8) {
+    } else if ((bounceGrid_ || skyField_) && ++bounceOffFrames_ > 8) {
         // Eight frames on, no frame in flight reads it; the pass that did
         // was remade without it when the row went off.
         std::shared_ptr<BounceGrid> prev(std::move(bounceGrid_));
-        vkCtx->deferAfterAllFrameFences([prev]() mutable { prev.reset(); });
+        std::shared_ptr<SkyHeightField> prevSky(std::move(skyField_));
+        vkCtx->deferAfterAllFrameFences([prev, prevSky]() mutable {
+            prev.reset();
+            prevSky.reset();
+        });
         bounceOffFrames_ = 0;
     }
     bounceFrame_ = decideDepthLightPass(enh_.ambientOcclusion || enh_.fillLight || bounce, ambientOcclusion_,
@@ -118,7 +131,8 @@ void Renderer::decideContactShadows() {
                                                : "assets/shaders/ambient_occlusion.frag.spv",
                                         "Ambient occlusion",
                                         static_cast<int>(ContactShadowPass::Blend::Multiply2x),
-                                        bounce ? bounceGrid_->setLayout() : VK_NULL_HANDLE) &&
+                                        bounce ? bounceGrid_->setLayout() : VK_NULL_HANDLE,
+                                        bounce ? skyField_->setLayout() : VK_NULL_HANDLE) &&
                    bounce;
     // The Enhanced haze lays light over everything the opaque pass drew.
     decideDepthLightPass(enh_.sunHaze && indoorFactor_ < 0.99f, sunHaze_,
@@ -138,8 +152,10 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
         int flags = (enh_.ambientOcclusion ? 1 : 0) | (enh_.fillLight ? 2 : 0);
         const float wx = weather ? glm::clamp(weather->getIntensity(), 0.0f, 1.0f) : 0.0f;
         glm::vec4 extra(0.0f);
+        glm::vec4 sky(0.0f);
         VkDescriptorSet gridSet = VK_NULL_HANDLE;
-        if (bounceFrame_ && bounceGrid_) {
+        VkDescriptorSet skySet = VK_NULL_HANDLE;
+        if (bounceFrame_ && bounceGrid_ && skyField_ && skyField_->readable()) {
             // The bounce light: flag 8; the grid's corner and whether it
             // holds a bake yet (until it does, the plain fill).
             bounceGrid_->recordUpload(cmd, vkCtx->getCurrentFrame());
@@ -148,6 +164,14 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
             flags |= 8 | (kBounceDebug ? 16 : 0);
             extra = glm::vec4(bounceGrid_->origin(), bounceGrid_->ready() ? 1.0f : 0.0f, 0.0f);
             gridSet = bounceGrid_->set();
+            // The sky height field: its corner, the height its depth 0
+            // stands for, and whether it holds a drawing yet.
+            sky = skyField_->params();
+            skySet = skyField_->set();
+            // WOWEE_SKY_DEBUG=1 darkens each pixel by what of the sky it
+            // sees, under Enhanced's daylight (flag 32).
+            static const bool kSkyDebug = std::getenv("WOWEE_SKY_DEBUG") != nullptr;
+            flags |= kSkyDebug ? 32 : 0;
         }
         // Without the occlusion the pass is the fill and the bounce light
         // alone, and every term of both is outdoor light, scaled by 1 -
@@ -156,7 +180,7 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
         // pass stays made for the way out.
         const bool fillOnlyIndoors = !enh_.ambientOcclusion && !(flags & 16) && indoorFactor_ >= 0.999f;
         if (!fillOnlyIndoors && ambientOcclusion_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.7f * wx, flags, extra,
-                                           gridSet)) {
+                                           gridSet, sky, skySet)) {
             vkCtx->gpuMark(cmd, "ambient occlusion");
         }
     }
@@ -191,6 +215,60 @@ void Renderer::updateBounceGrid(float dt) {
     if (!bounceGrid_ || !enh_.bounceLight || !camera) return;
     bounceGrid_->update(camera->getPosition(), dt, m2Renderer.get(), wmoRenderer.get(), cachedAssetManager,
                         terrainManager ? terrainManager->getMapName() : std::string());
+}
+
+// The sky height field (sky_height_field.hpp), inside the shadow pass on a
+// frame no part of the world map is drawn: the doodads' static caster list
+// and the front of this slot's caster buffer are the world map's, and this
+// draw rebuilds both for its own matrix (the world map's next part rebuilds
+// them again, as it would for a moved sun), so the two must not share a
+// frame. The candidates are asked with the world map's centre and radius,
+// which keeps their list. Under Enhanced's daylight only: nothing else reads it.
+void Renderer::renderSkyField() {
+    if (!skyField_ || !camera || currentCmd == VK_NULL_HANDLE || worldShadowCullRadius_ <= 0.0f) return;
+    if (!lightingManager || !lightingManager->isEnhancedActive()) return;
+    // WOWEE_SKY_FIELD=0: never drawn, so the pass leaves the sky term out
+    // (for side-by-side work and for measuring its cost).
+    static const bool kSkyFieldOn = core::envFlagEnabled("WOWEE_SKY_FIELD", true);
+    if (!kSkyFieldOn) return;
+    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const int part = skyField_->partDue(camera->getPosition(), now);
+    if (part == 0) return;
+    const glm::vec3 centre = skyField_->redrawCentre();
+    const float reach = 0.75f * sky_field::kSpan;  // past the square's corners
+    // Part 1: the ground alone, then the buildings and doodads from above.
+    // Part 2, the next frame: the same from below. Each part asks the
+    // doodads once, so this frame slot's caster buffer holds one list.
+    const glm::mat4 m = sky_field::projection(centre, part == 2);
+    if (part == 1) {
+        SkyHeightField::Target& g = skyField_->back(SkyHeightField::kGround);
+        beginShadowTarget(g.image, g.view, g.framebuffer, sky_field::kTexels, g.layout, true);
+        if (terrainRenderer) terrainRenderer->renderShadow(currentCmd, m, centre, reach);
+        endShadowTarget(g.image, g.layout);
+    }
+    SkyHeightField::Target& t = skyField_->back(part == 1 ? SkyHeightField::kTops : SkyHeightField::kFeet);
+    beginShadowTarget(t.image, t.view, t.framebuffer, sky_field::kTexels, t.layout, true);
+    if (wmoRenderer) wmoRenderer->renderShadow(currentCmd, m, centre, reach, ShadowCasterSet::Static);
+    if (m2Renderer) {
+        m2Renderer->setShadowCountQuiet(true);
+        m2Renderer->renderShadow(currentCmd, m, globalTime, worldShadowCullCentre_, worldShadowCullRadius_,
+                                 ShadowCasterSet::Static);
+        m2Renderer->setShadowCountQuiet(false);
+    }
+    endShadowTarget(t.image, t.layout);
+    skyField_->partDrawn(now);
+    vkCtx->gpuMark(currentCmd, "sky field");
+}
+
+// Never bound unwritten: every map cleared (to nothing standing anywhere)
+// the first frame it exists, whether or not the shadow pass draws it.
+void Renderer::readySkyField() {
+    if (!skyField_ || skyField_->readable() || currentCmd == VK_NULL_HANDLE) return;
+    skyField_->forEach([this](SkyHeightField::Target& t) {
+        if (t.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || t.image == VK_NULL_HANDLE) return;
+        beginShadowTarget(t.image, t.view, t.framebuffer, sky_field::kTexels, t.layout, true);
+        endShadowTarget(t.image, t.layout);
+    });
 }
 
 void Renderer::updateUnitIndoorLight(float fxDt) {

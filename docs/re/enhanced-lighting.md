@@ -1042,6 +1042,174 @@ Barrens at noon, Elwynn's forest at 10:00) the frame's mean moves under
 0.01 and its 5th percentile 0.006-0.016 down. Sheets in the session
 scratchpad: `fgap/sheet_f.png` (off | on), `fgap/final_sheet.png`.
 
+## 6e. The sky over each point
+
+The gaps left after 6d were the shade's: Enhanced's shaded road is the
+ambient's colour (a cool, brownish grey), Wowee's kept 70% of the sun's
+orange (3.3.5's shadow floor), and under Enhanced's trees the shade is darker
+than in the open. Enhanced's probe GI (section 6, giQuality 3) is what makes
+that difference: it adds light where the sky and lit surfaces are seen, and
+little under a canopy. The bounce grid's crown discs (6b) could not stand in
+for it - they mark most of Elwynn as covered, so a fill keyed on them lifted
+nothing.
+
+**Enhanced's terrain light.** Its terrain pixel shader (FDID 2990783,
+permutation 0) lights the ground as `material3_mesh_ps` lights models: the
+hemisphere ambient by the half-Lambert ramp toward the sun (6d's
+0.4562/1.2333 or 0.7/1.1, no normalisation), plus the sun by `max(N.L, 0)`.
+Its shadow comes in two ways, picked by a constant (the w of the first
+row of one of its constant buffers): with it set, the sun is unshadowed and
+the whole colour is scaled by `0.7 + 0.3 * shadow` (3.3.5's floor); with it
+clear, the shadow scales the sun alone and there is no floor. Enhanced's
+captures match the second (lit that way, Wowee's shaded road's red and blue
+to luminance come within 2% of Enhanced's), so under Enhanced's
+daylight `terrain.frag` does that: ambient by the ramp, shadow on the sun
+only. One change from Enhanced: the ramp is divided by flat ground's value
+under the same sun, so level ground keeps the ambient it had and only slopes
+turn darker or lighter. Unnormalised, the Barrens' noon road (sun 65 degrees
+up, ramp 1.08) went over its brightness bar (0.576/0.727/0.749).
+
+**The height field** (`sky_height_field.hpp`, `sky_field.hpp`): three depth
+maps, 512 texels over 256 yards round the camera (half a yard a texel), drawn
+the way the sun's shadow map is - the same casters, pipelines and depth
+format, through `beginShadowTarget` - with an orthographic matrix from
+straight above:
+
+- the tops of buildings and doodads (WMO and M2 static casters, alpha-tested
+  leaves) seen from above;
+- their undersides, seen from below (the same square, depth from the
+  bottom): with only the tops, a crown 8 yards up was a solid column to the
+  ground, and every point between two oaks saw no sky;
+- the terrain alone, for where the ground under a point is.
+
+Two sets, front and back: the back is redrawn when the camera has walked 32
+yards from the front's middle, or every 2 s, in two parts on two frames (the
+ground and the tops, then the undersides) and then the two swap. Each part
+asks the doodads once: `M2Renderer::renderShadow` keeps one static caster
+list and writes its matrices to the frame slot's caster buffer, so a second
+matrix in the same frame would overwrite what the first draw reads. For the
+same reason a part is drawn only on a frame the sun's world map is not
+(`Renderer::renderSkyField`, between the world map and the unit map in the
+shadow pass), and with the world map's centre and radius, which keeps the
+doodads' candidate list. The world map's next part rebuilds the static list
+for its own matrix, as it would for a moved sun.
+
+**Visibility** (`ambient_occlusion.frag`, the bounce build): from each
+pixel's world position, eight directions, three reaches each (1.5, 5 and 12
+yards). At each reach what stands there is a slab from its underside to its
+top; it hides the elevations between the two, and `sin^2` of the top's
+elevation less `sin^2` of the underside's is that band's share of the slice
+of a cosine-weighted hemisphere. A crown overhead hides the steep sky and
+leaves the sky under its edge; a wall or trunk, which stands on the ground,
+hides everything up to its top. The eight directions are shared over the
+2x2 quad (each pixel looks along two; the quad pools them across depths
+within 0.3 yards plus 5% of the distance, before any pixel of it
+discards), so a pixel pays twelve gathers. The term fades out between
+about 95 and 115 yards from the field's middle, and leaves (below) skip it.
+`WOWEE_SKY_DEBUG=1` darkens each pixel by it; `WOWEE_SKY_FIELD=0` leaves
+the field undrawn and the term out.
+
+**Using it**, under Enhanced's daylight and outdoors (the light each surface
+shader gave the pixel is taken apart again, as the occlusion pass does):
+
+- **Leaves** - a point well off the ground inside something whose underside
+  is well above the ground there (a crown, not a trunk or a wall, which stand
+  on the ground; not a unit, which is in none of the maps) - keep the bounce
+  light (6b, 6c) as it was. The crowns' colour was matched with it, and the
+  warm bounce stays out of them: given the new fill, trunks and crowns went
+  brown and the crown rows lost 5-8 points.
+- **Models and units** keep the bounce light too, their ambient scaled by
+  `mix(0.9, 1, visibility)`.
+- **The ground**: the ambient by `mix(0.7, 1, visibility)`, and in shade
+  (the sun under a fifth of the light) a fill for the probe GI: the fog
+  colour x 0.2 (the sky at the horizon), and the sun off the ground round
+  it - `sun x ground colour x 0.6`, the bounce grid's ground colour at 60%
+  of its chroma, x 0.8 to 1 by how much of the ground on two rings 3 and 8
+  yards out the world shadow map says is lit (a point on each, turned by
+  the pixel's place in its quad), x (sin of the sun's height / sin 37
+  degrees)^2, 35% of it in the sky's hue (Enhanced's shade keeps the
+  ambient's colour). The square: the light's colour is already scaled to
+  hold level ground's light as the sun sinks
+  (`enhanced_palette::sunIrradianceScale`), and with the plain ratio
+  Goldshire's evening road came out 12% too bright. All of the fill only
+  where the point sees open sky (`smoothstep(0.3, 0.9, visibility)`), none
+  under a canopy; with it the shade may lift to 2.5x, where the plain fill
+  stops at 1.15x.
+
+The forest (Elwynn 10:00, a meadow wholly in tree shadow) and Goldshire's
+evening road are the two views the fill is held by: with the shadow on the
+sun alone and no fill they were 16% and 10% darker than before (branch
+`wip-enhanced-ground`), and Enhanced's own captures do not show them.
+
+Measured against the commit before this one, rebuilt and run through the
+same harness (`before`), and Enhanced (gap, mean of the three matched
+Goldshire views; the bars as set for this change):
+
+| | before | now (mean of 3 runs) | bar |
+|---|---|---|---|
+| Barrens noon road mean / p95 / p99 | 0.573 / 0.715 / 0.738 | 0.533 / 0.689 / 0.713 | 0.571 / 0.715 / 0.738 |
+| into the sun, pixels over 0.92 | 1.25% | 1.27% (1.25-1.30) | 1.31% |
+| Goldshire 17:51 (evening), mean | +0.0% | -4.2% (-4.0..-4.4) | within 5% |
+| Elwynn forest 10:00, mean | -0.2% | -2.8% (-2.8..-2.9) | within 5% |
+| crown chroma gap | +18.8% | +20.1% (17.4-23.2) | +21% |
+| gap sum (section 2d's 20 rows) | 277.5 | 286.2 (280.2-294.7) | 292 |
+| region sum (2e's 23 rows) | 282.0 | 270.2 (264.9-279.0) | 280 |
+
+(The evening and forest changes are against the earlier `y5` shots, as the
+bars were set; `before` reproduces them within 0.2%. Its gap sums come out
+lower than `y5`'s 291.6 and 291.3: single runs move by 5-15 points on the
+sums and 3-6 on the crown chroma - NPCs walk through the views, the wind
+turns the leaves - so the bars are read on the mean of three runs. One of
+the three went over the crown chroma and gap sum bars on its own.)
+
+Region by region (gap against Enhanced, mean of the three views):
+
+| region | before | now |
+|---|---|---|
+| road shade luminance | +18.5% | +12.8% |
+| road shade chroma | +19.2% | -0.6% |
+| road shade blue / luminance | -14.0% | +1.2% |
+| road shade red / luminance | +12.0% | -0.4% |
+| verge blue / luminance | -29.2% | +7.4% |
+| verge chroma | +15.0% | -15.4% |
+| grass luminance | -23.4% | -12.1% |
+| road lit blue / luminance | +7.8% | +27.5% |
+| road lit chroma | -4.9% | -16.8% |
+| ground chroma | +9.8% | -11.3% |
+| far chroma | -0.0% | -10.5% |
+| world 5th percentile | -12.7% | -17.7% |
+
+The shade is Enhanced's colour now - the ambient's, not 3.3.5's orange floor -
+and darker under the canopy than in the open. What got worse is the "lit
+road": the brightest third of the road pixels now takes in the lifted open
+shade beside the sunlit cobbles (the inn view's left half), which is bluer
+than sunlight; the picture's chroma overall, 3.3.5's warm shade having been
+much of it; and the darkest tones, under the crowns. The shade's luminance
+is still 13% over Enhanced's, and Enhanced's lit/shade on the road (1.9-2.3)
+is not reached (1.5-1.7, as before): the evening and forest views hold the
+fill up.
+
+Cost (Iris Xe, 1280x540, the perf views at 12:00, the commit before this one
+and this one in turn; `perf/` in the session scratchpad):
+
+| view (12:00) | ambient pass before | now | frame GPU change |
+|---|---|---|---|
+| Goldshire crossroads | 0.49 ms | 0.90 ms | +0.41 ms in the pass (+0.71 frame, water +0.25 of it) |
+| Crystal Lake | 0.48 ms | 0.89 ms | +0.41 ms (+0.26 frame) |
+
+(Two rounds each, three 7 s windows a round, no other client on the GPU;
+`perf/logs/perf-pk6-*.log`.) The height field's own draws average 0.005 ms
+a frame (two parts every 2 s or 32 yards). The first version - eight
+directions at four reaches at every pixel, six ring points - cost the pass
++1.1 to +1.4 ms; sharing the directions over the quad, skipping leaves,
+three reaches and two ring points took it to this. On the CPU, each part
+rebuilds the doodads' static caster list once (and the world map's next
+part rebuilds it back), within the noise of the frame times measured.
+
+Sheets in the session scratchpad: `sv/sheet_matched.png` (Enhanced | before |
+now, the three Goldshire views), `sv/sheet_regress.png` (before | now: the
+evening, the forest, the Barrens, into the sun, away from it).
+
 ## 7. Ground clutter
 
 `GroundEffectTexture` is the 1.12 table: 1060 of the 1065 changed rows went
@@ -1210,8 +1378,10 @@ What still separates the two pictures, largest first:
 1. Indirect light. The bounce light (section 6b) now darkens and cools
    the shade under canopies and warms it by sunlit ground and walls, from a
    grid baked round the camera, and the shade's hue is Enhanced's (section
-   6c); its crisper dappling through the canopy (its sun shadows) is not
-   matched.
+   6c); the ground's shade takes the sky it sees from a height field round
+   the camera and a fill in the open (6e), but stays 13% brighter than
+   Enhanced's, held up by the views it was not captured in; its crisper
+   dappling through the canopy (its sun shadows) is not matched.
 2. Light toward the sun. The haze and stronger shafts now give the golden
    glow looking into an afternoon sun, but Enhanced's shafts through the
    canopy are crisper and longer (its fog is shadowed by the cascades

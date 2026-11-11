@@ -1,5 +1,6 @@
 #include "rendering/renderer.hpp"
 #include "rendering/bounce_grid_gpu.hpp"
+#include "rendering/sky_height_field.hpp"
 #include "rendering/sun_direction.hpp"
 #include "rendering/enhanced_grade.hpp"
 #include "rendering/enhanced_palette.hpp"
@@ -1240,6 +1241,7 @@ void Renderer::shutdown() {
     // The ambient pass reads the bounce grid's set: the pass goes first.
     ambientOcclusion_.pass.reset();
     bounceGrid_.reset();
+    skyField_.reset();
     // The water continuation's views and framebuffers (the device is idle:
     // the water renderer's shutdown above waited for it).
     destroySceneWaterRetired(0);
@@ -6391,6 +6393,8 @@ void Renderer::renderShadowPass() {
         }
         if ((shadowPartsThisFrame_ & (1u << kWorldShadowDoodads)) && m2Renderer && casts("m2")) {
             timed("shadow/m2", [&] { m2Renderer->renderShadow(currentCmd, proj.matrix, globalTime, proj.center, cullRadius, set); });
+            worldShadowCullCentre_ = proj.center;
+            worldShadowCullRadius_ = cullRadius;
         }
         if (!shadowSplit_ && characterRenderer && casts("characters")) {
             timed("shadow/characters", [&] { characterRenderer->renderShadow(currentCmd, proj.matrix, proj.center, cullRadius); });
@@ -6409,6 +6413,12 @@ void Renderer::renderShadowPass() {
         if (shadowDepthLayout_[other] != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
             clearShadowImageOnce(shadowDepthImage[other], shadowDepthView[other], shadowFramebuffer[other],
                                  SHADOW_MAP_SIZE, shadowDepthLayout_[other], cleared);
+    }
+
+    // The sky height field, when due: after the world map and before the
+    // unit map (see renderSkyField).
+    if (shadowSplit_ && !shadowRedraw_.active && shadowPartsThisFrame_ == 0) {
+        timed("shadow/sky field", [&] { renderSkyField(); });
     }
 
     // The unit map: this slot's, every frame, cleared and drawn with what
@@ -6855,6 +6865,7 @@ void Renderer::buildFrameGraph(game::GameHandler* gameHandler) {
             // before, which is the whole of the fault this was meant to end.
             if (shadowDepthImage[0] != VK_NULL_HANDLE)
                 renderShadowPass();
+            readySkyField();
         });
     // Left enabled even with shadows off, as long as the image exists.
     //

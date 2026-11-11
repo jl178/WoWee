@@ -83,6 +83,7 @@ class SunShafts;
 class SoftParticlePass;
 class ContactShadowPass;
 class BounceGrid;
+class SkyHeightField;
 class ScreenCapture;
 
 class Renderer {
@@ -405,7 +406,8 @@ private:
     /// made with another shader is let go (after the frames in flight) and
     /// made again.
     bool decideDepthLightPass(bool want, DepthLightPassState& s, const char* fragSpv, const char* name,
-                              int blend, VkDescriptorSetLayout extraLayout = VK_NULL_HANDLE);
+                              int blend, VkDescriptorSetLayout extraLayout = VK_NULL_HANDLE,
+                              VkDescriptorSetLayout extraLayout2 = VK_NULL_HANDLE);
     /// "Bounce light (the reference client)" (bounce_grid_gpu.hpp): its grid, made
     /// on first use and let go eight frames after the row goes off; whether
     /// this frame's ambient pass reads it.
@@ -414,6 +416,18 @@ private:
     bool bounceFrame_ = false;
     /// Main thread, in update: lands and starts the grid's bakes.
     void updateBounceGrid(float dt);
+    /// The sky over each point under Enhanced's daylight (sky_height_field.hpp):
+    /// made and let go with the bounce grid, drawn by renderSkyField inside
+    /// the shadow pass (before the unit map, whose movers' matrices follow
+    /// the doodads' static list in the caster buffer), and cleared once by
+    /// readySkyField so that it is never bound unwritten.
+    std::unique_ptr<SkyHeightField> skyField_;
+    // What the last world map part was culled with: the doodads' candidate
+    // list is kept on these, so the height field asks with the same.
+    glm::vec3 worldShadowCullCentre_{0.0f};
+    float worldShadowCullRadius_ = 0.0f;
+    void renderSkyField();
+    void readySkyField();
     void decideContactShadows();
     void recordContactShadowPass(VkCommandBuffer cmd);
     /// Room light indoors (E12): each unit's own indoor light, read from the
