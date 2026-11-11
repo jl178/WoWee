@@ -1479,6 +1479,31 @@ a clipped white disc, pixels at 250+ down from 0.2-3.6% of the frame to
 0.03-3.2%; night within 2%, rain 6% brighter. `WOWEE_HDR_TUNE="knee,bloom,
 sunGain,sunLight"` overrides the four for tuning.
 
+**Outside Enhanced's daylight** (Outland, Northrend, instances; maps 0 and 1
+with the Daylight row off) the HDR scene no longer brightens the sun: the
+2x of `kSunLight` was set with Enhanced's sun table, its flat-ground
+irradiance scale and the 0.5 knee, none of which run there, and under the
+0.8 knee it only lifted and saturated the picture. The composite's
+exposure and chroma terms were already off there (and are 1 under Enhanced's
+daylight since section 2d); the sun's 2x was what remained. Now the HDR
+scene keeps Light.dbc's sun there and only rolls off what passes 1 - the
+8-bit scene's picture, with a shoulder. Maps 0 and 1 under the row are
+unchanged. Noon, Enhanced preset, the world part of the view; before / after /
+the HDR row off:
+
+| View | mean luminance | chroma |
+|---|---|---|
+| Hellfire ground | 0.444 / 0.280 / 0.277 | 0.620 / 0.474 / 0.465 |
+| Nagrand | 0.527 / 0.378 / 0.378 | 0.484 / 0.329 / 0.329 |
+| Grizzly Hills | 0.369 / 0.252 / 0.252 | 0.227 / 0.123 / 0.123 |
+| Dalaran | 0.316 / 0.250 / 0.253 | 0.183 / 0.143 / 0.142 |
+| Howling Fjord | 0.281 / 0.211 / 0.203 | 0.112 / 0.076 / 0.073 |
+| Deadmines, Ironclad Cove (open sky) | 0.239 / 0.214 / 0.212 | 0.094 / 0.086 / 0.086 |
+
+At night (Hellfire 23:00, Grizzly Hills 23:00), in the Deadmines' mine
+and in Utgarde Keep the mean moves by under 0.015: the 2x was day-only, and
+the sun barely reaches inside. Nothing goes darker than the 8-bit scene.
+
 ## 9c. Sun through leaves ("Sun through leaves (the reference client)")
 
 In Enhanced's Goldshire at 9:22, looking toward the low sun, the canopy in

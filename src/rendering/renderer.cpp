@@ -685,7 +685,15 @@ void Renderer::updatePerFrameUBO() {
         // what passes 1. Nothing at night, nothing without the HDR scene.
         // The stock light itself stays 20-37 degrees up all night, so the
         // sun sprite's height (sunDir, toward the sun) says whether it is day.
-        if (vkCtx && vkCtx->isHdrScene()) {
+        // Only where Enhanced's daylight is (its row on, maps 0 and 1): the 2x
+        // was set with Enhanced's sun table, its flat-ground irradiance scale
+        // and the softer 0.5 knee, none of which run elsewhere. On Outland's
+        // and Northrend's light, under the 0.8 knee, it only brightened and
+        // saturated the picture (Hellfire's noon ground 0.27 -> 0.44 mean
+        // luminance against the 8-bit scene). There the HDR scene keeps
+        // Light.dbc's sun and only rolls off what passes 1.
+        if (vkCtx && vkCtx->isHdrScene() && enh_.enhancedDaylight &&
+            enhanced_palette::appliesToMap(lightMapId_)) {
             const float g = enhanced_tonemap::sunLightScale(-lp.sunDir.z,
                                                            enhanced_tonemap::tuning().sunLight);
             currentFrameData.lightColor = glm::vec4(glm::vec3(currentFrameData.lightColor) * g,

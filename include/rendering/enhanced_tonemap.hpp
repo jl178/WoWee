@@ -73,7 +73,9 @@ inline constexpr float kSunGain = 2.5f;
 /// every mid-tone in the composite): Enhanced brightens what its sun lights,
 /// not what the sky alone lights - measured against Jered's Goldshire
 /// captures, the crowns' luminance gap +29% -> +16% with the sunlit ground
-/// as bright as before (docs/re/enhanced-lighting.md section 2d).
+/// as bright as before (docs/re/enhanced-lighting.md section 2d). Under
+/// Enhanced's daylight only (its row, maps 0 and 1); elsewhere the HDR scene
+/// keeps Light.dbc's sun (section 9b).
 inline constexpr float kSunLight = 2.0f;
 
 /// The share of the light above 1 the bloom adds back (times the Bloom row).
