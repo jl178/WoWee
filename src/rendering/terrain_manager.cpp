@@ -2527,9 +2527,12 @@ void TerrainManager::generateGroundClutterPlacements(std::shared_ptr<PendingTile
     // say where the data wants nothing were not read at all.
     //
     // groundEffectDensity: the settings slider is 0-150 percent with 70 the
-    // default, the stock setting 16-256 with 64 the default. 70 is mapped to
-    // 64 and 150 to 256, linearly either side. At 64, density 8 - most of
-    // Azeroth's grass - is one piece a quad, 64 to a fully grown chunk.
+    // default; 70 is mapped to 64 and 150 to 256, linearly either side, and a
+    // quad expects density x that / 512 pieces. The stock CVar (16-256,
+    // default 16) is a count of samples a chunk, each a random quad growing
+    // `density` pieces (0x7d34c0, docs/re/terrain.md 9b): density x CVar / 64
+    // a quad. So 100% (136) is stock's default amount (2 a quad for density
+    // 8), spread evenly rather than in stock's clumps of `density`.
     const float densityPercent = glm::clamp(groundClutterDensityScale_, 0.0f, 1.5f) * 100.0f;
     const float groundEffectDensity = densityPercent <= 70.0f
         ? densityPercent / 70.0f * 64.0f

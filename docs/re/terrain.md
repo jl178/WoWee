@@ -240,6 +240,57 @@ out = primary · c · (0.7 + 0.3·shadow) · 2 + secondary · c.a · shadow
   once.
 - Only the WDL covers what lies past it.
 
+## 9b. Ground effect placement (0x7d34c0)
+
+Per map chunk, with `groundEffectDensity` (0xcd773c; default **16**, range
+16-256, set through 0x78dab0 -> 0x780710):
+
+1. **Samples.** `groundEffectDensity` times, a random quad (`rand & 7` twice)
+   goes into a table at 0xd30148; a byte mask marks the quads already set up
+   (their bounds and heights are prepared once), so a quad can be drawn more
+   than once and repeats are not re-rolled.
+2. **Per sample** (second loop, 0x7d389f): skipped if the quad's
+   `noEffectDoodad` bit (MCNK +0x50) or its hole bit is set. The layer is the
+   quad's two bits of `doodadMapping` (MCNK +0x40), the effect that layer's
+   MCLY `effectId` (+0xc), the row `GroundEffectTexture`. A row with density
+   0 counts as 8 (`[row + 0x24]`).
+3. A 16-slot table of the row's four doodads by their weights (each doodad
+   `weight` times at stride 13, the rest filled round-robin), then **density
+   pieces** in the quad, each at a random point, slot `(piece + sample) & 15`;
+   an empty slot (a row with no doodads) places nothing. No cap per quad or
+   chunk was seen; each piece goes to 0x7b31e0 with a random scale.
+
+So a quad expects `density x groundEffectDensity / 64` pieces, in clumps of
+`density` (at the default 16, about 14 of the 64 quads get one clump each).
+
+Wowee (`TerrainManager::generateGroundClutterPlacements`) gives each unmasked
+quad `density x g / 512` pieces, spread evenly, with its slider's 0-150%
+mapped to `g` = 0-64 up to 70% and 64-256 above, and at most 8 a quad. At the
+Classic preset's 100% (`g` 136) that is 2.1 per quad for density 8, against
+stock's 2.0 at its default 16: the same amount, without stock's clumps. Its
+70% default is half of stock's, the Enhanced preset's 150% twice it.
+
+Durotar's sparse clutter is the data, in both clients. Round the Valley of
+Trials (`kalimdor_39_33`) the ground is `DurotarDirt`, effect 1949: density 8
+and **no doodads**, so it grows nothing. Only `DurotarDirtSmooth` (1972,
+density 3: DurBus01/03, DurRoc02/04) does, on a few quads, and 42% of the
+quads are masked (82% round Razor Hill). the reference client's split ADT of the same
+tile (`_tex0` and root, 1.60.1.70862) has the same MCLY effect ids, the same
+doodad mapping and masks, and its `_obj0` the same 102 M2 placements within
+80 yd, by model; its `GroundEffectTexture` rows 1949 and 1972 match 3.3.5's.
+Pieces within 32 yd that the data asks for at Wowee's 70% / 150%
+(`shadows/clutter_audit.py` in the session scratchpad):
+
+| place | quads masked | 70% | 150% | effects that grow |
+|---|---|---|---|---|
+| Valley of Trials | 42% | 11 | 45 | 1972 (d3) |
+| Razor Hill | 82% | 10 | 40 | 1972 (d3) |
+| Durotar, south | 43% | 21 | 82 | 1972 (d3) |
+| Barrens crossroads | 47% | 169 | 676 | 2872, 2873, 2877 (d8) |
+| Ashenvale, Astranaar | 37% | 235 | 940 | 2520, 2522 (d8) |
+| Goldshire | 44% | 266 | 1062 | 505, 507, 1106 |
+| Elwynn forest | 15% | 314 | 1255 | 505, 507, 512, 798, 801, 802, 1106 |
+
 ## 10. Wowee before and after
 
 | Feature | Stock | Wowee before | Wowee after |
