@@ -1221,6 +1221,69 @@ Sheets in the session scratchpad: `sv/sheet_matched.png` (Enhanced | before |
 now, the three Goldshire views), `sv/sheet_regress.png` (before | now: the
 evening, the forest, the Barrens, into the sun, away from it).
 
+**Second round: the fill kept to shade, and dusk.** Jered kept the cooler
+shade. Two Enhanced frames he added (a Night Elf forest by day, a road at
+dusk) set the next changes: by day, warm sun patches sit beside deep, cool
+shade; at dusk the shade is dark and warm brown, not grey-blue.
+
+- The fill now goes where the sun's shadow map says the sun is hidden
+  (`smoothstep(0.3, 0.9, 1 - shadow)`). Before, the test was the sun's share
+  of the pixel's light, so a sunlit face turned half away from the sun took
+  the fill and went blue, and with it the "lit road". A ground pixel whose
+  facing, rebuilt from depth, turns from the sun is tested as level ground.
+- Under 30 degrees of sun the shade's light turns toward the low sun's hue
+  at its own brightness, 60% of the way by 10 degrees. The bounce stops
+  taking the sky's hue, and this follows the sun sprite's day weight, so it
+  is off at night. On Goldshire's evening road (17:51, the shaded third of
+  the road `y5` saw as road), red / blue to luminance is now 1.43 / 0.69,
+  against 1.40 / 0.68 before the sky shade and 1.16 / 0.84 with this row
+  before this round.
+- The bounce is warmer and less of it comes from the sky. The bounce colour
+  is 10% in the sky's hue (was 35%) and keeps 80% of the ground's chroma
+  (was 60%); the sky term is the fog colour x 0.15 (was 0.2). That gives
+  back the ground's chroma, which the grey fill had taken.
+
+Measured against this row as it was (commit 08431fc, three runs each;
+`sv/avg2.py` in the session scratchpad; gaps against Enhanced, mean of the
+matched Goldshire views):
+
+| | before | now |
+|---|---|---|
+| Barrens noon road mean / p95 / p99 | 0.533 / 0.689 / 0.713 | 0.534 / 0.689 / 0.713 |
+| into the sun, pixels over 0.92 | 1.24% | 1.28% |
+| Goldshire evening / Elwynn forest mean | | -1.0% / -0.9% |
+| crown chroma gap | +20.4% | +18.0% |
+| gap sum (20 rows) / region sum (23 rows) | 280.6 / 270.2 | 280.5 / 260.8 |
+| road lit blue / luminance | +27.8% | +25.2% |
+| road shade red, blue / luminance | -0.3%, +0.4% | +3.7%, -3.8% |
+| ground / far / all chroma | -10.9% / -10.0% / -7.8% | -2.3% / -8.0% / -4.3% |
+| world 5th percentile | -15.3% | -16.4% |
+| road lit / shade | -19.9% | -21.4% |
+| grass luminance, verge luminance | -11.4%, -3.0% | -20.3%, -15.9% |
+
+Notes on the table:
+
+- The extra into-the-sun pixels are in the sky, round the sun's glare,
+  which this pass does not touch (sky pixels leave it). The sun moves on
+  between the time being set and the shot, and these runs shared the GPU
+  with other clients.
+- The Barrens' 0.001 is within the runs' spread (0.533-0.535). Part of it
+  is a walking NPC.
+
+What this round does not reach:
+
+- The road's lit/shade ratio (Enhanced 1.9-2.3, Wowee 1.5-1.7). The lit
+  road is 10% darker than Enhanced's, and what is left of the fill holds
+  the forest and evening views.
+- The darkest tones (the 5th percentile), which are under the crowns.
+- The grass and verge, now 9-14 points darker as the table measures them.
+  With the warmer fill, shaded grass slides toward yellow and out of the
+  grass hue band, so the darker pixels are what the band keeps.
+
+Sheets: `sv/sheet2_matched.png` (Enhanced | before | now),
+`sv/sheet2_regress.png` (before | now), `sv/sheet2_eve.png` (before the sky
+shade | before | now).
+
 ## 7. Ground clutter
 
 `GroundEffectTexture` is the 1.12 table: 1060 of the 1065 changed rows went

@@ -144,22 +144,31 @@ const float kModelClosed = 0.9;
 // all of it from kOpenTo.
 const float kOpenFrom = 0.3;
 const float kOpenTo = 0.9;
-const float kGiSky = 0.2;            // x the fog colour (the sky's horizon)
+const float kGiSky = 0.15;           // x the fog colour (the sky's horizon)
 const float kGiBounce = 0.6;         // x the sun x the ground's colour
 const float kGiBounceShaded = 0.8;   // of it with none of the ground round lit
 const float kGiSunRef = 0.6;         // sin of the sun's height it was set at
 const float kGiSunPow = 2.0;
-const float kGiBounceSat = 0.6;      // of the ground's chroma it keeps
-const float kGiCool = 0.35;          // of it in the sky's hue
+const float kGiBounceSat = 0.8;      // of the ground's chroma it keeps
+const float kGiCool = 0.1;           // of it in the sky's hue
 // The ground's lit share is read on two rings round the point (yards).
 const float kGiRing0 = 3.0;
 const float kGiRing1 = 8.0;
 // How far the shade may be lifted (the plain fill: kFillMaxLift).
 const float kEnhancedMaxLift = 2.5;
-// Shade is where the sun gives under kShadeFrom of the light, none past
-// kShadeTo: the fill is for shade.
-const float kShadeFrom = 0.05;
-const float kShadeTo = 0.2;
+// The fill is for shade: what the sun's shadow map hides from the sun (a
+// face turned from it counts as hidden), none of it below kShadeFrom of
+// shadow, all of it from kShadeTo. Not the sun's share of the light: a
+// sunlit face turned half away from a low sun took the fill too, and the
+// sunlit road went blue.
+const float kShadeFrom = 0.3;
+const float kShadeTo = 0.9;
+// Dusk: the sun from kDuskFrom (sin of its height; 30 degrees) down to
+// kDuskTo (10 degrees) turns the shade's light kDuskWarm of the way to its
+// own hue, and the bounce stops cooling.
+const float kDuskFrom = 0.5;
+const float kDuskTo = 0.17;
+const float kDuskWarm = 0.6;
 #endif
 
 layout(location = 0) out vec4 outColor;
@@ -663,8 +672,16 @@ void main() {
         vec3 fF = fModel;
         if (onGround > 0.0) {
             vec3 gi = vec3(0.0);
-            float sunShare = clamp(lum(difF) / lum(beforeF), 0.0, 1.0);
-            float shade = 1.0 - smoothstep(kShadeFrom, kShadeTo, sunShare);
+            // (Ground whose rebuilt facing turns from the sun - bumps,
+            // depth noise - is asked of the shadow map as level ground.)
+            float sunVis = sunLit;
+            if (ndotl <= 0.0)
+                sunVis = shadowParams.x > 0.5 && onGround > 0.5 ? sunShadow(pos, vec3(0.0, 0.0, 1.0), ldir) : 0.0;
+            // The sun sprite's height and day weight (leaf_light.hpp): the
+            // light is the moon's by night, and no dusk then.
+            vec4 sunSprite = unpackSnorm4x8(uint(localLightMeta.w));
+            float dusk = (1.0 - smoothstep(kDuskTo, kDuskFrom, sunSprite.z)) * max(sunSprite.w, 0.0);
+            float shade = smoothstep(kShadeFrom, kShadeTo, 1.0 - sunVis);
             if (shade > 0.0) {
                 float sunUpF = smoothstep(0.0, 0.1, -normalize(lightDir.xyz).z);
                 vec2 uv = (pos.xy - pc.extra.xy) / kGridSpan;
@@ -683,11 +700,17 @@ void main() {
                 vec3 bounce = lightColor.rgb * ground *
                               (kGiBounce * groundSun * mix(kGiBounceShaded, 1.0, groundSunlit(pos, ldir, skyLane)));
                 vec3 skyHue = amb / max(lum(amb), 1e-3);
-                bounce = mix(bounce, skyHue * lum(bounce), kGiCool);
+                bounce = mix(bounce, skyHue * lum(bounce), kGiCool * (1.0 - dusk));
                 float open = smoothstep(kOpenFrom, kOpenTo, vis);
                 gi = (fogColor.rgb * kGiSky + bounce) * (open * pc.target.z * occlusion * shade * sunUpF);
             }
-            vec3 fGround = clamp((ambF * (occlusion * skyK) + difF + gi) / beforeF, 0.0, kEnhancedMaxLift);
+            // At dusk the shade is warm: the light in it takes the low sun's
+            // hue at its own brightness (Enhanced's dusk road is dark brown,
+            // not grey-blue), easing in as the sun sinks under kDuskFrom.
+            vec3 shadeLight = ambF * (occlusion * skyK) + gi;
+            vec3 sunHue = lightColor.rgb / max(lum(lightColor.rgb), 1e-3);
+            shadeLight = mix(shadeLight, sunHue * lum(shadeLight), kDuskWarm * dusk * shade);
+            vec3 fGround = clamp((shadeLight + difF) / beforeF, 0.0, kEnhancedMaxLift);
             fF = mix(fModel, fGround, onGround);
         }
         if ((flags & 32) != 0) fF = vec3(vis);
