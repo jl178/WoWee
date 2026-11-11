@@ -2458,6 +2458,53 @@ void WaterRenderer::clearWake() {
     frameUBO_.wakeBounds = glm::vec4(0.0f);
 }
 
+void WaterRenderer::clearRings() {
+    rings_.clear();
+    ringTimers_.clear();
+    frameUBO_.ringBounds = glm::vec4(0.0f);
+}
+
+// Ripple rings (Enhanced water). A ring lives kRingLife seconds; the shader
+// draws it as a few wavelets on a front that runs out at a fixed speed,
+// lower as it spreads and ages. Each source keeps its own beat, so a bobber
+// bobs out slow rings and someone wading throws them close together.
+void WaterRenderer::updateRings(float deltaTime, const std::vector<RingEmitter>& emitters) {
+    constexpr float kRingLife = 4.5f;  // water_hd.frag FW_RING_LIFE
+    for (auto& r : rings_) r.age += deltaTime;
+    rings_.erase(std::remove_if(rings_.begin(), rings_.end(),
+                                [](const WaterRing& r) { return r.age >= kRingLife; }),
+                 rings_.end());
+
+    std::unordered_map<uint64_t, float> timers;
+    for (const auto& e : emitters) {
+        auto it = ringTimers_.find(e.key);
+        // A new source rings at once; a known one when its beat comes round.
+        float t = it == ringTimers_.end() ? e.period : it->second + deltaTime;
+        if (t >= e.period && e.strength > 0.0f) {
+            if (static_cast<int>(rings_.size()) >= kMaxWaterRings) rings_.erase(rings_.begin());
+            rings_.push_back({e.pos, 0.0f, e.strength});
+            t = 0.0f;
+        }
+        timers[e.key] = t;
+    }
+    ringTimers_ = std::move(timers);
+
+    const int count = std::min(static_cast<int>(rings_.size()), kMaxWaterRings);
+    glm::vec2 centre(0.0f);
+    for (int i = 0; i < count; ++i) centre += rings_[i].pos;
+    if (count > 0) centre /= static_cast<float>(count);
+    float radius = 0.0f;
+    // The shader's front speed (FW_RING_SPEED) times the life, plus the
+    // wavelets' reach behind and ahead of the front.
+    constexpr float kRingReach = 0.85f * kRingLife + 1.0f;
+    for (int i = 0; i < count; ++i) {
+        const WaterRing& r = rings_[i];
+        radius = std::max(radius, glm::length(r.pos - centre) + kRingReach);
+        frameUBO_.rings[i] = glm::vec4(r.pos.x, r.pos.y, r.age, r.strength);
+    }
+    frameUBO_.ringBounds = glm::vec4(centre.x, centre.y, radius, static_cast<float>(count));
+}
+
 void WaterRenderer::updateReflectionUBO(const glm::mat4& reflViewProj) {
     frameUBO_.reflViewProj = reflViewProj;
     uploadFrameUBO();

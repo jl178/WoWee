@@ -494,7 +494,11 @@ private:
     // Quest giver ! and ? over heads: the stock TalkToMe*.m2 models
     void loadQuestMarkerModels();  // No-op; the models load on first use
     void updateQuestMarkers();     // Places, turns and removes the marker instances
-    void updateLootSparkles();     // The glitter over corpses with loot, and when a corpse is down
+    void updateLootSparkles();
+    void updateWaterRings();       // Enhanced water: rings round units and bobbers touching the surface
+    std::unordered_map<uint64_t, glm::vec3> waterRingLastPos_;
+    std::chrono::steady_clock::time_point waterRingClock_{};
+    bool waterRingClockSet_ = false;     // The glitter over corpses with loot, and when a corpse is down
     /// When each dead unit was first seen dead, for bodies the renderer
     /// never lays down (updateLootSparkles).
     std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> corpseDeathSeenAt_;

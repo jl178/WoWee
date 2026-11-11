@@ -255,6 +255,22 @@ above:
   gives the downhill direction and a speed; the foam and the wave field are
   carried down it with a two-phase flow (bounded offsets, no seams), and the
   waves get choppier. Lit as Enhanced lights foam.
+- **Ripple rings**: Enhanced's night reference shows a ring spreading round
+  the fishing bobber. Each frame `Application::updateWaterRings` finds what
+  touches the surface within 60 yards of the camera - a unit with its feet
+  0.05-2.6 yards under it (standing, wading, swimming at the top) and a
+  fishing bobber (game object type 17, its float within 0.8 yard of the
+  surface) - and `WaterRenderer::updateRings` gives each source its own
+  beat: a ring at once, then every 2.2 s standing, 0.45 s moving (over 0.8
+  yards a second), 1.2 s for a bobber, 0.3 s while a fish bites. At most 16
+  rings live (4.5 s each) in the water's frame block (`ringBounds`,
+  `rings[16]`, after the sky). The shader draws each as wavelets 0.32 yards
+  apart on a front running out at 0.85 yards a second, lower as it spreads
+  and ages, added to the surface's slope (so the mirror, the refraction and
+  the sun bend with it), and its crests catch the graded sky over the water
+  and the sun's or moon's light - seen from above a slope alone barely moves
+  a dim mirror. One bounding-circle test rejects the rest of the water.
+  Only with this row on; off, the block's tail is never read.
 - **Composition and fog**: Enhanced's, `bed + sat(2t)(body + reflection +
   sun + (1 - Fsun) lerp(bed T, foam, cover) - bed)`; the bed was fogged with
   the scene, so its fog is taken off before the water's is laid once.

@@ -5424,6 +5424,9 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     runInGameStage("updateLootSparkles", [&] {
         updateLootSparkles();
     });
+    runInGameStage("updateWaterRings", [&] {
+        updateWaterRings();
+    });
     // Game objects' model sounds and freeze flag (EntitySpawner, after the
     // renderer's update has fired their models' events).
     runInGameStage("updateGameObjectPresentation", [&] {
@@ -7593,6 +7596,79 @@ void Application::updateUnitHighlights() {
     };
     cr->setHighlightedInstances(instanceFor(gameHandler->getMouseoverGuid()),
                                 instanceFor(gameHandler->getTargetGuid()));
+}
+
+// Enhanced water's ripple rings: what touches the surface near the camera -
+// a unit standing or wading in it, swimming at the top, a fishing bobber
+// (FISHINGNODE, type 17) - sends out rings, faster while it moves and quick
+// while a fish bites. Only with "Water (the reference client)" on.
+void Application::updateWaterRings() {
+    auto* water = renderer ? renderer->getWaterRenderer() : nullptr;
+    if (!water) return;
+    if (!gameHandler || !renderer->getEnhancements().enhancedWater) {
+        water->clearRings();
+        waterRingLastPos_.clear();
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    float dt = waterRingClockSet_ ? std::chrono::duration<float>(now - waterRingClock_).count() : 0.0f;
+    waterRingClock_ = now;
+    waterRingClockSet_ = true;
+    dt = std::clamp(dt, 0.0f, 0.25f);
+
+    const auto* camera = renderer->getCamera();
+    const glm::vec3 eye = camera ? camera->getPosition() : glm::vec3(0.0f);
+    constexpr float kReach = 60.0f;  // yards from the camera
+    const uint64_t hooked = gameHandler->getHookedFishingBobberGuid();
+    std::vector<rendering::WaterRenderer::RingEmitter> emitters;
+    std::unordered_map<uint64_t, glm::vec3> seen;
+    for (const auto& [guid, entity] : gameHandler->getEntityManager().getEntities()) {
+        if (!entity) continue;
+        const auto type = entity->getType();
+        const bool unit = type == game::ObjectType::UNIT || type == game::ObjectType::PLAYER;
+        bool bobber = false;
+        if (type == game::ObjectType::GAMEOBJECT) {
+            auto go = std::static_pointer_cast<game::GameObject>(entity);
+            const auto* info = gameHandler->getCachedGameObjectInfo(go->getEntry());
+            bobber = info && info->type == 17;
+        }
+        if (!unit && !bobber) continue;
+        // A unit's drawn position (it follows the model); a game object's
+        // from the entity (the spawner keeps no render position for it).
+        glm::vec3 pos;
+        if (!getRenderPositionForGuid(guid, pos)) {
+            if (!bobber) continue;
+            pos = core::coords::canonicalToRender(glm::vec3(entity->getX(), entity->getY(), entity->getZ()));
+        }
+        const glm::vec3 d = pos - eye;
+        if (glm::dot(d, d) > kReach * kReach) continue;
+        const auto surface = water->getWaterHeightAt(pos.x, pos.y);
+        if (!surface) continue;
+        const float depth = *surface - pos.z;  // of the feet (or the float) below the surface
+        rendering::WaterRenderer::RingEmitter e;
+        e.key = guid;
+        e.pos = glm::vec2(pos.x, pos.y);
+        if (bobber) {
+            if (std::abs(depth) > 0.8f) continue;
+            const bool bite = guid == hooked;
+            e.strength = bite ? 1.6f : 1.1f;
+            e.period = bite ? 0.3f : 1.2f;
+        } else {
+            // Feet in the water up to swimming at the top; deeper is under it.
+            if (depth < 0.05f || depth > 2.6f) continue;
+            seen[guid] = pos;
+            float moved = 0.0f;
+            if (auto it = waterRingLastPos_.find(guid); it != waterRingLastPos_.end() && dt > 0.0f) {
+                moved = glm::length(glm::vec2(pos - it->second)) / dt;
+            }
+            const bool moving = moved > 0.8f;  // yards a second
+            e.strength = moving ? 1.0f : 0.35f;
+            e.period = moving ? 0.45f : 2.2f;
+        }
+        emitters.push_back(e);
+    }
+    waterRingLastPos_ = std::move(seen);
+    water->updateRings(dt, emitters);
 }
 
 void Application::updateLootSparkles() {

@@ -87,6 +87,9 @@ struct WaterSurface {
 // Matches set 2 binding 3 in water.frag.glsl. Keep kMaxWakePoints in step with
 // the MAX_WAKE_POINTS constant declared there.
 constexpr int kMaxWakePoints = 32;
+// Ripple rings on Enhanced water (water_hd.frag's FW_RINGS): at most this many
+// expanding at once.
+constexpr int kMaxWaterRings = 16;
 
 struct WaterFrameUBOData {
     glm::mat4 reflViewProj{1.0f};
@@ -120,6 +123,11 @@ struct WaterFrameUBOData {
     glm::vec4 skyBand2{1.0f, 0.98f, 0.9f, 0.0f};
     glm::vec4 skySmog{0.7f, 0.7f, 0.7f, 0.0f};
     glm::vec4 skyFog{0.5f, 0.6f, 0.7f, 0.0f};
+    // Enhanced water's ripple rings: xy = the centre of them all, z = a radius
+    // that covers every ring, w = count; per ring xy = where it started,
+    // z = its age in seconds, w = strength. Read by water_hd.frag only.
+    glm::vec4 ringBounds{0.0f};
+    glm::vec4 rings[kMaxWaterRings]{};
 };
 
 class WaterRenderer {
@@ -259,6 +267,20 @@ public:
     }
     /// The wake froth (not stock) off: no points, nothing drawn.
     void clearWake();
+    /// Something touching the surface of Enhanced water - a unit wading or
+    /// swimming at the top, a fishing bobber: it sends out a ring every
+    /// `period` seconds while it stays (the first at once), `strength` its
+    /// height. Keyed so each source keeps its own beat.
+    struct RingEmitter {
+        uint64_t key = 0;
+        glm::vec2 pos{0.0f};
+        float strength = 0.0f;
+        float period = 1.0f;
+    };
+    /// Age the rings, start new ones from this frame's emitters, and pack
+    /// them for the shader. An empty list lets the rings run out.
+    void updateRings(float deltaTime, const std::vector<RingEmitter>& emitters);
+    void clearRings();
     // Display brightness (1.0 = neutral). The scene-history capture used for
     // refraction bakes this in, so the shader divides it back out.
     // Size of the target the water is drawn into. Screen-space lookups derive
@@ -407,6 +429,13 @@ private:
     // Reflection UBO (mat4 reflViewProj)
     // Surface disturbance trail. Points age out, spreading as they go; the
     // per-point drift is what turns a swimmer's pair of emissions into a V.
+    struct WaterRing {
+        glm::vec2 pos{0.0f};
+        float age = 0.0f;  // seconds
+        float strength = 0.0f;
+    };
+    std::vector<WaterRing> rings_;
+    std::unordered_map<uint64_t, float> ringTimers_;  // seconds since each source's last ring
     struct WakePoint {
         glm::vec2 pos{0.0f};
         glm::vec2 drift{0.0f};

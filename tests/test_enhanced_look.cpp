@@ -430,6 +430,13 @@ TEST_CASE("Enhanced water: water_hd.frag carries LiquidType 1.60.1's columns", "
     // water alone compiles none of it.
     CHECK(src.find("#ifdef ENHANCED_WATER\n    const bool fw = true;") != std::string::npos);
     CHECK(src.find("    const bool fw = false;") != std::string::npos);
+    // The ripple rings: the block's array as long as the renderer's.
+    CHECK(src.find("vec4 rings[16];") != std::string::npos);
+    std::ifstream wr(std::string(WOWEE_SOURCE_DIR) + "/include/rendering/water_renderer.hpp");
+    REQUIRE(wr.good());
+    std::stringstream wrs;
+    wrs << wr.rdbuf();
+    CHECK(wrs.str().find("constexpr int kMaxWaterRings = 16;") != std::string::npos);
     std::ifstream cm(std::string(WOWEE_SOURCE_DIR) + "/CMakeLists.txt");
     REQUIRE(cm.good());
     std::stringstream cms;

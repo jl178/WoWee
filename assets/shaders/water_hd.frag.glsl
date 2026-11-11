@@ -102,6 +102,11 @@ layout(set = 2, binding = 3) uniform WaterFrameData {
     vec4 skyBand2;
     vec4 skySmog;
     vec4 skyFog;
+    // Enhanced water's ripple rings (WaterRenderer::updateRings): xy centre
+    // of them all, z a radius covering every ring, w count; per ring xy where
+    // it started, z its age (s), w strength.
+    vec4 ringBounds;
+    vec4 rings[16];
 };
 
 layout(set = 3, binding = 0) uniform sampler2D LiquidTexture;
@@ -457,6 +462,47 @@ vec4 fwWaveSum(vec2 p, vec2 bend, float time, vec2 dpx, vec2 dpy, float waveClas
     return vec4(slope, h, wsum);
 }
 
+// Ripple rings round what touches the surface (a fishing bobber, someone
+// wading or swimming at the top): each ring a front running out at
+// FW_RING_SPEED yards a second carrying a few wavelets FW_RING_WAVE apart,
+// lower as it spreads (1 / (1 + radius)) and as it ages, added to the
+// surface's slope so the mirror and the refraction ring with it. Rejected
+// in one test outside the circle that holds them all. Each wavelet's crest
+// also catches the sky (glint, 0..1): seen from above a ring's slope barely
+// moves a dim mirror, where Enhanced's rings read as bright lines.
+const float FW_RING_SPEED = 0.85;
+const float FW_RING_WAVE = 0.32;
+const float FW_RING_WIDTH = 0.38;
+const float FW_RING_LIFE = 4.5;
+const float FW_RING_SLOPE = 0.8;
+const float FW_RING_GLINT = 1.2;
+vec3 fwRingNormal(vec3 N, vec2 p, out float glint) {
+    glint = 0.0;
+    int count = clamp(int(ringBounds.w), 0, 16);
+    if (count == 0) return N;
+    vec2 toC = p - ringBounds.xy;
+    if (dot(toC, toC) > ringBounds.z * ringBounds.z) return N;
+    vec2 slope = vec2(0.0);
+    for (int i = 0; i < count; ++i) {
+        vec4 r = rings[i];
+        vec2 d = p - r.xy;
+        float dist = length(d);
+        float x = dist - FW_RING_SPEED * r.z;  // ahead of the front > 0
+        if (abs(x) > FW_RING_WIDTH * 2.5) continue;
+        float env = exp(-(x * x) / (FW_RING_WIDTH * FW_RING_WIDTH));
+        float life = 1.0 - r.z / FW_RING_LIFE;  // squared below: a soft end
+        // The first moments, a ring is the bobber's own splash: it grows in.
+        float grow = smoothstep(0.0, 0.25, r.z);
+        float amp = FW_RING_SLOPE * r.w * env * life * life * grow / (1.0 + 0.35 * FW_RING_SPEED * r.z);
+        float ph = x * (6.2831853 / FW_RING_WAVE);
+        slope += (d / max(dist, 1e-3)) * (amp * sin(ph));
+        float c = max(cos(ph), 0.0);
+        glint += amp * c * c * c;
+    }
+    glint = min(glint / FW_RING_SLOPE, 1.0);
+    return normalize(N + vec3(-slope, 0.0));
+}
+
 // The surface's normal (xyz) and its height as -1..1 of the waves' reach (w);
 // the slope variance below the pixel in subVar.
 vec4 fwSurfaceNormal(vec2 p, vec2 flow, float time, float dist, float waveClass, out float subVar) {
@@ -665,6 +711,8 @@ void main() {
                      : vec4(0.0, 0.0, 1.0, 0.0);
     vec3 N = fw ? fwWave.xyz
                 : (hdParams.x > 0.5 ? hdSurfaceNormal(FragPos.xy, time, dist) : vec3(0.0, 0.0, 1.0));
+    float fwRingGlint = 0.0;
+    if (fw) N = fwRingNormal(N, FragPos.xy, fwRingGlint);
     vec2 screenUV = gl_FragCoord.xy / max(push.screenSize, vec2(1.0));
     float near = push.depthRange.x;
     float far = push.depthRange.y;
@@ -925,7 +973,12 @@ void main() {
             // Enhanced's composition: the bed through the water, then the
             // water's own light, faded in over the first half yard.
             float s2 = depthKnown ? mix(clamp(t * 2.0, 0.0, 1.0), 1.0, objectK) : 1.0;
-            vec3 X = bodyF + env * F + sunSpec + (1.0 - Fsun) * foamCol * cover;
+            // A ring's crests catch the open sky over the water (graded as
+            // the mirrored sky is) and the sun or moon's light, not the
+            // shore the flat surface mirrors there.
+            vec3 ringSky = mix(vec3(dot(skyMiddle.rgb, vec3(0.299, 0.587, 0.114))) * FW_ENV_TINT, skyMiddle.rgb, 0.3);
+            ringSky = max(env, ringSky) + clamp(lightColor.rgb, vec3(0.0), vec3(1.0)) * 0.25;
+            vec3 X = bodyF + env * F + ringSky * (FW_RING_GLINT * fwRingGlint) + sunSpec + (1.0 - Fsun) * foamCol * cover;
             vec3 Tb = T * (1.0 - Fsun) * (1.0 - cover);
             fwBedT = vec3(1.0 - s2) + s2 * Tb;
             color = s2 * X;
