@@ -833,10 +833,11 @@ of the sun (section 2e), where beams would be brightest.
 `volumetric_fog_inject.comp`). A sunlit cell within 60 yards (fading out
 by 120) also looks at the shade round it - four taps on a level ring 2.5
 yards across, turned each frame - and where most of the ring is in shade
-(a lit cell in a gap, `smoothstep(0.45, 1, shade)`) it scatters nine
-times the mist's own sun scatter more, with an HG lobe of g 0.6 (it shows
+(a lit cell in a gap, `smoothstep(0.45, 1, shade)`) it scatters 3.5
+times the mist's own sun scatter more (nine at first; below), with an HG lobe of g 0.6 (it shows
 from forty degrees off the sun), pulled back to a third within about 8
-degrees of the disc, in the light's colour thinned a third toward white.
+degrees of the disc, in the light's colour thinned toward white - seven
+tenths of the way by day, a third by night.
 A lit cell at the edge of one broad shadow (a house, a lone tree) has one
 or two taps of four in shade and is left alone, so open ground and sunny
 squares do not go milky. The ring is level because one square to a high
@@ -854,7 +855,8 @@ The small volume costs what the noise hides (below).
 
 By night the same from the moonlight: the light the shadow map is cast
 from (3.3.5's night light, 34 degrees up in Teldrassil at 23:00), in the
-night light's own colour, twice as strong before that colour. Thinned by
+night light's own colour, 17.5 times the mist's sun scatter before that
+colour (the day's 3.5 times 5; 18 at first). Thinned by
 cloud and rain as the sun shafts are, gone indoors (the interior factor).
 Off (Enhanced's
 light off, or `WOWEE_ENHANCED_SHAFTS=0`), the mist is the stock one, cell
@@ -923,6 +925,35 @@ channel over 0.97, the QA tour's measure; mean = the frame's luminance):
 | Goldshire inn 9:22, 15:23 | 0% | 0.355 -> 0.350, 0.359 -> 0.352 |
 | Elwynn forest 10:00 (the canopy beam) | 0% | 0.269 -> 0.269 |
 | Goldshire 23:00, Astranaar 23:00 (moonbeams) | 0% | 0.152 -> 0.157, 0.236 -> 0.225 |
+
+**Crowns facing the morning sun** (the sky shade's crown check, bisected
+to 0b5540d). At nine times, with the beams thinned only a third toward
+white, the shafts laid a gold veil over Goldshire's crowns facing the 9:22
+sun (about 38 degrees up): the top third of the inn view went to
+saturation 0.464, luminance 0.348, hue 43 against Enhanced's 0.355, 0.283,
+57, and the low-sun fix above did not change it (re-measured on 0927302).
+3.5 times, and seven tenths toward white by day, brings it to about 0.03
+of Enhanced's; the 15:23 gold and the moonbeams (their strength held at
+17.5) stay. A lobe of g 0.3 instead of 0.6 (less toward the morning sun,
+more at 15:23) and fading the shafts out between 10 and 25 yards above the
+ground were tried at 3.5-4 and measured the same within the run-to-run
+noise of these views (about 0.015 in the top third's saturation). Measured with `sv/crown.py` (top third of the world area; "fixed
+mask" = the crown pixels of the shafts-off frame, its gap to Enhanced's
+crown saturation):
+
+| top third (sat / luminance / hue) | Enhanced | shafts off | shafts at 9 | shafts at 3.5 (two runs) |
+|---|---|---|---|---|
+| Goldshire inn 9:22, facing the sun | 0.355 / 0.283 / 57 | 0.363-0.366 / 0.271-0.278 / 56-60 | 0.464 / 0.348 / 43 | 0.387-0.397 / 0.302-0.312 / 51-54 |
+| Goldshire 15:23 | 0.41 / 0.32 / 39 | 0.358-0.378 / 0.263-0.277 / 42-44 | 0.466 / 0.348 / 40 | 0.373-0.384 / 0.291-0.297 / 43 |
+| crown gap, fixed mask, mean of three views | | +25% | +51% | +33-35% |
+
+The inn's top third is still 0.03-0.04 more saturated than Enhanced's, but
+its shafts-off frame is itself 0.01 over and the views move about 0.015
+between runs; the 15:23 view sits 0.03 under Enhanced's gold, as it did
+with the shafts off. Elsewhere the low-sun and shaft views are as before:
+Westfall 6:18 0.26% white, Barrens dawn and dusk 0%, Goldshire into the
+sun 0.19% (ring.py), Elwynn's canopy beam and both moonbeam views within
+0.01 of their mean at nine times.
 
 ## 6. Global illumination ("Secondary Lighting")
 

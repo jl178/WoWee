@@ -15,12 +15,15 @@ namespace rendering {
 namespace enhanced_shafts {
 
 /// How much more a sunlit cell beside shade scatters, against the mist's own
-/// sun scatter (0.8).
-inline constexpr float kStrength = 9.0f;
+/// sun scatter (0.8). 9 laid a gold veil over Goldshire's crowns facing the
+/// 9:22 sun (top third saturation 0.46 against Enhanced's 0.36); at 3.5, with
+/// the beams paler by day, it is 0.38 and the 15:23 gold still Enhanced's.
+inline constexpr float kStrength = 3.5f;
 
 /// The moonlight's shafts against the sun's, before its own (dim, blue)
-/// colour: the night light is a fraction of the day's.
-inline constexpr float kNightScale = 2.0f;
+/// colour: the night light is a fraction of the day's. Strength times this
+/// is 17.5, about the moonbeams' strength from the start (18).
+inline constexpr float kNightScale = 5.0f;
 
 /// How far round a cell, on a level ring, it looks for shade beside it:
 /// about a gap in the leaves.

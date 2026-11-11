@@ -356,8 +356,12 @@ void main() {
             float day = sunUp * (1.0 - vol.shafts.y);
             float weight = day + vol.shafts.y;
             // Pale: a beam reads as the light's hue thinned toward white, as
-            // Enhanced's do, not as a column of its full colour.
-            vec3 beam = mix(lightColor.rgb, vec3(dot(lightColor.rgb, vec3(0.2126, 0.7152, 0.0722))), 0.35);
+            // Enhanced's do, not as a column of its full colour. By day most of
+            // the way: the morning sun's gold laid over Goldshire's crowns
+            // turned their green to gold (top third hue 43 against Enhanced's
+            // 57). The moonbeams keep more of the night's blue.
+            float thin = mix(0.35, 0.7, 1.0 - vol.shafts.y);
+            vec3 beam = mix(lightColor.rgb, vec3(dot(lightColor.rgb, vec3(0.2126, 0.7152, 0.0722))), thin);
             light += beam * (vol.shafts.x * lit * around * reach * lobe * weight);
         }
     }
