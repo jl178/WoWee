@@ -1811,9 +1811,23 @@ session scratchpad `shadows/`):
   foliage is drawn without wind, so redraws do not move the dapples.
 - Not done: Enhanced's opaque filter (its screen-space `shadowmask.bls`, not
   fetched); contact hardening (PCSS) - the detail map's pixel-footprint
-  widening stands in for it; the ambient pass's ground-sunlit rings
-  (`groundSunlit`, the sky shade) still read the world map, so the ground's
-  fill beside a crisp edge eases over the world map's 1.8 yd.
+  widening stands in for it.
+- The sky shade's ground fill (`groundSunlit` in the ambient pass's sky
+  build: two points on rings 3 and 8 yd round the pixel, is the ground there
+  in the sun) reads the detail map where it covers the point, as the
+  surfaces do, blended into the world map over the same outer 8%; it read
+  the world map alone, so the fill beside a crisp edge eased over the world
+  map's 1.8-yd penumbra. Its lift stays the world map's (the ground height is
+  the 0.5-yd sky field's). The sky shade's bars hold: the evening shaded road
+  r/L 1.427, b/L 0.690 with the row on and off (`sv/evehue.py`; bars 1.43
+  and 0.69); eve -4.5%, forest -3.9% against y5. The ambient pass moved by
+  -0.06 to +0.09 ms on the perf views.
+- Durotar after 3024a23 (the clutter's .mdx models load): the Valley of
+  Trials has its plants again, sparse (26 within 32 yd of the camp's middle,
+  1156 round Razor Hill's edge) next to Enhanced's cover. They cast into the
+  detail map - a crisp twig shadow beside each at 16:30, none with the row
+  off - and receive like the ground under them
+  (`shadows/cmp_pl6_plants.png`).
 
 ## 10. Not done, and why
 

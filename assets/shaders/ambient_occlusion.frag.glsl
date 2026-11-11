@@ -329,7 +329,22 @@ float groundSunlit(vec3 p, vec3 ldir, int lane) {
         vec3 pr = ls.xyz / ls.w;
         pr.xy = pr.xy * 0.5 + 0.5;
         bool inside = all(greaterThanEqual(pr, vec3(0.0))) && all(lessThanEqual(pr, vec3(1.0)));
-        lit += inside ? texture(uShadowMap, vec3(pr.xy, pr.z - bias)) : 1.0;
+        float sun = inside ? texture(uShadowMap, vec3(pr.xy, pr.z - bias)) : 1.0;
+        // Enhanced's sun shadows: the detail map where it covers the point,
+        // as the surfaces read it (shadow_filter.glsli), so the fill beside
+        // a crisp shadow edge turns with the edge rather than over the world
+        // map's penumbra. Lifted as above: the ground height is the field's.
+        if (detailShadowParams.x > 0.5) {
+            vec4 ds = detailLightSpaceMatrix * vec4(q, gz, 1.0);
+            vec2 duv = ds.xy * 0.5 + 0.5;
+            float edge = min(min(duv.x, duv.y), min(1.0 - duv.x, 1.0 - duv.y));
+            if (edge > 0.01 && ds.z >= 0.0 && ds.z <= 1.0) {
+                float d = texture(uDetailShadowMap,
+                                  vec3(duv, ds.z - 0.25 * detailShadowParams.w * detailShadowParams.z));
+                sun = mix(sun, d, smoothstep(0.01, 0.09, edge));
+            }
+        }
+        lit += sun;
     }
     return lit * 0.5;
 }
