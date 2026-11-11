@@ -856,9 +856,7 @@ By night the same from the moonlight: the light the shadow map is cast
 from (3.3.5's night light, 34 degrees up in Teldrassil at 23:00), in the
 night light's own colour, twice as strong before that colour. Thinned by
 cloud and rain as the sun shafts are, gone indoors (the interior factor).
-With the shafts on, the mist's forward lobe sits on the sun's sprite
-(`leaf_light`'s packed direction) while the sprite is up, and its
-pull-back round the disc eases off from 15 degrees up to 5. Off (Enhanced's
+Off (Enhanced's
 light off, or `WOWEE_ENHANCED_SHAFTS=0`), the mist is the stock one, cell
 for cell; `WOWEE_ENHANCED_SHAFTS=strength,night,ring,reach` tunes it.
 
@@ -894,8 +892,37 @@ its global fog layer and sun haze - with the trunks cut out of it; here at
 19:30 the light, and so the shadow map, still comes mostly from 3.3.5's
 stock direction (Enhanced's light only eases onto the sun over its first 9
 degrees, section 2e), so the air toward a 3-degree sun is in the trees'
-shadow and the lobe on the sprite has little lit air to show. The large
-warm glow belongs to the sun haze (`enhanced_haze.frag`), not the mist.
+shadow and the mist has little lit air to show. The large warm glow
+belongs to the sun haze (`enhanced_haze.frag`), not the mist.
+
+**A sun just over the horizon** (the QA tour, 9573bd7). The first version
+put the mist's forward lobe on the sun's sprite and eased its pull-back
+round the disc off below 15 degrees, for that dusk glow. Looking into
+Westfall's 6:18 sun it took 7.6% of the view to white (min channel over
+0.97; mist off 0.1%, Ultra 0%), 1.8% at 7:00. Both are gone: the lobe is
+back on the light's direction and pulled back at every height. That alone
+left 4.3% - the stock lobe already whitens a view along hundreds of yards
+of lit air toward a sun on the horizon. So under Enhanced's light the
+integrate pass now holds the light the air adds under a ceiling set by the
+sky behind it: the fog colour (the sky's horizon) plus 0.35 of the sun's
+colour, so a dark night sky does not choke the moonbeams; untouched up to
+half the ceiling, easing toward it past that. Midday air, the forest
+shafts and the moonbeams sit under the knee.
+
+Before and after (1280x540, toward the sun unless noted; white = min
+channel over 0.97, the QA tour's measure; mean = the frame's luminance):
+
+| view | white before -> after | mean before -> after |
+|---|---|---|
+| Westfall 6:18 (the QA tour's own framing, UI on) | 7.5% -> 0.2% (mist off 0.1%) | 0.695 -> 0.660 |
+| Westfall 6:18 (UI off) | 8.75% -> 0.26% | 0.767 -> 0.728 |
+| Westfall 7:00 | 3.0% -> 0% | 0.771 -> 0.758 |
+| Westfall 19:24 | 0% -> 0% | 0.691 -> 0.660 |
+| Barrens road 6:18 / 19:24 | 0% -> 0% | 0.526 -> 0.481 / 0.448 -> 0.411 |
+| Goldshire into the sun 9:22 (ring.py, max channel over 0.92) | 1.29% -> 0.17% | 0.368 -> 0.367 |
+| Goldshire inn 9:22, 15:23 | 0% | 0.355 -> 0.350, 0.359 -> 0.352 |
+| Elwynn forest 10:00 (the canopy beam) | 0% | 0.269 -> 0.269 |
+| Goldshire 23:00, Astranaar 23:00 (moonbeams) | 0% | 0.152 -> 0.157, 0.236 -> 0.225 |
 
 ## 6. Global illumination ("Secondary Lighting")
 

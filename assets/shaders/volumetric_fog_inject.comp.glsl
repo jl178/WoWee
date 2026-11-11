@@ -298,21 +298,7 @@ void main() {
     // (docs/re/enhanced-lighting.md 2e). Elsewhere the stock light stays
     // beside the sun and keeps the wider lobe.
     bool enhancedSun = (localLightMeta.z & 128) != 0;
-    // With the canopy shafts on, the lobe sits on the sun's sprite itself
-    // (leaf_light.hpp, localLightMeta.w) while it is above the horizon: the
-    // light only eases onto the sun over its first 9 degrees, and toward a
-    // setting sun the lobe was glowing twenty degrees above it, at the
-    // stock light, where nothing is.
-    vec3 lobeTravel = travel;
-    float sunHigh = -travel.z;
-    if (enhancedSun && vol.shafts.x > 0.0) {
-        vec4 sprite = unpackSnorm4x8(uint(localLightMeta.w));
-        if (sprite.z > 0.0) {
-            lobeTravel = -normalize(sprite.xyz);
-            sunHigh = sprite.z;
-        }
-    }
-    float cosSun = dot(lobeTravel, toCamera);
+    float cosSun = dot(travel, toCamera);
     float phase = enhancedSun ? mix(1.0, phaseHG(cosSun, 0.9), 0.5)
                              : mix(1.0, phaseHG(cosSun, 0.75), 0.65);
     // And within about 20 degrees of the disc the lobe gives way to even
@@ -320,12 +306,11 @@ void main() {
     // Enhanced's sun is no brighter than its sky (enhanced_02's ring falls to
     // half within 4 degrees), where the lobe laid a wide near-white disc.
     //
-    // With the canopy shafts on (vol.shafts.x), only while the sun is high:
-    // the ring was a midday one. Toward a sun low in the trees Enhanced lets a
-    // large warm glow through the fog (its dusk on a Duskwood road), so the
-    // pull-back eases off from 15 degrees up to 5.
-    float pullback = kEnhancedSunPullback;
-    if (vol.shafts.x > 0.0) pullback *= smoothstep(0.087, 0.259, sunHigh);
+    // At every height of the sun: a sun just over the horizon looks along
+    // the whole depth of the lit air, and with the pull-back eased off there
+    // (and the lobe on the sprite) Westfall's 6:18 sun took 7.6% of the view
+    // to white (docs/re/enhanced-lighting.md 5c).
+    const float pullback = kEnhancedSunPullback;
     if (enhancedSun) phase = mix(phase, 1.0, pullback * smoothstep(0.906, 0.996, cosSun));
     // Under a sky with no sun disc (Outland's: a sky model takes the whole
     // sky, LightingParams::sunDisc) there is nothing to scatter toward: the

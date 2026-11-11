@@ -54,6 +54,27 @@ vec3 rayAt(vec2 uv) {
     return mix(top, bottom, uv.y);
 }
 
+// Under Enhanced's light (localLightMeta.z bit 128) the light the air adds in
+// front of a surface is held under a ceiling set by the sky behind it - the
+// zone's fog colour, which the sky is painted to meet at the horizon - plus
+// a little of the sun's own colour, so a dark night sky does not choke the
+// moonbeams. Up to half the ceiling it is untouched; past that it eases
+// toward the ceiling instead of climbing without end. Toward a sun just over
+// the horizon the view looks along hundreds of yards of lit air, and the sum
+// took the ground and the sky round the sun to white: Westfall at 6:18 had
+// 7.6% of the view white, 4.3% with the lobe's pull-back restored alone
+// (docs/re/enhanced-lighting.md 5c). Shafts in a forest, moonbeams and the
+// midday air sit under the knee and keep their light.
+const float kMistCeiling = 1.0;
+const float kMistCeilingSun = 0.35;
+
+vec3 softCeiling(vec3 light, vec3 ceiling) {
+    vec3 knee = 0.5 * ceiling;
+    vec3 over = max(light - knee, vec3(0.0));
+    vec3 room = ceiling - knee;
+    return min(light, knee) + room * (1.0 - exp(-over / room));
+}
+
 void main() {
     ivec2 column = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(column, vol.dims.xy))) return;
@@ -63,6 +84,8 @@ void main() {
     float slant = length(rayAt((vec2(column) + 0.5) / vec2(vol.dims.xy)));
 
     vec3 scattered = vec3(0.0);
+    bool capped = (localLightMeta.z & 128) != 0;
+    vec3 ceiling = max(kMistCeiling * fogColor.rgb + kMistCeilingSun * lightColor.rgb, vec3(0.02));
     float transmittance = 1.0;
     float front = sliceDepth(0.0);
     for (int z = 0; z < vol.dims.z; ++z) {
@@ -80,6 +103,7 @@ void main() {
         scattered += transmittance * (cell.rgb - cell.rgb * through) / extinction;
         transmittance *= through;
 
-        imageStore(uIntegratedOut, ivec3(column, z), vec4(scattered, transmittance));
+        imageStore(uIntegratedOut, ivec3(column, z),
+                   vec4(capped ? softCeiling(scattered, ceiling) : scattered, transmittance));
     }
 }
