@@ -42,7 +42,8 @@ layout(set = 1, binding = 0) uniform sampler2D uSceneDepth;
 layout(push_constant) uniform Push {
     mat4 invViewProj;  // clip -> world, this frame's
     vec4 target;       // xy the render extent, z strength (0..2; weather thins it), w flags (4 debug, 8 HDR scene)
-    vec4 air;          // Enhanced's air: a its density per yard at the ground (0 = none); rgb unused
+    vec4 air;          // Enhanced's air: a its density per yard at the ground (0 = none);
+                       // r the forward lobe's share (0 under a sky with no sun disc); gb unused
 } pc;
 
 layout(location = 0) out vec4 outColor;
@@ -122,7 +123,11 @@ void main() {
 
     vec3 travel = normalize(lightDir.xyz);
     float sunUp = smoothstep(0.0, 0.08, -travel.z);
-    float phase = mix(1.0, phaseHG(dot(-travel, v), kG), 0.6);
+    // Its forward share only toward a sun the sky shows: under a sky with no
+    // sun disc (Outland's, LightingParams::sunDisc) the lobe is left out - the
+    // even share stays as it was, so the air elsewhere is no brighter - rather
+    // than whiting out the sky round a planet as if it were the sun.
+    float phase = 0.4 + 0.6 * phaseHG(dot(-travel, v), kG) * clamp(pc.air.r, 0.0, 1.0);
     vec3 light = fogColor.rgb * kSkyScatter + lightColor.rgb * (phase * kSunScatter * sunUp);
     // Capped near white: past it the haze only blows a bright sky and the
     // land under it out (the Barrens toward an evening sun, round 4).

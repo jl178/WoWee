@@ -827,18 +827,24 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     {
         static const std::string kStarsModel = "Environments\\Stars\\Stars.mdx";
         std::vector<SkyboxLayer> layers;
+        currentParams_.sunDisc = 1.0f;
         if (!isIndoors_) {
             bool replaced = false;
+            float replacing = 0.0f;
             for (const auto& e : skyEntries) {
                 auto skyIt = lightSkyboxPaths_.find(e.id);
                 if (skyIt == lightSkyboxPaths_.end() || skyIt->second.empty()) continue;
                 const auto flagsIt = lightSkyboxFlags_.find(e.id);
                 const uint32_t flags = flagsIt == lightSkyboxFlags_.end() ? 0u : flagsIt->second;
                 const bool full = e.weight > 0.99f && (flags & 2u) == 0;
+                if ((flags & 2u) == 0) replacing = std::max(replacing, e.weight);
                 if (full && !layers.empty()) layers.clear();
                 layers.push_back({.path = skyIt->second, .weight = e.weight, .replacesSky = full});
                 replaced = replaced || full;
             }
+            // No sun disc under a sky model that takes the whole sky (stock
+            // drops the procedural sun at 0.99; eased from 0.5 here).
+            currentParams_.sunDisc = replaced ? 0.0f : 1.0f - glm::smoothstep(0.5f, 0.99f, replacing);
             // The stars, by stars.mdl's own clock, unless a model has taken
             // the whole sky.
             const float starsWeight = replaced ? 0.0f : stock_sky::starsAlpha(visualDayFraction);

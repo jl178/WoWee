@@ -92,6 +92,10 @@ public:
         /// a torch's reach is a dozen yards, and that little air scatters
         /// little of it.
         float localLightScatter = 8.0f;
+        /// How much of the sunlit air's light goes forward, toward the sun
+        /// (LightingParams::sunDisc): 0 under a sky with no sun disc, where
+        /// it scatters evenly instead of glowing at a sun that is not there.
+        float sunLobe = 1.0f;
     };
 
     VolumetricFog() = default;

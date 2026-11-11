@@ -27,6 +27,13 @@ struct LightingParams {
     /// Under Enhanced's daylight, the sun's light times this
     /// (enhanced_palette::sunIrradianceScale); 1 otherwise. Not blended.
     float sunScale = 1.0f;
+    /// How much of the procedural sun the sky shows: 0 where a sky model
+    /// takes the whole sky (a LightSkybox above 0.99 weight whose flags lack
+    /// bit 2, 0x7f09b0 - Outland's skies, which have a planet and no sun
+    /// disc), easing in from half weight so a zone border does not pop.
+    /// What scatters forward toward the sun (the haze, the mist's lobe)
+    /// scatters evenly in its place. 1 indoors, where no sky is drawn.
+    float sunDisc = 1.0f;
 
     glm::vec3 fogColor{0.5f, 0.6f, 0.7f};          // Fog color
     float fogStart = 100.0f;                        // Fog start distance

@@ -6713,6 +6713,7 @@ void Renderer::renderVolumetricFog() {
     in.time = globalTime;
     in.density = fogExtinction_;
     in.layerBase = fogLayerBase_;
+    in.sunLobe = lightingManager ? lightingManager->getLightingParams().sunDisc : 1.0f;
     volumetricFog_->record(currentCmd, frame, perFrameDescSets[frame], in);
     if (vkCtx) vkCtx->gpuMark(currentCmd, "volumetric fog integrate");
 

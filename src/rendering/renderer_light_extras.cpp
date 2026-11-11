@@ -217,8 +217,13 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
         const int hazeFlags = vkCtx->isHdrScene() ? 8 : 0;
         // Enhanced's air (its global fog layer, docs/re/enhanced-lighting.md
         // 5b): its density per yard, 0 outside Enhanced's daylight.
-        glm::vec4 air(0.0f);
-        if (lightingManager) air.w = lightingManager->getLightingParams().airDensity;
+        // Its r: how much of the sun's light scatters toward the sun, 0 under
+        // a sky with no sun disc (LightingParams::sunDisc, Outland).
+        glm::vec4 air(1.0f, 0.0f, 0.0f, 0.0f);
+        if (lightingManager) {
+            air.w = lightingManager->getLightingParams().airDensity;
+            air.r = lightingManager->getLightingParams().sunDisc;
+        }
         if (sunHaze_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.8f * wx, hazeFlags, air)) {
             vkCtx->gpuMark(cmd, "sun haze");
         }

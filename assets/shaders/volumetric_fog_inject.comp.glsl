@@ -48,7 +48,8 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 rayCorner[4];   // rays one yard deep through uv (0,0), (1,0), (0,1), (1,1)
     mat4 prevViewProj;
     vec4 medium;         // x = density, y = layer base, z = 1 / layer height, w = floor
-    vec4 lighting;       // x = sun scatter, y = local light scatter, z = ambient scatter
+    vec4 lighting;       // x = sun scatter, y = local light scatter, z = ambient scatter,
+                         // w = the forward lobe's share (0 under a sky with no sun disc)
     vec4 drift;          // xyz = how far the mist has blown, w = noise amount
     vec4 jitter;         // xyz = sample point inside the cell, w = history weight
     ivec4 dims;          // xyz = size, w = 0 every cell lit, 1 or 2 only odd or even slices
@@ -259,6 +260,12 @@ void main() {
     // Enhanced's sun is no brighter than its sky (enhanced_02's ring falls to
     // half within 4 degrees), where the lobe laid a wide near-white disc.
     if (enhancedSun) phase = mix(phase, 1.0, kEnhancedSunPullback * smoothstep(0.906, 0.996, cosSun));
+    // Under a sky with no sun disc (Outland's: a sky model takes the whole
+    // sky, LightingParams::sunDisc) there is nothing to scatter toward: the
+    // lobe is left out and the even share kept, so the air is no brighter
+    // elsewhere and there is no glow round a sun that is not drawn.
+    float evenShare = enhancedSun ? 0.5 : 0.35;
+    phase = mix(evenShare, phase, vol.lighting.w);
     vec3 light = fogColor.rgb * vol.lighting.z;
     if (sunUp > 0.0) {
         light += lightColor.rgb * (sunVisibility(p) * phase * sunUp * vol.lighting.x);

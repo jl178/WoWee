@@ -1549,6 +1549,24 @@ median 7.51 ms off, 7.29 ms on - no cost that can be told from the noise
 (+-0.3 ms). It is a dozen ALU operations on foliage pixels only, with no
 texture or shadow reads of its own.
 
+## 9d. No forward scattering under a sky without a sun
+
+Outland's skies have a planet and no sun: a LightSkybox model at full weight
+whose flags lack bit 2 takes the whole procedural sky, sun included
+(0x7f09b0; `LightingManager`'s `replacesSky`). The light still has a
+direction there, and the sun haze and the froxel mist scattered it forward:
+at Hellfire's noon, looking at the planet, 6.2% of the view was white (the
+mist off: the planet shows, nothing white). `LightingParams::sunDisc` is
+now how much of the procedural sun the sky shows - 0 under such a model,
+eased in from half its weight so a border does not pop - and both passes
+leave their forward lobe out by it, keeping the even share (the haze's 0.4,
+the mist's 0.35), so the air away from the planet is no brighter. Hellfire
+noon looking up: mean 0.517 -> 0.199, white 6.2% -> 0%; its ground view
+0.442 -> 0.429; Nagrand 0.526 -> 0.275, white 2.5% -> 0%. Azeroth and
+Northrend (no such model) are unchanged: Goldshire's sky view 0.301 / 0.300,
+Grizzly Hills 0.460 / 0.459, the Goldshire and Barrens views within run
+noise. The HDR row's mid-tone lift outside Enhanced's daylight is untouched.
+
 ## 10. Not done, and why
 
 - Enhanced's ZoneLight polygons (section 2b), and its keyframes for the 11
