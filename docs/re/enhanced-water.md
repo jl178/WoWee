@@ -168,8 +168,11 @@ above:
   that encoding (`T^(1/2.2)`). The body's brightness and hue were set
   numerically against the capture (section 4): the colours keep 15% of their
   saturation, the sky light that reaches into the water is Light.dbc's
-  ambient brightness x 0.58 in a faint green-teal (Light.dbc's ambient is a
-  blue Enhanced's water does not take on), the sun x (0.05 + 0.05 HG(g 0.6))
+  ambient brightness x 0.7 in a faint green-teal (Light.dbc's day ambient
+  is a mild blue Enhanced's water does not take on); as the ambient's chroma
+  rises to the night's the body takes the ambient's own hue and the
+  scattering colours' full saturation (Enhanced's night lakes glow in the
+  blue of the moonlight; section 4), the sun x (0.05 + 0.05 HG(g 0.6))
   through Enhanced's Fresnel transmission and sun gate, one shadow-map tap.
   The sun gate and highlight use the sun sprite's own direction
   (`LightingParams::sunDir`, in the sky colours' `.w` of the water's frame
@@ -372,6 +375,32 @@ and so is the transect from the waterline (the ochre band 91 79 48 ->
 93 81 49 at 16 px, 86 76 51 -> 86 77 51 at 24 px). A first version that
 compared only the bed's depth beside the pixel took the shore's slope for
 an object and greyed the ochre band (to 80 73 63).
+
+**By night (third pass).** Against `yt_moon_055058.png` (Enhanced, a Night
+Elf dock at night: fish, weed and the bed under clear blue water) in the lab
+at Astranaar's lake shore, Ashenvale, 23:00 (`.go xyz 2600 -440 95 1 0`,
+camera 22-35 degrees down at 9-10 yards), the near water's mean colour and
+the bed's visible detail (luma std after a sigma-3 high-pass): Enhanced
+12 61 96 (detail 1.14); before 41 59 46, a murky olive veil; now 35 68 98
+(detail 4.8 - the reference's camera sits at the surface, ours higher, so
+the detail does not compare one to one). The absorption was not the cause:
+the body took only the ambient's brightness in a fixed grey-teal, a grey
+veil over the bed by night. Ashenvale's night ambient is a deep blue
+(chroma ~1.0 of its brightness against ~0.4 for Elwynn's morning), and the
+body now takes its hue and the colours' saturation as the chroma rises.
+
+Reading the absorption columns b g r instead (red first, as in real water)
+also turned the night water blue (34 63 109), but by day it turned Crystal
+Lake's shallows emerald from the waterline (48 81 66 where Enhanced's capture
+of the same lake is ochre, 85 76 52): Enhanced's own day capture keeps them r
+g b.
+
+Crystal Lake by day after the change (the lab's lighting had itself moved
+since the second pass - the Enhanced sun, ambient and air rows - and had put
+the same water shader at ripple 0.372, colour 0.135, shore 6.5): ripple
+0.242 (mid 0.25, fine 0.18, wl x 0.35, wl y 0.19), colour 0.035, shore
+3.9 (bed detail 0.50), with the body at 0.7 of the ambient, its day tint
+0.92 1.05 1.0, and the waves' slope at 0.14.
 
 **Cost** (lab server, Iris Xe, 1280x540, Enhanced preset at noon, the row off
 (HD water) and on in turn, four 8 s pairs a place, `WOWEE_FRAME_PROFILE=1`,

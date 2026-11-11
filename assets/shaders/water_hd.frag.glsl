@@ -347,7 +347,7 @@ const float FW_FLOW_SPEED = 1.4;   // yards a second at full flow
 // of the small waves that keeps an FFT sea's short ripples faint).
 const float FW_LAKE_LMIN = 0.35;
 const float FW_LAKE_LMAX = 8.0;
-const float FW_LAKE_STEEP = 0.065;
+const float FW_LAKE_STEEP = 0.14;
 const float FW_LAKE_WINDL = 0.5;
 const float FW_CROSS = 0.8;
 const float FW_TILT = 0.5;
@@ -489,7 +489,7 @@ vec4 fwSurfaceNormal(vec2 p, vec2 flow, float time, float dist, float waveClass,
 
 // Brightness of the body's light and of the mirrored surroundings, set side
 // by side against Enhanced's Crystal Lake at 9:27 (docs/re/enhanced-water.md 4).
-const float FW_BODY_AMB = 0.58;
+const float FW_BODY_AMB = 0.7;
 // How much of the colours' own saturation the body keeps, and the green of
 // the shore and trees in what the surface mirrors.
 const float FW_ALBEDO_SAT = 0.15;
@@ -499,9 +499,11 @@ const float FW_BODY_SUN = 0.05;
 // docs/re/enhanced-water.md 4: Enhanced's lake bed shows through more water
 // near the shore than its constants over our depth copy give).
 const float FW_CLARITY = 0.7;
-const vec3 FW_SHALLOW_TINT = vec3(0.8, 1.6, 1.05);
 // How far the ripples' height moves the body between Color_2 and Color_1.
 const float FW_CREST_COLOUR = 0.3;
+// Thin water over the bed reads olive in Enhanced's shallows (G over R from a
+// yard or two out); the veil starts in that green.
+const vec3 FW_SHALLOW_TINT = vec3(0.8, 1.6, 1.05);
 const float FW_SURROUND_LIGHT = 0.6;
 const float FW_SURROUND_SHARE = 0.75;
 const float FW_ENV_SAT = 0.1;
@@ -510,7 +512,7 @@ const float FW_SKYLINE = 0.6;
 // The stand-in's brightness between the trees and under the tallest.
 const float FW_TREE_GAP = 1.0;
 const float FW_TREE_SHADE = 0.8;
-const vec3 FW_BODY_TINT = vec3(0.95, 1.05, 0.97);
+const vec3 FW_BODY_TINT = vec3(0.92, 1.05, 1.0);
 // The mirrored sky as a grey, a touch green, and dimmer than Light.dbc's
 // rings (Enhanced's far lake reads 0.86 of ours in luma).
 const vec3 FW_ENV_TINT = vec3(0.81, 0.83, 0.86);
@@ -778,7 +780,17 @@ void main() {
             // contrast.
             float hgt = clamp(0.5 + FW_CREST_COLOUR * fwWave.w, 0.0, 1.0);
             vec3 albedo = mix(L.colLow, L.colHigh, hgt);
-            albedo = mix(vec3(dot(albedo, vec3(0.299, 0.587, 0.114))), albedo, FW_ALBEDO_SAT);
+            // By night the light in the water is the night's own colour:
+            // Enhanced's night lakes glow the blue of the moonlight (its
+            // Night Elf lake near the surface reads 12 61 96), where by day
+            // they keep a grey-teal under a mildly blue ambient. As the
+            // ambient's chroma rises from the day's (about 0.4 of its
+            // brightness) to the night's (about 1.0) the body takes the
+            // ambient's hue and the scattering colours' full saturation.
+            vec3 ambHue = ambientColor.rgb / max(dot(ambientColor.rgb, vec3(0.299, 0.587, 0.114)), 1e-3);
+            float nightBlue = smoothstep(0.5, 0.95, max(ambHue.r, max(ambHue.g, ambHue.b))
+                                                    - min(ambHue.r, min(ambHue.g, ambHue.b)));
+            albedo = mix(vec3(dot(albedo, vec3(0.299, 0.587, 0.114))), albedo, mix(FW_ALBEDO_SAT, 1.0, nightBlue));
             float cosVL = dot(-viewDir, ldir);
             const float g = 0.6;
             float hg = (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * cosVL, 1e-3), 1.5) * 0.25;
@@ -789,16 +801,16 @@ void main() {
             // in the green-teal Enhanced's lakes read as (Light.dbc's ambient
             // is a blue the water's body does not take on in Enhanced).
             float ambL = dot(amb, vec3(0.299, 0.587, 0.114));
-            vec3 inLight = ambL * FW_BODY_TINT * FW_BODY_AMB + sunIn * shadowF * (FW_BODY_SUN + FW_BODY_SUN * hg);
+            vec3 inLight = ambL * mix(FW_BODY_TINT, ambHue, nightBlue) * FW_BODY_AMB + sunIn * shadowF * (FW_BODY_SUN + FW_BODY_SUN * hg);
             // The body grows in over the depth as one veil, not per channel:
             // per channel, blue (gone within a yard) brought the body's full
             // blue over a red-brown bed and the shallows went mauve, where
             // Enhanced's go ochre, then olive, then grey-teal (the capture's
             // shallows read 102 80 50). The bed still loses blue first.
             float veil = 1.0 - dot(T, vec3(0.3, 0.55, 0.15));
-            // Thin water over the bed reads olive in Enhanced's shallows
-            // (G over R from a yard or two out); the veil starts in that
-            // green and turns to the deep body's grey-teal as it thickens.
+            // The veil starts in the shallows' olive and turns to the deep
+            // body's colour as it thickens; what stands in the water takes
+            // none of it.
             vec3 bodyF = albedo * veil * inLight * mix(mix(FW_SHALLOW_TINT, vec3(1.0), veil), vec3(1.0), objectK);
 
             // Reflection: EnvBRDFApprox at F0 0.02 of the environment -
