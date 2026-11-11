@@ -34,7 +34,9 @@
 //   WoweeDebug_TimeOfDay(hours)    hold the world clock at an hour (0..24),
 //                                  or a negative hour for the game's clock
 //   WoweeDebug_SunYaw()            the camera yaw (as Camera takes it) that
-//                                  faces the sun, and the sun's height
+//                                  faces the sun, and the sun's height; then
+//                                  the same for where the scene's light
+//                                  comes from (the moonlight at night)
 //   WoweeDebug_UseObject(name)     right-click the nearest game object of
 //                                  that name (a mailbox, a guild vault)
 //   WoweeDebug_RightClickCorpse()  right-click the targeted corpse (loot,
@@ -308,7 +310,16 @@ int luaDebugSunYaw(lua_State* L) {
     yaw = std::fmod(yaw + 720.0f, 360.0f);
     lua_pushnumber(L, yaw);
     lua_pushnumber(L, glm::degrees(std::asin(glm::clamp(s.z, -1.0f, 1.0f))));
-    return 2;
+    // And where the scene's light (and its shadows) come from, which at
+    // night is the stock light, not the sun: the yaw and the height, taken
+    // above the horizon as the shadow map takes it.
+    glm::vec3 from = -lm->getLightingParams().directionalDir;
+    if (glm::dot(from, from) < 1e-6f) return 2;
+    from = glm::normalize(from.z < 0.0f ? -from : from);
+    float lyaw = glm::degrees(std::atan2(from.y, from.x)) - cc->getFacingYaw();
+    lua_pushnumber(L, std::fmod(lyaw + 720.0f, 360.0f));
+    lua_pushnumber(L, glm::degrees(std::asin(glm::clamp(from.z, -1.0f, 1.0f))));
+    return 4;
 }
 
 /// WoweeDebug_TimeOfDay(hours) - the light and sky held at an hour, so a test
