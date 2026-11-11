@@ -38,6 +38,8 @@ layout(set = 0, binding = 0) uniform PerFrame {
     mat4 nearLightSpaceMatrix;
     vec4 nearShadowParams;
     uvec4 nearShadowMask[32];
+    mat4 detailLightSpaceMatrix;  // shadow_filter.glsli, binding 6
+    vec4 detailShadowParams;
 };
 
 #include "shadow_filter.glsli"

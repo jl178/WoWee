@@ -8,12 +8,18 @@
 //     mat4 nearLightSpaceMatrix;
 //     vec4 nearShadowParams;  // x on, y one texel (uv), z 1 / depth range (yd), w yards per texel
 //     uvec4 nearShadowMask[32];
+//     mat4 detailLightSpaceMatrix;
+//     vec4 detailShadowParams;  // the same four, for the detail map at binding 6
 // and declare viewPos, lightSpaceMatrix, shadowParams, localLightMeta and
 // localLightTileScale (z: the angle one screen pixel spans, radians). The terrain,
 // WMO, M2 and character fragment shaders share it, so the four filter alike.
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
 layout(set = 0, binding = 5) uniform sampler2DShadow uNearShadowMap;
+// The detail map of Enhanced's sun shadows (shadow_cache.hpp): the world's
+// casters over a short square round the player at a fine texel. Read only
+// while detailShadowParams.x is set.
+layout(set = 0, binding = 6) uniform sampler2DShadow uDetailShadowMap;
 
 // One texel of the world map, handed in by the renderer. The map is 512,
 // 1024, 2048 or 4096 a side by the quality setting; this used to be a
@@ -80,13 +86,45 @@ float shadowReceiverOffset(vec3 norm, vec3 ldir) {
     return sqrt(1.0 - c * c);
 }
 
+// The detail map at `pos`: its shadow, and in `w` how much of the answer it
+// gives - 1 well inside its square, easing to 0 over the outer tenth (the
+// world map takes over there, as Enhanced blends its cascades), 0 outside.
+// `spread` is the filter's half-width in texels: four bilinear compares at
+// the corners of a square that wide, from half a texel at the camera (a
+// hard edge, the dapples of cut-out leaves kept) to a texel and a half where
+// a screen pixel spans that much of the map. The receiver offset follows the
+// world map's rule at this map's texel.
+float detailShadowAt(vec3 pos, vec3 norm, float sinA, float spread, out float w) {
+    w = 0.0;
+    float texelYd = detailShadowParams.w;
+    vec3 p = pos + norm * (texelYd * (spread + 1.25) * sinA);
+    vec4 ls = detailLightSpaceMatrix * vec4(p, 1.0);
+    vec2 uv = ls.xy * 0.5 + 0.5;
+    float edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
+    if (edge <= 0.01 || ls.z < 0.0 || ls.z > 1.0) return 1.0;
+    w = smoothstep(0.01, 0.09, edge);
+    float z = ls.z - 0.25 * texelYd * detailShadowParams.z;
+    vec2 o = vec2(spread * detailShadowParams.y);
+    return 0.25 * (texture(uDetailShadowMap, vec3(uv + vec2(-o.x, -o.y), z))
+                 + texture(uDetailShadowMap, vec3(uv + vec2( o.x, -o.y), z))
+                 + texture(uDetailShadowMap, vec3(uv + vec2(-o.x,  o.y), z))
+                 + texture(uDetailShadowMap, vec3(uv + vec2( o.x,  o.y), z)));
+}
+
 // `far` true: one bilinear compare for the world map instead of the filter -
 // where a screen pixel already spans a texel and a half of the map, the
 // filter's width is below what the pixel shows, and the far half of a 2560-
 // wide view is most of its pixels (enhancements-plan.md 3.15).
-float sunShadowAt(vec3 pos, vec3 norm, vec3 ldir, bool far) {
+// `detailSpread`: the detail map's filter half-width (detailShadowAt); 0 or
+// less reads the world map alone.
+float sunShadowAt(vec3 pos, vec3 norm, vec3 ldir, bool far, float detailSpread) {
     float shadow = 1.0;
     float sinA = shadowReceiverOffset(norm, ldir);
+
+    // The detail map first: well inside it the world map is not read.
+    float dw = 0.0;
+    float ds = 1.0;
+    if (detailShadowParams.x > 0.5 && detailSpread > 0.0) ds = detailShadowAt(pos, norm, sinA, detailSpread, dw);
 
     float t = shadowTexel();
     // The world map is orthographic: its first row's length is two over its
@@ -98,11 +136,12 @@ float sunShadowAt(vec3 pos, vec3 norm, vec3 ldir, bool far) {
     vec4 lsPos = lightSpaceMatrix * vec4(biasedPos, 1.0);
     vec3 proj = lsPos.xyz / lsPos.w;
     proj.xy = proj.xy * 0.5 + 0.5;
-    if (proj.x >= 0.0 && proj.x <= 1.0 && proj.y >= 0.0 && proj.y <= 1.0 && proj.z >= 0.0 && proj.z <= 1.0) {
+    if (dw < 1.0 && proj.x >= 0.0 && proj.x <= 1.0 && proj.y >= 0.0 && proj.y <= 1.0 && proj.z >= 0.0 && proj.z <= 1.0) {
         float bias = 0.25 * texelYd * length(row2);
         shadow = far ? texture(uShadowMap, vec3(proj.xy, proj.z - bias))
                      : shadowFilter(uShadowMap, vec3(proj.xy, proj.z - bias), t, false);
     }
+    shadow = mix(shadow, ds, dw);
 
     // Already wholly in the world's shadow, a unit's can add nothing.
     if (nearShadowParams.x > 0.5 && shadow > 0.0) {
@@ -124,15 +163,69 @@ float sunShadowAt(vec3 pos, vec3 norm, vec3 ldir, bool far) {
     return shadow;
 }
 
+float sunShadowAt(vec3 pos, vec3 norm, vec3 ldir, bool far) {
+    return sunShadowAt(pos, norm, ldir, far, 1.0);
+}
+
 // The surfaces' entry. A pixel's footprint is its distance times the angle
 // one pixel spans (localLightTileScale.z, set every frame), grown on a
 // surface seen at a slant; no derivatives, so it is safe after a discard.
-float sunShadow(vec3 pos, vec3 norm, vec3 ldir) {
+float sunShadow(vec3 pos, vec3 norm, vec3 ldir, bool worldOnly) {
     vec3 row0 = vec3(lightSpaceMatrix[0][0], lightSpaceMatrix[1][0], lightSpaceMatrix[2][0]);
     float texelYd = 2.0 * shadowTexel() / max(length(row0), 1e-9);
     vec3 toEye = viewPos.xyz - pos;
     float dist = length(toEye);
     float slant = max(abs(dot(norm, toEye)) / max(dist, 1e-4), 0.25);
     float pixelYd = dist * localLightTileScale.z / slant;
-    return sunShadowAt(pos, norm, ldir, localLightTileScale.z > 0.0 && pixelYd > 1.5 * texelYd);
+    // The detail map's filter widens with the pixel's footprint on it.
+    float spread = detailShadowParams.w > 0.0 && localLightTileScale.z > 0.0
+        ? clamp(pixelYd / detailShadowParams.w, 0.5, 1.5) : 1.0;
+    if (worldOnly) spread = 0.0;
+    return sunShadowAt(pos, norm, ldir, localLightTileScale.z > 0.0 && pixelYd > 1.5 * texelYd, spread);
+}
+
+float sunShadow(vec3 pos, vec3 norm, vec3 ldir) {
+    return sunShadow(pos, norm, ldir, false);
+}
+
+// One bilinear compare a map, for what is drawn by the hundred thousand and
+// small on screen - the grass field's blades (grass.frag), lit from straight
+// up as the ground under them is: the detail map where it covers the blade,
+// else the world map, and the unit map where its mask says a unit's shade
+// can fall. the reference client's clutter takes its shadow so: one SampleCmp on the
+// cascade (detaildoodad.bls).
+float sunShadowCheap(vec3 pos, vec3 ldir) {
+    // Lifted off the ground it stands on by the world map's rule for an
+    // upward normal, at each map's texel.
+    float sinA = shadowReceiverOffset(vec3(0.0, 0.0, 1.0), ldir);
+    float shadow = 1.0;
+    bool done = false;
+    if (detailShadowParams.x > 0.5) {
+        vec4 ls = detailLightSpaceMatrix * vec4(pos + vec3(0.0, 0.0, 2.0 * detailShadowParams.w * sinA), 1.0);
+        vec2 uv = ls.xy * 0.5 + 0.5;
+        float edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
+        if (edge > 0.05 && ls.z >= 0.0 && ls.z <= 1.0) {
+            shadow = texture(uDetailShadowMap, vec3(uv, ls.z - 0.25 * detailShadowParams.w * detailShadowParams.z));
+            done = true;
+        }
+    }
+    if (!done) {
+        vec3 row0 = vec3(lightSpaceMatrix[0][0], lightSpaceMatrix[1][0], lightSpaceMatrix[2][0]);
+        vec3 row2 = vec3(lightSpaceMatrix[0][2], lightSpaceMatrix[1][2], lightSpaceMatrix[2][2]);
+        float texelYd = 2.0 * shadowTexel() / max(length(row0), 1e-9);
+        vec4 lsPos = lightSpaceMatrix * vec4(pos + vec3(0.0, 0.0, 2.0 * texelYd * sinA), 1.0);
+        vec3 proj = lsPos.xyz / lsPos.w;
+        proj.xy = proj.xy * 0.5 + 0.5;
+        if (proj.x >= 0.0 && proj.x <= 1.0 && proj.y >= 0.0 && proj.y <= 1.0 && proj.z >= 0.0 && proj.z <= 1.0)
+            shadow = texture(uShadowMap, vec3(proj.xy, proj.z - 0.25 * texelYd * length(row2)));
+    }
+    if (nearShadowParams.x > 0.5 && shadow > 0.0) {
+        vec4 ns = nearLightSpaceMatrix * vec4(pos + vec3(0.0, 0.0, 2.0 * nearShadowParams.w * sinA), 1.0);
+        vec2 nuv = ns.xy / ns.w * 0.5 + 0.5;
+        float nz = ns.z / ns.w;
+        if (nuv.x >= 0.0 && nuv.x < 1.0 && nuv.y >= 0.0 && nuv.y < 1.0 && nz >= 0.0 && nz <= 1.0 &&
+            nearShadowCell(nuv))
+            shadow = min(shadow, texture(uNearShadowMap, vec3(nuv, nz - 0.5 * nearShadowParams.w * nearShadowParams.z)));
+    }
+    return shadow;
 }

@@ -1937,6 +1937,25 @@ std::shared_ptr<PendingTile> TerrainManager::getCachedTile(const TileCoord& coor
     it->second.lruIt = tileCacheLru_.begin();
     return it->second.tile;
 }
+void TerrainManager::gatherClutterNear(const glm::vec3& centre, float radius,
+                                       std::vector<uint32_t>& out) const {
+    for (const auto& [coord, tile] : loadedTiles) {
+        (void)coord;
+        if (!tile || tile->clutterLive == 0) continue;
+        if (centre.x + radius < tile->minX || centre.x - radius > tile->maxX ||
+            centre.y + radius < tile->minY || centre.y - radius > tile->maxY) continue;
+        for (size_t c = 0; c < 256; ++c) {
+            const auto& ids = tile->clutterChunkIds[c];
+            if (ids.empty() || tile->clutterChunkRetired[c]) continue;
+            const glm::vec4& b = tile->clutterChunkBounds[c];
+            const float dx = std::max({b.x - centre.x, 0.0f, centre.x - b.z});
+            const float dy = std::max({b.y - centre.y, 0.0f, centre.y - b.w});
+            if (dx * dx + dy * dy > radius * radius) continue;
+            out.insert(out.end(), ids.begin(), ids.end());
+        }
+    }
+}
+
 void TerrainManager::streamGroundClutter(const glm::vec3& cameraPos) {
     if (!m2Renderer) return;
     // Clutter draws out to the clutter distance setting and no further, so

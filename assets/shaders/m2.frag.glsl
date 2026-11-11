@@ -26,6 +26,8 @@ layout(set = 0, binding = 0) uniform PerFrame {
     mat4 nearLightSpaceMatrix;  // shadow_filter.glsli
     vec4 nearShadowParams;
     uvec4 nearShadowMask[32];
+    mat4 detailLightSpaceMatrix;  // shadow_filter.glsli, binding 6
+    vec4 detailShadowParams;
 };
 
 #include "rt_lighting.glsli"
@@ -415,7 +417,14 @@ void main() {
         // light through it sees the difference.
         bool leafLight = isFoliage && !wmoInterior && (localLightMeta.z & 64) != 0;
         if (shadowParams.x > 0.5 && !wmoInterior) {
-            shadow = sunShadow(FragPos, (leafLight && nDotL < 0.0) ? -norm : norm, ldir);
+            // Clutter casts into the detail map (Enhanced's sun shadows), and a
+            // tuft's card is lit with the ground's normal, which lies in the
+            // card: read a quarter yard toward the sun, out of its own card.
+            vec3 shadowPos = groundDetail && detailShadowParams.x > 0.5 ? FragPos + ldir * 0.25 : FragPos;
+            // Leaves take the world map's shade alone: the crowns' light (and
+            // the light through them) was matched to Enhanced's with it, and
+            // the detail map's is for what the crowns throw on the ground.
+            shadow = sunShadow(shadowPos, (leafLight && nDotL < 0.0) ? -norm : norm, ldir, isFoliage);
             shadow = mix(1.0, shadow, shadowParams.y);
         }
 

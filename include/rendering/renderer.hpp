@@ -616,6 +616,30 @@ private:
     NearShadowMask nearShadowMask_;
     std::vector<glm::vec4> nearCasterSpheres_;
     uint32_t nearSphereSplit_[2] = {};  ///< where the units' and doodads' spheres end
+    /// The detail map of Enhanced's sun shadows (shadow_cache.hpp,
+    /// enh_.enhancedShadows): two images made on first use, the front one
+    /// read at binding 6 and the other drawn into whole when the player has
+    /// walked or the sun turned, then the two swap. Until they exist binding
+    /// 6 holds the unit map's view and the block says the map is off.
+    VkImage shadowDetailImage[2] = {};
+    VmaAllocation shadowDetailAlloc[2] = {};
+    VkImageView shadowDetailView[2] = {};
+    VkFramebuffer shadowDetailFramebuffer[2] = {};
+    VkImageLayout shadowDetailLayout_[2] = {};
+    uint32_t shadowDetailFront_ = 0;
+    VkImageView shadowDetailBoundView_[2] = {};  ///< what binding 6 of each slot's sets holds
+    WorldShadowCacheKey shadowDetailKey_;         ///< what the front one was drawn for
+    ShadowProjection shadowDetailProj_;           ///< and its projection
+    bool shadowDetailDrawThisFrame_ = false;
+    bool shadowDetailReadable_ = false;           ///< the front one serves this frame
+    uint32_t shadowDetailRedraws_ = 0;           ///< said with the world map's redraw counts
+    std::vector<uint32_t> shadowDetailClutter_;
+    bool ensureDetailShadowMaps();
+    void destroyDetailShadowMaps();
+    void bindDetailShadowMap(uint32_t slot);
+    /// Decided in planShadowFrame, after the world map's plan.
+    void planDetailShadow(const glm::vec3& player, const glm::vec3& sunDir, double now);
+    void renderDetailShadow();
     /// The unit map's units, recorded on a frame worker into a secondary
     /// command buffer (startUnitShadowRecording) while the main thread fills
     /// the per-frame block and records the culls; renderShadowPass waits for

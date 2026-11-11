@@ -518,3 +518,25 @@ TEST_CASE("Enhanced shade: fxaa.frag reads its tint and chroma as the push block
     CHECK(src.find("pc.enhancedShade.rgb") != std::string::npos);
 }
 #endif
+
+TEST_CASE("Enhanced's sun shadows: its row, the Enhanced preset, the shader bit", "[enhanced]") {
+    using namespace wowee::ui;
+    const EnhancementRow* row = findEnhancementRow("enhancedshadows");
+    REQUIRE(row != nullptr);
+    CHECK(std::string(row->category) == kEnhPageEnhanced);
+    CHECK(row->stockValue == 0.0f);
+    CHECK(Enhancements{}.enhancedShadows == false);
+    CHECK(kGraphicsPresets[kEnhancedPresetIndex].enh.enhancedShadows);
+    for (int i = 0; i <= kClassicPresetIndex; ++i) CHECK_FALSE(kGraphicsPresets[i].enh.enhancedShadows);
+    // Off adds no bit, so the grass is lit exactly as before.
+    CHECK((shaderBits(Enhancements{}) & enh_bits::kEnhancedShadows) == 0u);
+    Enhancements e;
+    e.enhancedShadows = true;
+    CHECK((shaderBits(e) & enh_bits::kEnhancedShadows) == 512u);
+
+    std::ifstream f(std::string(WOWEE_SOURCE_DIR) + "/assets/shaders/grass.frag.glsl");
+    REQUIRE(f.good());
+    std::stringstream ss;
+    ss << f.rdbuf();
+    CHECK(ss.str().find("(localLightMeta.z & 512) != 0") != std::string::npos);
+}

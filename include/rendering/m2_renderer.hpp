@@ -883,6 +883,15 @@ public:
     /// The sky height field (sky_height_field.hpp) draws the static casters
     /// from above with this set, so they do not count as the world map's.
     void setShadowCountQuiet(bool quiet) { shadowCountQuiet_ = quiet; }
+    /// For the next renderShadow calls (the detail map of Enhanced's sun
+    /// shadows, which is kept between frames): `still` draws the foliage
+    /// without its wind, so a kept map holds the leaves where the next one
+    /// will; `clutter`, when given, is ground clutter instance ids drawn as
+    /// alpha-tested casters as well (they are no candidates of their own).
+    void setShadowDetailDraw(bool still, const std::vector<uint32_t>* clutter) {
+        shadowStill_ = still;
+        shadowClutterIds_ = clutter;
+    }
     void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, float globalTime = 0.0f,
                       const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f,
                       ShadowCasterSet casters = ShadowCasterSet::All,
@@ -1319,6 +1328,10 @@ private:
     /// renderShadow is drawing something other than the sun's world map (the
     /// sky height field): its caster count says nothing about the map's.
     bool shadowCountQuiet_ = false;
+    /// See setShadowDetailDraw.
+    bool shadowStill_ = false;
+    const std::vector<uint32_t>* shadowClutterIds_ = nullptr;
+    std::vector<std::pair<uint32_t, uint32_t>> shadowClutterCasters_;
     VkPipeline alphaTestPipeline_ = VK_NULL_HANDLE;     // blend mode 1
     VkPipeline alphaPipeline_ = VK_NULL_HANDLE;         // blend mode 2
     VkPipeline additivePipeline_ = VK_NULL_HANDLE;      // blend mode 4 (SrcAlpha, One)

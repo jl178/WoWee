@@ -317,7 +317,7 @@ bool Renderer::createPerFrameResources() {
 
     // --- Create descriptor set layout for set 0 (per-frame UBO + shadow sampler + fog volume
     //     + ray traced lighting) ---
-    VkDescriptorSetLayoutBinding bindings[6]{};
+    VkDescriptorSetLayoutBinding bindings[7]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[0].descriptorCount = 1;
@@ -361,10 +361,17 @@ bool Renderer::createPerFrameResources() {
     bindings[5].descriptorCount = 1;
     bindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     bindings[5].pImmutableSamplers = &shadowSampler;
+    // The detail map of Enhanced's sun shadows (shadow_filter.glsli), compared
+    // like binding 1; the unit map's view until it exists (bindDetailShadowMap).
+    bindings[6].binding = 6;
+    bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[6].descriptorCount = 1;
+    bindings[6].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[6].pImmutableSamplers = &shadowSampler;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 6;
+    layoutInfo.bindingCount = 7;
     layoutInfo.pBindings = bindings;
 
     if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &perFrameSetLayout) != VK_SUCCESS) {
@@ -377,7 +384,7 @@ bool Renderer::createPerFrameResources() {
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = MAX_FRAMES * 2; // normal frames + reflection frames
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = MAX_FRAMES * 2 * 5;  // two shadow maps, fog, two RT results, per set
+    poolSizes[1].descriptorCount = MAX_FRAMES * 2 * 6;  // three shadow maps, fog, two RT results, per set
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -452,13 +459,16 @@ bool Renderer::createPerFrameResources() {
         rtImgInfo[1].imageView = rtLighting_->giViewForSlot(i);
         rtImgInfo[0].imageLayout = rtImgInfo[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        VkWriteDescriptorSet writes[6]{};
+        VkWriteDescriptorSet writes[7]{};
         writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[5].dstSet = perFrameDescSets[i];
         writes[5].dstBinding = 5;
         writes[5].descriptorCount = 1;
         writes[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         writes[5].pImageInfo = &nearImgInfo;
+        writes[6] = writes[5];
+        writes[6].dstBinding = 6;
+        shadowDetailBoundView_[i] = shadowNearView[i];
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].dstSet = perFrameDescSets[i];
         writes[0].dstBinding = 0;
@@ -486,7 +496,7 @@ bool Renderer::createPerFrameResources() {
             writes[3 + b].pImageInfo = &rtImgInfo[b];
         }
 
-        vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 7, writes, 0, nullptr);
     }
 
     // --- Create reflection per-frame UBO and descriptor set ---
@@ -550,13 +560,15 @@ bool Renderer::createPerFrameResources() {
             rtImgInfo.imageView = rtLighting_->neutralView();
             rtImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-            VkWriteDescriptorSet writes[6]{};
+            VkWriteDescriptorSet writes[7]{};
             writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[5].dstSet = reflPerFrameDescSet[i];
             writes[5].dstBinding = 5;
             writes[5].descriptorCount = 1;
             writes[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             writes[5].pImageInfo = &nearImgInfo;
+            writes[6] = writes[5];
+            writes[6].dstBinding = 6;
             writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[0].dstSet = reflPerFrameDescSet[i];
             writes[0].dstBinding = 0;
@@ -584,7 +596,7 @@ bool Renderer::createPerFrameResources() {
                 writes[b].pImageInfo = &rtImgInfo;
             }
 
-            vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
+            vkUpdateDescriptorSets(device, 7, writes, 0, nullptr);
         }
     }
 
@@ -644,6 +656,7 @@ void Renderer::destroyPerFrameResources() {
         shadowNearLayout_[i] = VK_IMAGE_LAYOUT_UNDEFINED;
         shadowBoundView_[i] = VK_NULL_HANDLE;
     }
+    destroyDetailShadowMaps();
     shadowFront_ = 0;
     shadowFrontKey_ = {};
     shadowRedraw_ = {};
@@ -723,6 +736,16 @@ void Renderer::updatePerFrameUBO() {
             nearShadowProj_.texelWorld);
     } else {
         currentFrameData.nearShadowParams = glm::vec4(0.0f);
+    }
+    // The detail map (Enhanced's sun shadows), when it serves this frame.
+    if (shadowDetailReadable_ && shadowsEnabled && enh_.enhancedShadows) {
+        currentFrameData.detailLightSpaceMatrix = shadowDetailProj_.matrix;
+        currentFrameData.detailShadowParams = glm::vec4(
+            1.0f, 1.0f / static_cast<float>(kDetailShadowMapSize),
+            shadowDetailProj_.depthRange > 0.0f ? 1.0f / shadowDetailProj_.depthRange : 0.0f,
+            shadowDetailProj_.texelWorld);
+    } else {
+        currentFrameData.detailShadowParams = glm::vec4(0.0f);
     }
     // y is how dark the shadow is, and the sky decides it: Light.dbc's shadow
     // band through LightingManager, times the player's Shadow darkness. It
@@ -5652,6 +5675,8 @@ void Renderer::planShadowFrame() {
     shadowPartsThisFrame_ = 0;
     shadowRedrawEndsThisFrame_ = false;
     nearShadowOn_ = false;
+    shadowDetailDrawThisFrame_ = false;
+    shadowDetailReadable_ = false;
     static const bool castersWhenOff = core::envFlagEnabled("WOWEE_SHADOW_CASTERS_WHEN_OFF", false);
     // WOWEE_SHADOW_SPLIT=0 draws one map with every caster every frame, as
     // before the split; the frame then reads the image it has just drawn.
@@ -5745,6 +5770,8 @@ void Renderer::planShadowFrame() {
     lightSpaceMatrix = shadowFrontKey_.valid || !split ? shadowFrontMatrix_ : glm::mat4(0.0f);
     shadowCenter = shadowFrontCenter_;
     bindWorldShadowMap(slot);
+    if (split && shadowsEnabled) planDetailShadow(player, sunDir, now);
+    bindDetailShadowMap(slot);
 
     // Said every half minute at info: how often the kept map is drawn again,
     // and why. A count climbing while standing still is a world change
@@ -5754,7 +5781,8 @@ void Renderer::planShadowFrame() {
         lastLog = now;
         LOG_INFO("Shadow world map redraws: at once ", shadowRedrawCounts_[0], ", walked ",
                  shadowRedrawCounts_[1], ", sun ", shadowRedrawCounts_[2], ", world changed ",
-                 shadowRedrawCounts_[3], "; unit map ", SHADOW_NEAR_SIZE, " over +-",
+                 shadowRedrawCounts_[3], "; detail map ", shadowDetailRedraws_, " (", shadowDetailClutter_.size(), " clutter)",
+                 "; unit map ", SHADOW_NEAR_SIZE, " over +-",
                  nearShadowProj_.halfExtent, " yd, ", nearCasterSpheres_.size(),
                  " casters last frame (units ", nearSphereSplit_[0], ", doodads ",
                  nearSphereSplit_[1] - nearSphereSplit_[0], ", mean radius ", [this] {
@@ -6232,6 +6260,179 @@ bool shadowCasterAllowed(const char* what) {
 }
 }  // namespace
 
+bool Renderer::ensureDetailShadowMaps() {
+    if (shadowDetailImage[0] != VK_NULL_HANDLE) return true;
+    if (!vkCtx || shadowRenderPass == VK_NULL_HANDLE) return false;
+    VkDevice device = vkCtx->getDevice();
+    VkImageCreateInfo imgCI{};
+    imgCI.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imgCI.imageType = VK_IMAGE_TYPE_2D;
+    imgCI.format = shadowDepthFormat();
+    imgCI.extent = {.width = kDetailShadowMapSize, .height = kDetailShadowMapSize, .depth = 1};
+    imgCI.mipLevels = 1;
+    imgCI.arrayLayers = 1;
+    imgCI.samples = VK_SAMPLE_COUNT_1_BIT;
+    imgCI.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imgCI.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    VmaAllocationCreateInfo allocCI{};
+    allocCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+    VkImageViewCreateInfo viewCI{};
+    viewCI.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewCI.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewCI.format = shadowDepthFormat();
+    viewCI.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0, .levelCount = 1,
+                               .baseArrayLayer = 0, .layerCount = 1};
+    VkFramebufferCreateInfo fbCI{};
+    fbCI.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbCI.renderPass = shadowRenderPass;
+    fbCI.attachmentCount = 1;
+    fbCI.width = kDetailShadowMapSize;
+    fbCI.height = kDetailShadowMapSize;
+    fbCI.layers = 1;
+    for (uint32_t i = 0; i < 2; ++i) {
+        if (vmaCreateImage(vkCtx->getAllocator(), &imgCI, &allocCI, &shadowDetailImage[i],
+                           &shadowDetailAlloc[i], nullptr) != VK_SUCCESS) {
+            LOG_ERROR("Failed to create the detail shadow image");
+            destroyDetailShadowMaps();
+            return false;
+        }
+        shadowDetailLayout_[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+        viewCI.image = shadowDetailImage[i];
+        if (vkCreateImageView(device, &viewCI, nullptr, &shadowDetailView[i]) != VK_SUCCESS) {
+            LOG_ERROR("Failed to create the detail shadow image view");
+            destroyDetailShadowMaps();
+            return false;
+        }
+        fbCI.pAttachments = &shadowDetailView[i];
+        if (vkCreateFramebuffer(device, &fbCI, nullptr, &shadowDetailFramebuffer[i]) != VK_SUCCESS) {
+            LOG_ERROR("Failed to create the detail shadow framebuffer");
+            destroyDetailShadowMaps();
+            return false;
+        }
+    }
+    shadowDetailFront_ = 0;
+    shadowDetailKey_ = {};
+    LOG_INFO("Detail shadow map made (", kDetailShadowMapSize, " over +-", kDetailShadowHalfExtent, " yd)");
+    return true;
+}
+
+void Renderer::destroyDetailShadowMaps() {
+    if (!vkCtx) return;
+    VkDevice device = vkCtx->getDevice();
+    for (uint32_t i = 0; i < 2; ++i) {
+        if (shadowDetailFramebuffer[i]) { vkDestroyFramebuffer(device, shadowDetailFramebuffer[i], nullptr); shadowDetailFramebuffer[i] = VK_NULL_HANDLE; }
+        if (shadowDetailView[i]) { vkDestroyImageView(device, shadowDetailView[i], nullptr); shadowDetailView[i] = VK_NULL_HANDLE; }
+        if (shadowDetailImage[i]) { vmaDestroyImage(vkCtx->getAllocator(), shadowDetailImage[i], shadowDetailAlloc[i]); shadowDetailImage[i] = VK_NULL_HANDLE; shadowDetailAlloc[i] = VK_NULL_HANDLE; }
+        shadowDetailLayout_[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+        shadowDetailBoundView_[i] = VK_NULL_HANDLE;
+    }
+    shadowDetailKey_ = {};
+    shadowDetailReadable_ = false;
+    shadowDetailDrawThisFrame_ = false;
+}
+
+// Binding 6 of this slot's sets: the front detail map once it is drawn and
+// serves this frame, else the slot's unit map (never sampled then: the
+// block's detailShadowParams.x is 0). Rewritten only when it changes, at the
+// start of the slot's frame (its fence waited on), as bindWorldShadowMap.
+void Renderer::bindDetailShadowMap(uint32_t slot) {
+    if (slot >= MAX_FRAMES || !vkCtx) return;
+    VkImageView view = shadowNearView[slot];
+    const uint32_t f = shadowDetailFront_;
+    if (shadowDetailView[f] != VK_NULL_HANDLE && (shadowDetailReadable_ || shadowDetailDrawThisFrame_))
+        view = shadowDetailView[f];
+    if (view == VK_NULL_HANDLE || shadowDetailBoundView_[slot] == view) return;
+    VkDescriptorImageInfo info{};
+    info.imageView = view;
+    info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet writes[2]{};
+    const VkDescriptorSet sets[2] = {perFrameDescSets[slot], reflPerFrameDescSet[slot]};
+    uint32_t n = 0;
+    for (VkDescriptorSet set : sets) {
+        if (set == VK_NULL_HANDLE) continue;
+        writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[n].dstSet = set;
+        writes[n].dstBinding = 6;
+        writes[n].descriptorCount = 1;
+        writes[n].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[n].pImageInfo = &info;
+        ++n;
+    }
+    if (n) vkUpdateDescriptorSets(vkCtx->getDevice(), n, writes, 0, nullptr);
+    shadowDetailBoundView_[slot] = view;
+}
+
+// Whether the detail map is drawn this frame, and whether it is read. It is
+// drawn whole on a frame no part of the world map is - the doodads' static
+// caster list and this slot's caster buffer hold one map's casters at a time
+// (see renderSkyField) - into the back image, and the two swap before
+// anything reads them, so this frame reads it already.
+void Renderer::planDetailShadow(const glm::vec3& player, const glm::vec3& sunDir, double now) {
+    if (!enh_.enhancedShadows) return;
+    // WOWEE_DETAIL_SHADOW=0: the row without its map (the grass still takes
+    // the world map's shadow), for side-by-side work and for its cost.
+    static const bool kOn = core::envFlagEnabled("WOWEE_DETAIL_SHADOW", true);
+    if (!kOn || shadowsSkippedByEnv() || (passAblation_ && passAblation_->skip(AblationPass::Shadows))) return;
+    if (!ensureDetailShadowMaps()) return;
+    const uint64_t content = shadowContentKey();
+    const WorldShadowRedraw need = detailShadowRedrawNeeded(shadowDetailKey_, player, sunDir,
+                                                            kDetailShadowHalfExtent, content, now);
+    const bool frameFree = shadowPartsThisFrame_ == 0 && !shadowRedraw_.active && shadowFrontKey_.valid;
+    if (need != WorldShadowRedraw::None && frameFree) {
+        shadowDetailFront_ = 1u - shadowDetailFront_;
+        shadowDetailProj_ = detailShadowProjection(player, sunDir, shadowDistance_);
+        shadowDetailKey_ = WorldShadowCacheKey{.valid = true, .center = player, .sunDir = sunDir,
+                                               .shadowDistance = kDetailShadowHalfExtent,
+                                               .content = content, .drawnAt = now};
+        shadowDetailDrawThisFrame_ = true;
+        shadowDetailReadable_ = true;
+        ++shadowDetailRedraws_;
+        return;
+    }
+    shadowDetailReadable_ = need != WorldShadowRedraw::Now &&
+                            shadowDetailLayout_[shadowDetailFront_] == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+}
+
+void Renderer::renderDetailShadow() {
+    const uint32_t target = shadowDetailFront_;
+    if (shadowDetailImage[target] == VK_NULL_HANDLE || currentCmd == VK_NULL_HANDLE) return;
+    const ShadowProjection& proj = shadowDetailProj_;
+    const auto timed = [this](const char* stage, auto&& fn) {
+        const auto t0 = std::chrono::steady_clock::now();
+        fn();
+        if (stageSink_) stageSink_(stage, std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    };
+    beginShadowTarget(shadowDetailImage[target], shadowDetailView[target], shadowDetailFramebuffer[target],
+                      kDetailShadowMapSize, shadowDetailLayout_[target], true);
+    // The terrain and the buildings culled to the map's own footprint, at any
+    // depth toward the sun (a ridge far along the light shades the square);
+    // the radius bounds only the depth past the player.
+    const float reach = proj.halfExtent * 1.5f;
+    if (terrainRenderer && shadowCasterAllowed("terrain"))
+        timed("shadow/detail terrain", [&] { terrainRenderer->renderShadow(currentCmd, proj.matrix, proj.center, reach); });
+    if (wmoRenderer && shadowCasterAllowed("wmo"))
+        // Buildings within 250 yd (WMORenderer culls by a sphere): a low sun
+        // throws a house's shadow that far.
+        timed("shadow/detail wmo", [&] { wmoRenderer->renderShadow(currentCmd, proj.matrix, proj.center, 250.0f, ShadowCasterSet::Static); });
+    if (m2Renderer && shadowCasterAllowed("m2") && worldShadowCullRadius_ > 0.0f) {
+        timed("shadow/detail m2", [&] {
+            shadowDetailClutter_.clear();
+            if (terrainManager) terrainManager->gatherClutterNear(proj.center, kDetailClutterReach, shadowDetailClutter_);
+            m2Renderer->setShadowCountQuiet(true);
+            m2Renderer->setShadowDetailDraw(true, &shadowDetailClutter_);
+            // The world map's centre and radius keep the doodads' candidate
+            // list; the static list is culled again for this matrix (and
+            // again for the world map's at its next part).
+            m2Renderer->renderShadow(currentCmd, proj.matrix, globalTime, worldShadowCullCentre_,
+                                     worldShadowCullRadius_, ShadowCasterSet::Static);
+            m2Renderer->setShadowDetailDraw(false, nullptr);
+            m2Renderer->setShadowCountQuiet(false);
+        });
+    }
+    endShadowTarget(shadowDetailImage[target], shadowDetailLayout_[target]);
+    vkCtx->gpuMark(currentCmd, "shadow detail map");
+}
+
 bool Renderer::unitMapDrawsThisFrame() const {
     if (shadowsSkippedByEnv()) return false;
     if (passAblation_ && passAblation_->skip(AblationPass::Shadows)) return false;
@@ -6433,7 +6634,11 @@ void Renderer::renderShadowPass() {
 
     // The sky height field, when due: after the world map and before the
     // unit map (see renderSkyField).
-    if (shadowSplit_ && !shadowRedraw_.active && shadowPartsThisFrame_ == 0) {
+    // The detail map, when due (planDetailShadow), on a frame with no world
+    // map part; the sky field waits for the next such frame.
+    if (shadowDetailDrawThisFrame_) {
+        timed("shadow/detail", [&] { renderDetailShadow(); });
+    } else if (shadowSplit_ && !shadowRedraw_.active && shadowPartsThisFrame_ == 0) {
         timed("shadow/sky field", [&] { renderSkyField(); });
     }
 

@@ -3615,6 +3615,10 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     // verdict as it was. Infinite where the verdict does not depend on the
     // centre or the matrix at all (flags, no model, a spell effect).
     constexpr float kSlackInf = std::numeric_limits<float>::infinity();
+    // The orthographic map's NDC units per yard across the light.
+    const float lightScaleXY = shadowStill_ ? glm::length(glm::vec3(lightSpaceMatrix[0][0], lightSpaceMatrix[1][0],
+                                                                    lightSpaceMatrix[2][0]))
+                                            : 0.0f;
     // |pos - centre| in float carries ~1e-3 yd of error at world coordinates
     // of ~1e4; the clip coordinates sum terms of ~1e2 into ~1, ~1e-5 each.
     constexpr float kDistAllow = 0.02f;
@@ -3683,7 +3687,13 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         // Orthographic projection: w == 1, NDC directly comparable.
         // Inflate by the model's bounding sphere converted to NDC
         // (shadowRadius ≈ frustum half-extent; overshoot is harmless).
-        const float margin = (model.boundRadius * instance.scale) / shadowRadius * 1.5f;
+        // A map narrower than the radius it is asked with (the detail map of
+        // Enhanced's sun shadows, asked with the world map's) takes the margin
+        // from its own scale, or a crown standing just off its edge would
+        // leave its shade out of it. Only for that draw (setShadowDetailDraw):
+        // the other maps keep their cull as it was.
+        const float margin = std::max((model.boundRadius * instance.scale) / shadowRadius * 1.5f,
+                                      model.boundRadius * instance.scale * lightScaleXY);
         const float lim = 1.0f + margin;
         const float ax = std::abs(clip.x), ay = std::abs(clip.y);
         const float zLo = clip.z + margin, zHi = 1.0f + margin - clip.z;
@@ -3813,6 +3823,25 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
     for (auto& bucket : shadowCasters_) {
         std::sort(bucket.begin(), bucket.end());
     }
+    // Ground clutter near the player, for the detail map only
+    // (setShadowDetailDraw): the stock client cast none, and the world map
+    // still casts none. Light-space box only; the caller picked the ids by
+    // distance.
+    shadowClutterCasters_.clear();
+    if (shadowClutterIds_) {
+        for (uint32_t id : *shadowClutterIds_) {
+            const auto it = instanceIndexById.find(id);
+            if (it == instanceIndexById.end() || it->second >= instances.size()) continue;
+            const M2Instance& inst = instances[it->second];
+            if (!inst.cachedIsValid || !inst.cachedModel || inst.cachedModel->isSpellEffect) continue;
+            const glm::vec4 clip = lightSpaceMatrix * glm::vec4(inst.position, 1.0f);
+            const float margin = inst.cachedPaddedRadius * lightScaleXY + 0.01f;
+            if (std::abs(clip.x) > 1.0f + margin || std::abs(clip.y) > 1.0f + margin ||
+                clip.z < -margin || clip.z > 1.0f + margin) continue;
+            shadowClutterCasters_.emplace_back(inst.modelId, it->second);
+        }
+        std::sort(shadowClutterCasters_.begin(), shadowClutterCasters_.end());
+    }
 
     // The static casters' matrices go to the front of this frame slot's
     // buffer once per build of the list, not every frame: an unmoved
@@ -3858,7 +3887,8 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
 
         // One model's casters, groupSize matrices from casterBase in the
         // caster buffer; every batch draws them all with one instanced draw.
-        const auto drawGroup = [&](const M2ModelGPU& model, uint32_t casterBase, uint32_t groupSize) {
+        const auto drawGroup = [&](const M2ModelGPU& model, uint32_t casterBase, uint32_t groupSize,
+                                   bool clutter = false) {
             // Once per model, not once per instance: the bend comes from the
             // model's own bounds and its kind, and so do the buffers.
             //
@@ -3869,7 +3899,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
             // either - they used to get the tree trunk sway here regardless.
             // 1 = tree wind, 2 = canvas flutter along the normal.
             const M2Sway sway = swayOfModel(model, false);
-            const int swayFlag = sway.mode == 1 ? 1 : (sway.mode == 5 ? 2 : 0);
+            const int swayFlag = shadowStill_ ? 0 : (sway.mode == 1 ? 1 : (sway.mode == 5 ? 2 : 0));
             const glm::vec2 modelSwayZW(sway.refHeight, sway.amp);
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &model.vertexBuffer, &offset);
@@ -3921,7 +3951,8 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                 // set already bound - most foliage batches of a run share the
                 // white set or one sheet.
                 if (foliagePass) {
-                    const VkDescriptorSet texSet = (batch.hasAlpha && batch.texture)
+                    // Clutter cards are cut out whatever their blend says.
+                    const VkDescriptorSet texSet = ((batch.hasAlpha || clutter) && batch.texture)
                         ? getTexDescSet(batch.texture) : shadowParams_.set;
                     if (texSet != boundSet0) {
                         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -3966,6 +3997,24 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
                 if (moverSpheres) moverSpheres->emplace_back(mover.position, mover.cachedPaddedRadius);
             }
             drawGroup(*firstInstance.cachedModel, casterBase, groupSize);
+            g = groupEnd;
+        }
+
+        // The ground clutter (setShadowDetailDraw), alpha-tested.
+        if (!foliagePass) return;
+        const auto& clutter = shadowClutterCasters_;
+        for (std::size_t g = 0; g < clutter.size();) {
+            const uint32_t modelId = clutter[g].first;
+            std::size_t groupEnd = g;
+            while (groupEnd < clutter.size() && clutter[groupEnd].first == modelId) ++groupEnd;
+            const auto& firstInstance = instances[clutter[g].second];
+            const uint32_t groupSize = static_cast<uint32_t>(groupEnd - g);
+            if (!firstInstance.cachedModel || !casterMatrices ||
+                castersWritten + groupSize > MAX_SHADOW_CASTERS) { g = groupEnd; continue; }
+            const uint32_t casterBase = castersWritten;
+            for (std::size_t k = g; k < groupEnd; ++k)
+                casterMatrices[castersWritten++] = instances[clutter[k].second].modelMatrix;
+            drawGroup(*firstInstance.cachedModel, casterBase, groupSize, true);
             g = groupEnd;
         }
     };

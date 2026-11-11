@@ -164,6 +164,15 @@ struct Enhancements {
     /// Off is the bounce light as it was: no field drawn, the pass's
     /// bounce build, the terrain's floor.
     bool  skyShade = false;
+    /// Enhanced's sun shadows: a third shadow map - the world's casters, the
+    /// ground clutter near the player among them - over 72 yards round the
+    /// player at a 0.07-yard texel, kept between frames and blended into the
+    /// world map at its edge (shadow_cache.hpp detail map,
+    /// shadow_filter.glsli), and the grass field taking the sun's shadow.
+    /// Crisp near shadows with holes where leaves are cut out, a filter that
+    /// widens with distance, as the reference client's cascades give. Off is the two
+    /// maps as before and grass in no shadow.
+    bool  enhancedShadows = false;
 
     // ---- Water and weather -------------------------------------------------
     bool  shorelineFoam = false;
@@ -365,6 +374,9 @@ inline constexpr uint32_t kEnhancedAmbient = 1u << 7;
 /// The sky shade's ground light (terrain.frag): set by the renderer with
 /// kEnhancedAmbient while the ambient pass is the sky build.
 inline constexpr uint32_t kSkyShade = 1u << 8;
+/// Enhanced's sun shadows (Enhancements::enhancedShadows): the grass field's
+/// blades take the sun's shadow (grass.frag).
+inline constexpr uint32_t kEnhancedShadows = 1u << 9;
 }  // namespace enh_bits
 
 inline uint32_t shaderBits(const Enhancements& e) {
@@ -375,6 +387,7 @@ inline uint32_t shaderBits(const Enhancements& e) {
     if (e.shadowFilter != 0) b |= enh_bits::kSoftShadows;
     if (e.smoothLeaves) b |= enh_bits::kSmoothLeaves;
     if (e.leafLight) b |= enh_bits::kLeafLight;
+    if (e.enhancedShadows) b |= enh_bits::kEnhancedShadows;
     return b;
 }
 

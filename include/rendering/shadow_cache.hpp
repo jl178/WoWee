@@ -181,6 +181,57 @@ inline WorldShadowRedraw worldShadowRedrawNeeded(const WorldShadowCacheKey& key,
     return WorldShadowRedraw::None;
 }
 
+/// The detail map of Enhanced's sun shadows (Enhancements::enhancedShadows):
+/// a third map of the world's casters - terrain, buildings, doodads and the
+/// ground clutter near the player - over a short square round the player at
+/// a fine texel, kept between frames as the world map is. Where it covers a
+/// pixel its taps replace the world map's (shadow_filter.glsli), so the
+/// shadows near the camera are crisp, leaves cut holes in them and clutter
+/// casts, while the world map carries the distance with its softer filter.
+/// the reference client draws its sun shadow as cascades (CSMInfo, up to five, three
+/// in its Config.wtf) blended at their edges; this is the near cascade.
+inline constexpr float kDetailShadowHalfExtent = 72.0f;  ///< yards either side of the player
+inline constexpr uint32_t kDetailShadowMapSize = 2048;   ///< 0.07 yd a texel at 72 yd
+/// Ground clutter casts into it this far from the player (yards).
+inline constexpr float kDetailClutterReach = 32.0f;
+
+/// The detail map's projection: the world map's depth (the eye as far back
+/// toward the sun, the same far plane), so whatever shades the square from
+/// far along the light - a ridge, a tall crown - is in it.
+inline ShadowProjection detailShadowProjection(const glm::vec3& center, const glm::vec3& sunDir,
+                                               float shadowDistance, float halfExtent = kDetailShadowHalfExtent,
+                                               uint32_t mapSize = kDetailShadowMapSize) {
+    return shadowProjection(center, sunDir, halfExtent, mapSize, shadowDistance * 3.0f, shadowDistance * 6.5f);
+}
+
+/// When the detail map must be drawn again: it is drawn whole in one frame,
+/// so it asks less of a frame than a world map part, and it is redrawn far
+/// more often - every few yards walked.
+struct DetailShadowCachePolicy {
+    float driftFraction = 0.12f;    ///< of the half extent walked from where it was drawn
+    float maxAngleDegrees = 0.15f;  ///< the sun turning further than this
+    float stopReadingDegrees = 2.0f;  ///< further than this the kept map is wrong: not read
+    double contentInterval = 2.0;   ///< seconds between redraws for world changes
+};
+
+/// Whether the detail map drawn for `key` (shadowDistance holds its half
+/// extent) still serves the player at `player` under a sun along `sunDir`.
+/// Spread means "draw it again when a frame is free", Now that the kept one
+/// must not be read until it has been.
+inline WorldShadowRedraw detailShadowRedrawNeeded(const WorldShadowCacheKey& key, const glm::vec3& player,
+                                                  const glm::vec3& sunDir, float halfExtent, uint64_t content,
+                                                  double now, const DetailShadowCachePolicy& p = {}) {
+    if (!key.valid || std::abs(key.shadowDistance - halfExtent) > 0.01f) return WorldShadowRedraw::Now;
+    const glm::vec2 drift(player.x - key.center.x, player.y - key.center.y);
+    const float cosAngle = glm::dot(glm::normalize(key.sunDir), glm::normalize(sunDir));
+    if (glm::length(drift) > 0.5f * halfExtent || cosAngle < std::cos(glm::radians(p.stopReadingDegrees)))
+        return WorldShadowRedraw::Now;
+    if (glm::length(drift) > p.driftFraction * halfExtent) return WorldShadowRedraw::Spread;
+    if (cosAngle < std::cos(glm::radians(p.maxAngleDegrees))) return WorldShadowRedraw::Spread;
+    if (content != key.content && now - key.drawnAt >= p.contentInterval) return WorldShadowRedraw::Spread;
+    return WorldShadowRedraw::None;
+}
+
 /// The parts of a redraw, one a frame.
 enum WorldShadowPart : uint8_t {
     kWorldShadowTerrain = 0,

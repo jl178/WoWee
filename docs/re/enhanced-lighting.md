@@ -1698,6 +1698,123 @@ Northrend (no such model) are unchanged: Goldshire's sky view 0.301 / 0.300,
 Grizzly Hills 0.460 / 0.459, the Goldshire and Barrens views within run
 noise. The HDR row's mid-tone lift outside Enhanced's daylight is untouched.
 
+## 9e. Sun shadows ("Sun shadows (the reference client)")
+
+**What Wowee had.** Two maps (`shadow_cache.hpp`): the world map, every
+static caster over the shadow distance round the player (500 yd in the
+Enhanced preset: a 2048 map over 1066 yd, 0.52 yd a texel), drawn when the
+player has walked 25 yd or the sun turned a quarter degree and kept between
+frames, read through four bilinear compares 1.5 texels apart (the Soft
+filter; one compare where a pixel spans more than 1.5 texels); and the unit
+map, units and what moves within 90 yd at 0.18 yd a texel, every frame.
+Bias: a normal offset of 2.5 texels times the sine of the angle to the
+light, a quarter texel of depth, and the pipeline's slope bias. Leaf cards
+cast with their alpha (`shadow.frag`, a 0.5 cut on the batch texture), but
+at half a yard a texel a leaf's gaps are below the texel and the canopy
+cast one soft blot; the penumbra everywhere near the camera was about 1.8 yd
+wide. Ground clutter cast nothing (`M2Renderer::renderShadow` skips
+`cachedIsGroundDetail`), M2 clutter received the map through `m2.frag`, and
+the grass field's blades (`grass.frag`) received no sun shadow at all: under
+the Enhanced preset a meadow in tree shade was lit as if in full sun.
+
+**What Enhanced does** (decoded from 1.60.1's DXIL in the session scratchpad,
+`fgap/dis`, `enhanced/dis`):
+
+- Cascades. Every shader that reads the sun shadow carries
+  `CSMInfo { ShadowMapCascade[5]; float4[16]; int4 }`, a cascade being a
+  4x4 matrix, a float4 of its uv bounds and two floats; the count is in the
+  constant buffer (Jered's Config.wtf: `shadowNumCascades 3`,
+  `shadowTextureSize 2048`, `shadowBlendCascades 1`, `shadowSoft 1`). The
+  cascades are slices of one Texture2DArray, picked by the view depth
+  against split distances (`min(count - 1, 3)` compares), with a fifth slot
+  for a distant world shadow (`PSWorldShadowData`). A per-cascade base bias
+  table, `{-0.05, -0.3, -0.4, -1.0, -0.05}`, scaled by `0.5 / ` a per-cascade
+  constant, is added to the receiver's depth.
+- Blending. Inside the outer tenth of a cascade (`saturate(10 * distance to
+  its uv bounds)`) the next cascade is read too and the two are mixed.
+- Filter. The opaque world (terrain, M2s, WMOs) reads no shadow map in its
+  pixel shader: it reads a screen-space shadow mask (`shadowmask.bls`, not
+  among the files fetched, so its kernel is not known). The forward
+  permutations of `material3_mesh_ps` (blended M2s) take five bilinear
+  compares - the centre and four offsets from the constant buffer - times
+  0.2, per cascade, blended as above. The 32-point `kPoissonDisk` in the
+  same shaders is the local lights' shadow atlas, not the sun's.
+- Clutter. `detaildoodad.bls` (the ground effect pixel shader) reads the
+  cascade array itself with a single bilinear `SampleCmpLevelZero`, with the
+  cascade pick and blend above: clutter receives the sun's shadow, one tap.
+  None of the eight permutations of its vertex shader (`2991009`) is
+  depth-only (each writes 24 to 32 outputs), so nothing shows clutter
+  casting into the cascades; the dark round the plants in the Durotar
+  frame is most likely its ASSAO and the plants' own shade. Wowee's row
+  casts the M2 clutter near the player anyway (below): cheap in a kept map.
+
+**What the row does** (Enhanced preset only; off is the two maps as before):
+
+- A third map, the detail map: 2048 over 144 yd round the player (0.07 yd a
+  texel), the world's casters - terrain, buildings, doodads - plus the M2
+  ground clutter within 32 yd of the player, drawn with the world map's
+  depth toward the sun (a ridge far along a low sun's ray shades the square)
+  and texel-snapped like the others. Kept between frames in two images; it
+  is drawn whole, into the back one, when the player has walked 8.6 yd from
+  where it was drawn, the sun has turned 0.15 degrees, or the world changed
+  (no sooner than 2 s), on a frame no part of the world map is drawn (the
+  doodads keep one static caster list per frame slot; see `renderSkyField`).
+  It is not read once the player is 36 yd off or the sun 2 degrees off.
+  Foliage goes in without its wind, so one redraw's leaves lie where the
+  next one's do.
+- Read first: where it covers a pixel the world map is not read; over its
+  outer 8% it is mixed into the world map (Enhanced's cascade blend). Its
+  filter is four bilinear compares at plus or minus `spread` texels,
+  `spread` the pixel's footprint on the map, 0.5 to 1.5 texels: a hard edge
+  under the camera, softer further off, and past the square the world map's
+  softer filter, then its single compare. Bias by the same rule at its own
+  texel (normal offset `(spread + 1.25)` texels times the sine).
+- Clutter casts into it (alpha-tested, `M2Renderer::setShadowDetailDraw`);
+  a tuft's own card is lit with the ground's normal, which lies in the card,
+  so `m2.frag` reads its shadow a quarter yard toward the sun.
+- Leaves read the world map alone (`sunShadow(..., worldOnly)`): the crowns'
+  light, and the light through them (9c), were matched to Enhanced's with it;
+  read through the detail map the 15:23 inn view's crown chroma went from
+  0.468 to 0.538 (Enhanced 0.383). The detail map is for what the crowns
+  throw on the ground.
+- The grass blades take one bilinear compare a map (`sunShadowCheap`: the
+  detail map where it covers them, else the world map, and the unit map in
+  its mask, lifted by the up-normal rule) on their sun term, as deep as the
+  ground under them takes it (all of the sun under the sky shade), as
+  Enhanced's clutter does.
+
+Measured (WPTEST14 on the lab, 1280x540, the Iris Xe, the Enhanced preset;
+session scratchpad `shadows/`):
+
+- Views: Goldshire's crossroads at 9:22 (the tree shade across the road now
+  has a hard edge with the leaves' gaps in it, and the verge's grass is in
+  the shade the ground is in; it was lit), the Valley of Trials and Razor
+  Hill at 16:30-17:20 (crisper tent and tree shadows; at 18:00 and later the
+  canyon's own shadow covers the camp in both). Sheets: `shadows/cmp_v5_*.png`.
+  Wowee's Valley of Trials has no M2 clutter at the spots used, so the
+  Durotar frame's plants (Enhanced's denser ground cover) are not matched.
+- Bars (`fgap/bars2.py`, off / on, three runs each): Barrens ground
+  0.536/0.690/0.715 / 0.537/0.690/0.715; into the sun 1.23-1.32% /
+  1.29-1.30% (bar 1.315); eve, forest, away within 1 point; crown chroma
+  +16.8..+21.9% / +20.9..+22.1% (the off runs alone span 5 points: the
+  crowns sway; the leaves read the same map either way).
+- Cost, the row toggled in place on each of the five perf views (two runs,
+  2-4 other clients sharing the GPU): scene pass + ambient pass + the detail
+  map's draws, -0.4 to +0.5 ms, mean -0.04 (inn), +0.34 (crossroads),
+  +0.22 (Trade District), -0.10 (Crystal Lake), +0.45 (Barrens). A redraw
+  is 2-3 ms of GPU in one frame (Goldshire), at most one every couple of
+  seconds standing (the world's content key, as for the world map) and one
+  every 8.6 yd walked; amortised 0.01-0.05 ms in the windows measured.
+- Stability: the map is texel-snapped, so a redraw 12 yd away and back
+  gives the same shadows to the pixel on the road (the frame difference is
+  the swaying crowns and the walking NPCs); a pan does not touch it, and
+  foliage is drawn without wind, so redraws do not move the dapples.
+- Not done: Enhanced's opaque filter (its screen-space `shadowmask.bls`, not
+  fetched); contact hardening (PCSS) - the detail map's pixel-footprint
+  widening stands in for it; the ambient pass's ground-sunlit rings
+  (`groundSunlit`, the sky shade) still read the world map, so the ground's
+  fill beside a crisp edge eases over the world map's 1.8 yd.
+
 ## 10. Not done, and why
 
 - Enhanced's ZoneLight polygons (section 2b), and its keyframes for the 11

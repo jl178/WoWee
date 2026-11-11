@@ -24,7 +24,22 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 localLightColorIntensity[64];
     ivec4 localLightMeta;
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
+    // The rest of the block as far as the sun's shadow maps
+    // (shadow_filter.glsli), for Enhanced's sun shadows on the blades.
+    mat4 rtViewProj;
+    vec4 rtCameraPos;
+    vec4 rtParams;
+    ivec4 localLightTileInfo;
+    vec4 localLightTileScale;
+    uvec4 localLightTiles[288];
+    mat4 nearLightSpaceMatrix;
+    vec4 nearShadowParams;
+    uvec4 nearShadowMask[32];
+    mat4 detailLightSpaceMatrix;
+    vec4 detailShadowParams;
 };
+
+#include "shadow_filter.glsli"
 
 // The stock depth fog every other world surface takes, so a blade fades
 // into the haze exactly as the ground it stands on does.
@@ -121,7 +136,18 @@ void main() {
     float facing = clamp(dot(normalize(vWorldPos - viewPos.xyz), sun.xyz), 0.0, 1.0);
     float through = facing * facing * facing * vHeightT * max(sun.w, 0.0);
 
-    vec3 lit = albedo * (ambientColor.rgb + lightColor.rgb * (wrapped + 0.9 * through)) * ao;
+    // Enhanced's sun shadows (enh_bits::kEnhancedShadows, 512): the blade
+    // takes the sun's shadow where it stands, one tap, as Enhanced's clutter
+    // does; without it a field under the trees glowed in full sun.
+    // As deep as the ground under the blade takes it (terrain.frag): the
+    // whole of the sun under the sky shade (256), else the map's share.
+    float sunLit = 1.0;
+    if ((localLightMeta.z & 512) != 0 && shadowParams.x > 0.5) {
+        float s = sunShadowCheap(vWorldPos, normalize(-lightDir.xyz));
+        sunLit = (localLightMeta.z & 256) != 0 ? s : mix(1.0, s, clamp(shadowParams.y, 0.0, 1.0));
+    }
+
+    vec3 lit = albedo * (ambientColor.rgb + lightColor.rgb * (wrapped + 0.9 * through) * sunLit) * ao;
     // Fogged as the ground under it is, or a field stands out of the haze
     // the terrain it grows from has gone into.
     lit = applyFog(lit, vWorldPos, length(viewPos.xyz - vWorldPos));

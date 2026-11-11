@@ -133,6 +133,9 @@ constexpr rendering::Enhancements enhancedEnhancements() {
     // terrain light, the ambient scaled by the open sky and a fill in open
     // shade (docs/re/enhanced-lighting.md 6e).
     e.skyShade = true;
+    // Enhanced's cascaded sun shadows (shadowNumCascades 3, 2048): crisp
+    // near the player, leaves cut out, clutter shaded (and casting near).
+    e.enhancedShadows = true;
     // Enhanced's ground is covered where 3.3.5's shows bare texture between
     // tufts. Its clutter data is 1.12's; the cover comes from its settings
     // (groundEffectDist 200) and models. Wowee's grass field stands in for

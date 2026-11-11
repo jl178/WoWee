@@ -300,6 +300,10 @@ public:
     /// Create clutter instances for tiles near the camera, drop them for
     /// tiles that have moved out of range. A frame's worth of work at a time.
     void streamGroundClutter(const glm::vec3& cameraPos);
+    /// The ground clutter instances alive in the map chunks within `radius`
+    /// yards of `centre` (across the ground), appended to `out`: the casters
+    /// of the detail shadow map's short-range clutter shadows.
+    void gatherClutterNear(const glm::vec3& centre, float radius, std::vector<uint32_t>& out) const;
 
     void stopWorkers();  // Stop worker threads without restarting (for shutdown)
     void softReset();  // Clear tile data without stopping worker threads (non-blocking)

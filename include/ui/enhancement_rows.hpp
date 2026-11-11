@@ -800,6 +800,17 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "ambient pass's SKY_FIELD build reads them (about 0.4 ms more at 1280x540 "
                  "on an Iris Xe); terrain.frag's Enhanced light (enh_bits::kSkyShade)",
      .asBool = &Enhancements::skyShade},
+    {.key = "enhancedshadows", .label = "Sun shadows (the reference client)", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
+     .tooltip = "Crisp sun shadows near you, as in the reference client: leaves dapple\n"
+                "the ground through their gaps, plants and grass take the shade\n"
+                "and small plants near you cast their own. Further off the\n"
+                "shadows soften as before.",
+     .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "enhanced_shadows",
+     .controls = "a third shadow map (2048, 144 yd square round the player, kept and redrawn "
+                 "every 9 yd or 0.15 degrees of sun; shadow_cache.hpp) read by the surface "
+                 "shaders before the world map; one tap per grass blade fragment",
+     .enabledWhen = "shadows", .asBool = &Enhancements::enhancedShadows},
     {.key = "enhancedwater", .label = "Water (the reference client)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "Lakes, rivers, the sea and the canals as the reference client draws\n"

@@ -431,7 +431,7 @@ void CharacterPreview::createFBO() {
         sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         sizes[0].descriptorCount = MAX_FRAMES;
         sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        sizes[1].descriptorCount = MAX_FRAMES * 5;
+        sizes[1].descriptorCount = MAX_FRAMES * 6;
 
         VkDescriptorPoolCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         ci.maxSets = MAX_FRAMES;
@@ -538,8 +538,14 @@ void CharacterPreview::createFBO() {
         nearWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         nearWrite.pImageInfo = &shadowImg;
 
+        // Binding 6 the detail map of Enhanced's sun shadows: the same, with
+        // detailShadowParams.x at zero.
+        VkWriteDescriptorSet detailWrite = nearWrite;
+        detailWrite.dstBinding = 6;
+
         vkUpdateDescriptorSets(device, 5, writes, 0, nullptr);
         vkUpdateDescriptorSets(device, 1, &nearWrite, 0, nullptr);
+        vkUpdateDescriptorSets(device, 1, &detailWrite, 0, nullptr);
     }
 
     // 5. Register the color attachment as an ImGui texture

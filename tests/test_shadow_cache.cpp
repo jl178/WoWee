@@ -231,3 +231,71 @@ TEST_CASE("Unit shadow view cull: a shadow thrown into view is kept", "[shadow_c
     const glm::vec3 lowNorthSun = glm::normalize(glm::vec3(0.0f, -1.0f, -0.3f));
     REQUIRE_FALSE(shadowCasterSeen(viewFor(vp, lowNorthSun, eye.z - 40.0f), glm::vec3(0.0f, -5.0f, 1.0f), 1.5f));
 }
+
+TEST_CASE("Detail shadow map: when it is drawn again and when it is not read", "[shadow_cache]") {
+    const glm::vec3 p(-9465.0f, 47.0f, 56.6f);
+    const float he = kDetailShadowHalfExtent;
+    const DetailShadowCachePolicy pol{};
+    auto key = keyAt(p, he);
+    // Nothing kept: drawn now, not read until it is.
+    REQUIRE(detailShadowRedrawNeeded(WorldShadowCacheKey{}, p, noonSun(), he, 7, 0.0) == WorldShadowRedraw::Now);
+    // Standing still, nothing changes.
+    for (double t = 100.0; t < 400.0; t += 9.1)
+        REQUIRE(detailShadowRedrawNeeded(key, p, noonSun(), he, 7, t) == WorldShadowRedraw::None);
+    // Walking: kept below the drift, redrawn past it; height alone never.
+    const float drift = pol.driftFraction * he;
+    REQUIRE(detailShadowRedrawNeeded(key, p + glm::vec3(drift * 0.9f, 0, 0), noonSun(), he, 7, 101.0) ==
+            WorldShadowRedraw::None);
+    REQUIRE(detailShadowRedrawNeeded(key, p + glm::vec3(0, 0, 40.0f), noonSun(), he, 7, 101.0) ==
+            WorldShadowRedraw::None);
+    REQUIRE(detailShadowRedrawNeeded(key, p + glm::vec3(0, drift * 1.1f, 0), noonSun(), he, 7, 101.0) ==
+            WorldShadowRedraw::Spread);
+    // Far enough that the kept square no longer serves the view: not read.
+    REQUIRE(detailShadowRedrawNeeded(key, p + glm::vec3(0.6f * he, 0, 0), noonSun(), he, 7, 101.0) ==
+            WorldShadowRedraw::Now);
+    // The sun: a fraction of a degree redraws it, a jump of the clock stops
+    // it being read until it is drawn again.
+    const auto turned = [&](float deg) {
+        const glm::mat3 r = glm::mat3(glm::rotate(glm::mat4(1.0f), glm::radians(deg), glm::vec3(0, 0, 1)));
+        return glm::normalize(r * noonSun());
+    };
+    REQUIRE(detailShadowRedrawNeeded(key, p, turned(0.1f), he, 7, 101.0) == WorldShadowRedraw::None);
+    REQUIRE(detailShadowRedrawNeeded(key, p, turned(0.5f), he, 7, 101.0) == WorldShadowRedraw::Spread);
+    REQUIRE(detailShadowRedrawNeeded(key, p, turned(5.0f), he, 7, 101.0) == WorldShadowRedraw::Now);
+    // A world change: no sooner than the interval.
+    REQUIRE(detailShadowRedrawNeeded(key, p, noonSun(), he, 8, 101.0) == WorldShadowRedraw::None);
+    REQUIRE(detailShadowRedrawNeeded(key, p, noonSun(), he, 8, 103.0) == WorldShadowRedraw::Spread);
+}
+
+TEST_CASE("Detail shadow map: fine texels on the world map's depth, snapped", "[shadow_cache]") {
+    const glm::vec3 c(-9465.0f, 47.0f, 56.6f);
+    const ShadowProjection d = detailShadowProjection(c, noonSun(), 500.0f);
+    const ShadowProjection w = worldShadowProjection(c, noonSun(), 500.0f, 4096, 1.05f, 8.0f);
+    REQUIRE(d.texelWorld < 0.1f);
+    REQUIRE(d.texelWorld < w.texelWorld / 3.0f);
+    // The same depth toward the sun as the world map: what shades the world
+    // map's square from far along the light shades the detail square too.
+    REQUIRE(d.depthRange == Catch::Approx(w.depthRange));
+    // The point the player stands on lands inside, well clear of the edge.
+    const glm::vec4 clip = d.matrix * glm::vec4(c, 1.0f);
+    REQUIRE(std::abs(clip.x) < 0.01f);
+    REQUIRE(std::abs(clip.y) < 0.01f);
+    REQUIRE(clip.z > 0.0f);
+    REQUIRE(clip.z < 1.0f);
+    // Texel-snapped like the others: a still shadow edge does not crawl as
+    // the player walks from one redraw to the next.
+    const glm::vec3 point(-9450.0f, 60.0f, 58.0f);
+    float first[2] = {-1.0f, -1.0f};
+    for (int i = 0; i < 50; ++i) {
+        const ShadowProjection p =
+            detailShadowProjection(c + glm::vec3(0.37f * i, -0.21f * i, 0.0f), noonSun(), 500.0f);
+        const glm::vec4 q = p.matrix * glm::vec4(point, 1.0f);
+        const float tx = (q.x * 0.5f + 0.5f) * kDetailShadowMapSize;
+        const float ty = (q.y * 0.5f + 0.5f) * kDetailShadowMapSize;
+        const float fx = tx - std::floor(tx), fy = ty - std::floor(ty);
+        if (first[0] < 0.0f) { first[0] = fx; first[1] = fy; continue; }
+        const auto near = [](float a, float b) { const float e = std::abs(a - b); return std::min(e, 1.0f - e) < 0.03f; };
+        REQUIRE(near(fx, first[0]));
+        REQUIRE(near(fy, first[1]));
+    }
+}

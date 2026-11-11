@@ -69,6 +69,12 @@ struct GPUPerFrameData {
     glm::mat4 nearLightSpaceMatrix{0.0f};
     glm::vec4 nearShadowParams{0.0f};
     glm::uvec4 nearShadowMask[kNearShadowMaskWords / 4] = {};
+    // The detail map at set 0 binding 6 (Enhanced's sun shadows,
+    // shadow_cache.hpp): its projection; params x = on (0/1), y = one texel
+    // in uv, z = 1 / its depth range in yards, w = yards per texel. The same
+    // four shaders read it, and declare the block this far.
+    glm::mat4 detailLightSpaceMatrix{0.0f};
+    glm::vec4 detailShadowParams{0.0f};
 };
 
 // Push constants for the model matrix (most common case)
