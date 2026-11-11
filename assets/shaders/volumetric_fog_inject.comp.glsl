@@ -53,11 +53,18 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 drift;          // xyz = how far the mist has blown, w = noise amount
     vec4 jitter;         // xyz = sample point inside the cell, w = history weight
     ivec4 dims;          // xyz = size, w = 0 every cell lit, 1 or 2 only odd or even slices
+    vec4 shafts;         // Enhanced's canopy shafts: x = strength (0 = stock), y = how far it
+                         // is night (the moonlight's share), z = probe radius in yards,
+                         // w = 1 / the yards over which they fade out with distance
 } vol;
 
 layout(set = 1, binding = 1) uniform sampler2D uShadowDepth;
 layout(set = 1, binding = 2, rgba16f) uniform writeonly image3D uCellsOut;
 layout(set = 1, binding = 3) uniform sampler3D uHistory;
+// Whether the sun reached each cell, for the canopy shafts: this frame's
+// (written only while they are on) and last frame's, read round a cell.
+layout(set = 1, binding = 6, r32f) uniform writeonly image3D uVisibilityOut;
+layout(set = 1, binding = 7) uniform sampler3D uVisibilityHistory;
 
 // How far along the view slice coordinate s lies: 0 at the near edge, the
 // slice count at the far one, spaced so each slice is a fixed fraction deeper
@@ -126,6 +133,43 @@ float sunVisibility(vec3 p) {
     float lit = (proj.z - 0.0005 <= stored) ? 1.0 : 0.0;
     vec2 edge = abs(proj.xy);
     return mix(lit, 1.0, smoothstep(0.8, 1.0, max(edge.x, edge.y)));
+}
+
+// Where a world point lies in last frame's volume, as texture coordinates;
+// false if outside it.
+bool lastFrameCell(vec3 p, out vec3 prev) {
+    vec4 prevClip = vol.prevViewProj * vec4(p, 1.0);
+    if (prevClip.w <= 1e-3) return false;
+    prev = vec3(prevClip.xy / prevClip.w * 0.5 + 0.5,
+                log(max(prevClip.w, volumetricParams.y) / volumetricParams.y) * volumetricParams.z);
+    return all(greaterThanEqual(prev, vec3(0.0))) && all(lessThanEqual(prev, vec3(1.0)));
+}
+
+// How much of the air round p the sun does not reach: four taps on a level
+// ring vol.shafts.z yards across, turned a little every frame (the jitter) so
+// the history fills it in, read from last frame's sun visibility per cell
+// rather than from the shadow map: four scattered taps of the map per lit
+// cell cost the Iris Xe 4 to 20 ms in a forest, the small volume next to
+// nothing. Level, not square to the light: near the ground a ring square to
+// a high sun dips below it and reads the ground's own shadow, which lifted
+// the air over every open square. 0 in the open, where nothing near casts a
+// shadow, toward 1 deep in the shade: what makes a lit cell part of a beam is
+// shaded air beside it - a gap in a canopy, not a field in the sun. Taps that
+// fall outside last frame's view are left out.
+float shadeAround(vec3 p) {
+    if (shadowParams.x < 0.5 || vol.jitter.w <= 0.0) return 0.0;
+    float turn = 6.2831853 * vol.jitter.x;
+    vec2 cs = vec2(cos(turn), sin(turn)) * vol.shafts.z;
+    vec3 ring[4] = vec3[4](vec3(cs, 0.0), vec3(-cs, 0.0), vec3(-cs.y, cs.x, 0.0), vec3(cs.y, -cs.x, 0.0));
+    float shaded = 0.0;
+    float taps = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        vec3 prev;
+        if (!lastFrameCell(p + ring[i], prev)) continue;
+        shaded += 1.0 - textureLod(uVisibilityHistory, prev, 0.0).r;
+        taps += 1.0;
+    }
+    return taps > 0.0 ? shaded / taps : 0.0;
 }
 
 // The local lights that reach any cell of this workgroup, in their original
@@ -216,6 +260,8 @@ void main() {
                                  volumetricParams.z);
             if (all(greaterThanEqual(prev, vec3(0.0))) && all(lessThanEqual(prev, vec3(1.0)))) {
                 imageStore(uCellsOut, cell, textureLod(uHistory, prev, 0.0));
+                if (vol.shafts.x > 0.0)
+                    imageStore(uVisibilityOut, cell, textureLod(uVisibilityHistory, prev, 0.0));
                 return;
             }
         }
@@ -252,14 +298,35 @@ void main() {
     // (docs/re/enhanced-lighting.md 2e). Elsewhere the stock light stays
     // beside the sun and keeps the wider lobe.
     bool enhancedSun = (localLightMeta.z & 128) != 0;
-    float cosSun = dot(travel, toCamera);
+    // With the canopy shafts on, the lobe sits on the sun's sprite itself
+    // (leaf_light.hpp, localLightMeta.w) while it is above the horizon: the
+    // light only eases onto the sun over its first 9 degrees, and toward a
+    // setting sun the lobe was glowing twenty degrees above it, at the
+    // stock light, where nothing is.
+    vec3 lobeTravel = travel;
+    float sunHigh = -travel.z;
+    if (enhancedSun && vol.shafts.x > 0.0) {
+        vec4 sprite = unpackSnorm4x8(uint(localLightMeta.w));
+        if (sprite.z > 0.0) {
+            lobeTravel = -normalize(sprite.xyz);
+            sunHigh = sprite.z;
+        }
+    }
+    float cosSun = dot(lobeTravel, toCamera);
     float phase = enhancedSun ? mix(1.0, phaseHG(cosSun, 0.9), 0.5)
                              : mix(1.0, phaseHG(cosSun, 0.75), 0.65);
     // And within about 20 degrees of the disc the lobe gives way to even
     // scattering, softly (from 25 degrees to 5): the air right round
     // Enhanced's sun is no brighter than its sky (enhanced_02's ring falls to
     // half within 4 degrees), where the lobe laid a wide near-white disc.
-    if (enhancedSun) phase = mix(phase, 1.0, kEnhancedSunPullback * smoothstep(0.906, 0.996, cosSun));
+    //
+    // With the canopy shafts on (vol.shafts.x), only while the sun is high:
+    // the ring was a midday one. Toward a sun low in the trees Enhanced lets a
+    // large warm glow through the fog (its dusk on a Duskwood road), so the
+    // pull-back eases off from 15 degrees up to 5.
+    float pullback = kEnhancedSunPullback;
+    if (vol.shafts.x > 0.0) pullback *= smoothstep(0.087, 0.259, sunHigh);
+    if (enhancedSun) phase = mix(phase, 1.0, pullback * smoothstep(0.906, 0.996, cosSun));
     // Under a sky with no sun disc (Outland's: a sky model takes the whole
     // sky, LightingParams::sunDisc) there is nothing to scatter toward: the
     // lobe is left out and the even share kept, so the air is no brighter
@@ -267,8 +334,47 @@ void main() {
     float evenShare = enhancedSun ? 0.5 : 0.35;
     phase = mix(evenShare, phase, vol.lighting.w);
     vec3 light = fogColor.rgb * vol.lighting.z;
+    // One tap of the map, shared by the mist's sunlight and the shafts below.
+    float lit = (sunUp > 0.0 || vol.shafts.x > 0.0) ? sunVisibility(p) : 0.0;
+    if (vol.shafts.x > 0.0) imageStore(uVisibilityOut, cell, vec4(lit));
     if (sunUp > 0.0) {
-        light += lightColor.rgb * (sunVisibility(p) * phase * sunUp * vol.lighting.x);
+        light += lightColor.rgb * (lit * phase * sunUp * vol.lighting.x);
+    }
+
+    // Enhanced's canopy shafts (vol.shafts.x > 0 only under Enhanced's light,
+    // outdoors; docs/re/enhanced-lighting.md 5c). Its froxel fog reads the
+    // sun's cascades per cell as this one does, but under a forest the beams
+    // stand out bright against dark air from well off the sun. Here a lit
+    // cell with shade beside it - a gap in the leaves - scatters far more,
+    // with a lobe wide enough to show from forty degrees off the light, and
+    // the shaded air beside it keeps its ambient. In the open there is no
+    // shade near a lit cell and nothing changes. By night the same from the
+    // moonlight: the light the shadow map is cast from, in the night's own
+    // colour.
+    if (vol.shafts.x > 0.0) {
+        vec3 down = travel.z > 0.0 ? -travel : travel;
+        float reach = 1.0 - clamp(depth * vol.shafts.w - 1.0, 0.0, 1.0);
+        if (reach > 0.0 && lit > 0.0) {
+            // Most of the ring in shade: a lit cell in a narrow gap. A lit
+            // cell at the edge of one broad shadow (a house, one tree in a
+            // square) sees one or two taps of four in it and stays as it was, which
+            // kept a sunny glade from going milky all over.
+            float around = smoothstep(0.45, 1.0, shadeAround(p));
+            float cosL = dot(down, toCamera);
+            float lobe = phaseHG(cosL, 0.6);
+            // Pulled back round the disc further than the mist's own lobe,
+            // to a third of even scattering within about 8 degrees: there the
+            // sky and the glow are already the brightest thing on screen, and
+            // beams laid over them took more of the view to white.
+            lobe = mix(lobe, 0.3, pullback * smoothstep(0.906, 0.99, cosL));
+            lobe = mix(1.0, lobe, vol.lighting.w);
+            float day = sunUp * (1.0 - vol.shafts.y);
+            float weight = day + vol.shafts.y;
+            // Pale: a beam reads as the light's hue thinned toward white, as
+            // Enhanced's do, not as a column of its full colour.
+            vec3 beam = mix(lightColor.rgb, vec3(dot(lightColor.rgb, vec3(0.2126, 0.7152, 0.0722))), 0.35);
+            light += beam * (vol.shafts.x * lit * around * reach * lobe * weight);
+        }
     }
 
     // Torches, braziers and lava: the same set, falloff and intensity the

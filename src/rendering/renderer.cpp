@@ -4,6 +4,7 @@
 #include "rendering/sun_direction.hpp"
 #include "rendering/enhanced_grade.hpp"
 #include "rendering/enhanced_palette.hpp"
+#include "rendering/enhanced_shafts.hpp"
 #include "rendering/enhanced_tonemap.hpp"
 #include "rendering/leaf_light.hpp"
 
@@ -6890,6 +6891,31 @@ float Renderer::volumetricFogExtinction() const {
     return extinction;
 }
 
+namespace {
+void enhancedShaftInputs(const LightingManager* lightingManager, const Weather* weather,
+                        float indoorFactor, VolumetricFog::FrameInputs& in) {
+    // Enhanced's canopy shafts (docs/re/enhanced-lighting.md 5c): under its
+    // light only (maps 0 and 1, above water), outdoors, and with the sky's
+    // sun or moon showing through the cloud. Off, the mist is the stock one.
+    if (!lightingManager || !lightingManager->isEnhancedActive()) return;
+    const enhanced_shafts::Tuning& tune = enhanced_shafts::tuning();
+    if (tune.strength <= 0.0f) return;
+    const auto& lp = lightingManager->getLightingParams();
+    const float outdoor = 1.0f - glm::clamp(indoorFactor, 0.0f, 1.0f);
+    const float throughCloud = glm::mix(1.0f, glm::clamp(lp.celestialGlowThrough, 0.0f, 1.0f),
+                                        glm::clamp(lp.cloudDensity, 0.0f, 1.0f));
+    const float precip = weather ? glm::clamp(weather->getIntensity(), 0.0f, 1.0f) : 0.0f;
+    const float night = 1.0f - leaf_light::dayWeight(glm::normalize(lp.sunDir).z);
+    const float k = tune.strength * outdoor * throughCloud * (1.0f - 0.8f * precip) *
+                    glm::mix(1.0f, tune.nightScale, night);
+    if (k <= 1e-3f) return;
+    in.shaftStrength = k;
+    in.shaftNight = night;
+    in.shaftProbe = tune.probeYards;
+    in.shaftReach = tune.reachYards;
+}
+}  // namespace
+
 void Renderer::renderVolumetricFog() {
     ZoneScopedN("Renderer::renderVolumetricFog");
     if (!volumetricThisFrame_ || !volumetricFog_ || !camera || currentCmd == VK_NULL_HANDLE) return;
@@ -6934,6 +6960,7 @@ void Renderer::renderVolumetricFog() {
     in.density = fogExtinction_;
     in.layerBase = fogLayerBase_;
     in.sunLobe = lightingManager ? lightingManager->getLightingParams().sunDisc : 1.0f;
+    enhancedShaftInputs(lightingManager.get(), weather.get(), indoorFactor_, in);
     volumetricFog_->record(currentCmd, frame, perFrameDescSets[frame], in);
     if (vkCtx) vkCtx->gpuMark(currentCmd, "volumetric fog integrate");
 

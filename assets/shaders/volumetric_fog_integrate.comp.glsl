@@ -38,6 +38,7 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 drift;
     vec4 jitter;
     ivec4 dims;
+    vec4 shafts;
 } vol;
 
 layout(set = 1, binding = 4) uniform sampler3D uCells;

@@ -96,6 +96,18 @@ public:
         /// (LightingParams::sunDisc): 0 under a sky with no sun disc, where
         /// it scatters evenly instead of glowing at a sun that is not there.
         float sunLobe = 1.0f;
+        /// Enhanced's canopy shafts (docs/re/enhanced-lighting.md 5c): how
+        /// much more a sunlit cell scatters for the shade round it, 0 for
+        /// none (the stock mist). Only under Enhanced's light, outdoors.
+        float shaftStrength = 0.0f;
+        /// How far it is night: the shafts' light is then the moonlight the
+        /// shadow map is cast from, not the sun.
+        float shaftNight = 0.0f;
+        /// Yards round a cell, level, that it looks for shade beside it.
+        float shaftProbe = 2.5f;
+        /// Yards from the camera over which the shafts are full, fading out
+        /// over as many again.
+        float shaftReach = 60.0f;
     };
 
     VolumetricFog() = default;
@@ -161,7 +173,8 @@ private:
         VkImageView view = VK_NULL_HANDLE;
     };
 
-    bool createVolume(Volume& v, glm::uvec3 size, VkImageUsageFlags usage);
+    bool createVolume(Volume& v, glm::uvec3 size, VkImageUsageFlags usage,
+                      VkFormat format = VK_FORMAT_R16G16B16A16_SFLOAT);
     void destroyVolume(Volume& v);
     bool createVolumes(glm::uvec3 size);
     void destroyVolumes();
@@ -175,6 +188,11 @@ private:
     // Per frame slot: the lit cells and their running sum.
     Volume scatter_[MAX_FRAMES];
     Volume integrated_[MAX_FRAMES];
+    /// Whether the sun reached each cell (R32F), for the canopy shafts: the
+    /// next frame reads the other slot's as the shade round a cell, a ring
+    /// of taps in a small volume instead of in the shadow map, whose scattered
+    /// taps cost the Iris Xe 4 to 20 ms (docs/re/enhanced-lighting.md 5c).
+    Volume visibility_[MAX_FRAMES];
     glm::uvec3 size_{0};
     bool volumesReady_ = false;
     bool formatSupported_ = true;

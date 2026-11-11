@@ -793,6 +793,110 @@ ambient than by its orange morning sun, which at Goldshire 9:22 stands
 elsewhere in Enhanced (section 2c) and leaves the camera-facing leaves in
 the shade.
 
+## 5c. Canopy shafts
+
+Enhanced's forests by day (a YouTube frame of a Night Elf forest, the
+sun high behind the canopy) show beams of sunlit haze from the gaps in
+the leaves down to the ground, bright against darker air in the shade;
+at dusk on a Duskwood road a large warm glow round the low sun with the
+trunks cut out of it; at night in a Night Elf village blue moonbeams
+through the canopy. Wowee's mist drew none of this: one soft column at
+most, from a large gap.
+
+**What Enhanced does.** `volumefogmaterialinjection.bls` (6227849, the
+froxel inject) binds `PSShadowData` - `CSMInfo`, `VSMInfo` and the world
+shadow - and per cell takes one `SampleCmpLevelZero` of the cascades (a
+2D array) and one of the virtual shadow map through its page table,
+jittered by a blue-noise texture (times 0.618, the golden ratio), with two
+scrolling 3D noise samples and the history blended by
+`volumefogtemporalblend.bls` (6227850). The global fog layers come after
+(`volumefogglobalfog.bls`, section 5). So the shafts are the plain froxel
+method with alpha-tested leaves in the cascades; no separate god-ray pass
+for the canopy (the screen-space `sunshaftsmask` / `sunshaftspropagate`
+pair, 2990923 / 2990924, is a sun-disc blur like Wowee's sun shafts).
+
+**What Wowee had.** The same method: `volumetric_fog_inject.comp` reads
+the world shadow map once per cell (jittered, nine tenths history), and
+the map has the leaves in it (`shadow.frag` alpha-tests foliage cards; the
+M2 shadow pass's foliage bucket keeps the test). At the Enhanced preset the
+map is 4096 texels over 2 x 533 yards: 0.26 yd a texel, finer than a gap
+in the leaves. The Medium volume is 128 x 72 x 48 cells, 0.5-800 yd, each
+slice 1.166 times deeper than the last: 28 of the 48 slices lie within 40
+yards, a cell there 0.3 yd across at 20 yards. So resolution was not what
+was missing. The light was: at 0.0013/yd and a sun scatter of 0.8, a
+lit cell forty degrees off the sun adds about as much as the fog colour's
+ambient beside it, and the forward lobe is pulled back within 20 degrees
+of the sun (section 2e), where beams would be brightest.
+
+**Ported** (Enhanced's light only, the Light shafts row on;
+`enhanced_shafts.hpp`, `VolumetricFog::FrameInputs::shaftStrength`,
+`volumetric_fog_inject.comp`). A sunlit cell within 60 yards (fading out
+by 120) also looks at the shade round it - four taps on a level ring 2.5
+yards across, turned each frame - and where most of the ring is in shade
+(a lit cell in a gap, `smoothstep(0.45, 1, shade)`) it scatters nine
+times the mist's own sun scatter more, with an HG lobe of g 0.6 (it shows
+from forty degrees off the sun), pulled back to a third within about 8
+degrees of the disc, in the light's colour thinned a third toward white.
+A lit cell at the edge of one broad shadow (a house, a lone tree) has one
+or two taps of four in shade and is left alone, so open ground and sunny
+squares do not go milky. The ring is level because one square to a high
+sun dipped under the ground and read the ground's own shadow, which lifted
+the air over every open square (Astranaar at 13:00: 64% of the view
+brighter).
+
+The ring is read from last frame's sun visibility per cell (an R32F
+volume beside the cells, reprojected; carried cells carry theirs), not from
+the shadow map. Four more scattered taps of the 4096 map per lit cell took
+the inject pass from 0.4 ms to 8-16 ms on the Iris Xe in Elwynn's forest;
+one such tap alone cost 4-15 ms, while the same four taps at the cell's own
+texel, or four taps of the cell history volume, cost nothing measurable.
+The small volume costs what the noise hides (below).
+
+By night the same from the moonlight: the light the shadow map is cast
+from (3.3.5's night light, 34 degrees up in Teldrassil at 23:00), in the
+night light's own colour, twice as strong before that colour. Thinned by
+cloud and rain as the sun shafts are, gone indoors (the interior factor).
+With the shafts on, the mist's forward lobe sits on the sun's sprite
+(`leaf_light`'s packed direction) while the sprite is up, and its
+pull-back round the disc eases off from 15 degrees up to 5. Off (Enhanced's
+light off, or `WOWEE_ENHANCED_SHAFTS=0`), the mist is the stock one, cell
+for cell; `WOWEE_ENHANCED_SHAFTS=strength,night,ring,reach` tunes it.
+
+**Measured** (lab, 1280x540, Iris Xe, the Enhanced preset, one build with
+`WOWEE_ENHANCED_SHAFTS=0` then on; `diff`: share of the view brighter by
+more than 8/255, and the frame's mean luminance):
+
+| view | mean off -> on | brighter | note |
+|---|---|---|---|
+| Elwynn forest 10:00, toward the sun | 0.253 -> 0.273 | 25% | a beam from the canopy gap to the road |
+| Goldshire inn 9:22 | 0.315 -> 0.357 | 54% | beams through the crowns; the change is the upper two thirds, the road +0.005-0.03 |
+| Goldshire 15:23 | 0.315 -> 0.324 | 20% | upper third +0.02-0.05, ground within noise |
+| Goldshire crossroads 9:22 | 0.376 -> 0.380 | 6% | within noise |
+| into the sun (crossroads, ring.py) | near-white 1.15% -> 0.35% | | the sky's ring no wider |
+| Barrens road noon (bright.py) | ground 0.544 -> 0.544 | 1% | no brighter |
+| Goldshire inn's hall, noon | 0.240 -> 0.239 | 0.5% | indoors: nothing |
+| Goldshire 23:00 | 0.133 -> 0.148 | 17% | blue moonbeams through the crowns |
+| Astranaar 23:00, toward the moon | 0.214 -> 0.220 | 10% | moonbeams over the square |
+| Astranaar 13:00 | 0.475 -> 0.485 | 13% | |
+| Teldrassil (Dolanaar, the road west) | within noise | 1-3% | no sunlit ground in view: its canopy shades all of it |
+| Elwynn 19:30, Duskwood 19:18 | within noise | 2% | see below |
+
+Cost (two rounds off/on, alternating, no other client on the GPU, six
+7-second windows a view): the inject pass 0.412 -> 0.431 ms in Elwynn's
+forest, 0.390 -> 0.425 into the sun at the crossroads, 0.403 -> 0.481 in
+Astranaar, 0.417 -> 0.462 on the Barrens road; the integrate pass
+unchanged (0.036-0.042). The frame's GPU time moved -0.27 to +1.0 ms,
+all of it in the scene pass, which the shafts do not touch (its own spread
+between runs of one build is that wide).
+
+Not matched: Enhanced's dusk. Its glow round a low sun is unshadowed air -
+its global fog layer and sun haze - with the trunks cut out of it; here at
+19:30 the light, and so the shadow map, still comes mostly from 3.3.5's
+stock direction (Enhanced's light only eases onto the sun over its first 9
+degrees, section 2e), so the air toward a 3-degree sun is in the trees'
+shadow and the lobe on the sprite has little lit air to show. The large
+warm glow belongs to the sun haze (`enhanced_haze.frag`), not the mist.
+
 ## 6. Global illumination ("Secondary Lighting")
 
 Enhanced-era shaders with no names in the community listfile

@@ -27,6 +27,8 @@ struct VolumeParamsGPU {
     glm::vec4 drift;          // xyz = how far the mist has blown, w = noise amount
     glm::vec4 jitter;         // xyz = where in its cell this frame samples, w = history weight
     glm::ivec4 dims;          // xyz = volume size
+    glm::vec4 shafts;         // x = canopy shaft strength (0 = none), y = night share,
+                              // z = shade probe radius (yd), w = 1 / reach (yd)
 };
 
 constexpr uint32_t kInjectGroup = 4;     // 4x4x4, volumetric_fog_inject.comp.glsl
@@ -113,13 +115,14 @@ bool VolumetricFog::initialize(VkContext* ctx) {
     return true;
 }
 
-bool VolumetricFog::createVolume(Volume& v, glm::uvec3 size, VkImageUsageFlags usage) {
+bool VolumetricFog::createVolume(Volume& v, glm::uvec3 size, VkImageUsageFlags usage,
+                                 VkFormat format) {
     VkDevice device = ctx_->getDevice();
 
     VkImageCreateInfo imgCI{};
     imgCI.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgCI.imageType = VK_IMAGE_TYPE_3D;
-    imgCI.format = kVolumeFormat;
+    imgCI.format = format;
     imgCI.extent = {.width = size.x, .height = size.y, .depth = size.z};
     imgCI.mipLevels = 1;
     imgCI.arrayLayers = 1;
@@ -137,7 +140,7 @@ bool VolumetricFog::createVolume(Volume& v, glm::uvec3 size, VkImageUsageFlags u
     viewCI.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewCI.image = v.image;
     viewCI.viewType = VK_IMAGE_VIEW_TYPE_3D;
-    viewCI.format = kVolumeFormat;
+    viewCI.format = format;
     viewCI.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1};
     if (vkCreateImageView(device, &viewCI, nullptr, &v.view) != VK_SUCCESS) {
         destroyVolume(v);
@@ -202,20 +205,24 @@ bool VolumetricFog::createPipelines(VkDescriptorSetLayout perFrameLayout,
     //   3  the other slot's cells, last frame's, read by inject as history
     //   4  this slot's cells again, read by integrate
     //   5  this slot's running sum, written by integrate
-    VkDescriptorSetLayoutBinding b[6]{};
-    const VkDescriptorType types[6] = {
+    //   6  this slot's sun visibility, written by inject (canopy shafts)
+    //   7  the other slot's, last frame's, read by inject
+    constexpr uint32_t kBindings = 8;
+    VkDescriptorSetLayoutBinding b[kBindings]{};
+    const VkDescriptorType types[kBindings] = {
         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
     };
-    for (uint32_t i = 0; i < 6; i++) {
+    for (uint32_t i = 0; i < kBindings; i++) {
         b[i].binding = i;
         b[i].descriptorType = types[i];
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo layoutCI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layoutCI.bindingCount = 6;
+    layoutCI.bindingCount = kBindings;
     layoutCI.pBindings = b;
     if (vkCreateDescriptorSetLayout(device, &layoutCI, nullptr, &setLayout_) != VK_SUCCESS) {
         LOG_ERROR("VolumetricFog: failed to create descriptor set layout");
@@ -253,8 +260,8 @@ bool VolumetricFog::createPipelines(VkDescriptorSetLayout perFrameLayout,
 
     VkDescriptorPoolSize poolSizes[3] = {
         {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_FRAMES},
-        {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_FRAMES * 3},
-        {.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = MAX_FRAMES * 2},
+        {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_FRAMES * 4},
+        {.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = MAX_FRAMES * 3},
     };
     VkDescriptorPoolCreateInfo poolCI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolCI.maxSets = MAX_FRAMES;
@@ -296,7 +303,8 @@ bool VolumetricFog::createPipelines(VkDescriptorSetLayout perFrameLayout,
 bool VolumetricFog::createVolumes(glm::uvec3 size) {
     constexpr VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
-        if (!createVolume(scatter_[i], size, usage) || !createVolume(integrated_[i], size, usage)) {
+        if (!createVolume(scatter_[i], size, usage) || !createVolume(integrated_[i], size, usage) ||
+            !createVolume(visibility_[i], size, usage, VK_FORMAT_R32_SFLOAT)) {
             destroyVolumes();
             return false;
         }
@@ -304,6 +312,8 @@ bool VolumetricFog::createVolumes(glm::uvec3 size) {
                       reinterpret_cast<uint64_t>(scatter_[i].image), "volumetric fog cells");
         setObjectName(ctx_->getDevice(), VK_OBJECT_TYPE_IMAGE,
                       reinterpret_cast<uint64_t>(integrated_[i].image), "volumetric fog integrated");
+        setObjectName(ctx_->getDevice(), VK_OBJECT_TYPE_IMAGE,
+                      reinterpret_cast<uint64_t>(visibility_[i].image), "volumetric fog sun visibility");
     }
     size_ = size;
     return true;
@@ -313,6 +323,7 @@ void VolumetricFog::destroyVolumes() {
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
         destroyVolume(scatter_[i]);
         destroyVolume(integrated_[i]);
+        destroyVolume(visibility_[i]);
     }
     size_ = glm::uvec3(0);
     volumesReady_ = false;
@@ -349,8 +360,14 @@ void VolumetricFog::writeComputeSets() {
         VkDescriptorImageInfo sumOut{.sampler = VK_NULL_HANDLE, .imageView = integrated_[f].view,
                                      .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
 
-        VkWriteDescriptorSet w[6]{};
-        for (uint32_t i = 0; i < 6; i++) {
+        // R32F is not filterable everywhere: read with the nearest sampler.
+        VkDescriptorImageInfo visOut{.sampler = VK_NULL_HANDLE, .imageView = visibility_[f].view,
+                                     .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo visHistory{.sampler = depthSampler_, .imageView = visibility_[other].view,
+                                         .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+
+        VkWriteDescriptorSet w[8]{};
+        for (uint32_t i = 0; i < 8; i++) {
             w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             w[i].dstSet = computeSets_[f];
             w[i].dstBinding = i;
@@ -368,7 +385,11 @@ void VolumetricFog::writeComputeSets() {
         w[4].pImageInfo = &cellsIn;
         w[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[5].pImageInfo = &sumOut;
-        vkUpdateDescriptorSets(ctx_->getDevice(), 6, w, 0, nullptr);
+        w[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[6].pImageInfo = &visOut;
+        w[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[7].pImageInfo = &visHistory;
+        vkUpdateDescriptorSets(ctx_->getDevice(), 8, w, 0, nullptr);
     }
 }
 
@@ -461,6 +482,10 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
         const char* v = std::getenv("WOWEE_FOG_HALF_RATE");
         return !(v && v[0] == '0');
     }();
+    p.shafts = in.shaftStrength > 0.0f
+        ? glm::vec4(in.shaftStrength, glm::clamp(in.shaftNight, 0.0f, 1.0f), in.shaftProbe,
+                    1.0f / std::max(in.shaftReach, 1.0f))
+        : glm::vec4(0.0f);
     p.dims = glm::ivec4(size_, (halfRate && history) ? 1 + static_cast<int>(frameCounter_ & 1u) : 0);
     std::memcpy(paramsMapped_[frame], &p, sizeof(p));
 
