@@ -753,6 +753,32 @@ the frame's mean rises 0.005-0.015, its 5th percentile 0.010-0.018, its
 contrast (sd) falls 0.001-0.005. Sheets in the session scratchpad:
 `fgap/sheet_c.png` (Enhanced | no air | air).
 
+**Toward the sun** (Jered's Barrens video frame, about 17:45, looking into
+a low sun over the wheat). By band in the frame: sky round the sun luminance
+234 hue 45, the farthest hills by the sun 223 hue 44 (nearly the sky), hills
+at about 35 degrees 118 hue 27, the acacias and ground in the middle
+distance 71-110 hue 26, the near wheat 85 hue 29, blue/red 0.15-0.67 all
+through - one warm gold that grows with distance. The Barrens' light
+(Enhanced's 7626/7636) does give that gold, but in its smog and band colours
+and the sun's (`#f8bd72`, `#ee9a54` at 17-18h); its SkyFogColor, which the
+air scattered evenly, is purple-grey (`#6e7289`, `#70697f`), and at
+0.001/yd the air took the hills beyond a few hundred yards to it (hue 327-12,
+blue/red 0.73-0.94). FogEnd is 0 on those keys (18000 at noon), so the
+distance fog adds nothing near. Enhanced's layer takes in the sun through its
+phase lookup as well (`scatter * phase * intensity`), so the air now does
+too: the sun's light through the forward half of a Henyey-Greenstein lobe
+(g 0.7; field 037 is 0.7-0.8), x0.39, held under the 8-bit cap, and only
+from 400 yards out - over the whole ray the near ridges went as bright as
+the sky (luminance 159 against the frame's 71-118) and the layering was
+lost. Enhanced's own curve thickens with distance (`1 + k1 t^k0`, field 036
+the likely exponent), the same intent. Views away from the sun are
+unchanged; on the far cliffs of the matched view hue 17 -> 26 and blue/red
+0.65 -> 0.54 (frame 27, 0.49), the near and middle bands within 1-3
+luminance. The merge bars all hold (Goldshire toward the sun's near-white
+share 1.19% -> 1.31%, bar 1.315%; region sum 270.0 -> 265.9). What is left:
+the frame's sky round the sun is brighter and paler (234 against 208) - the
+sky and the tone, not the air.
+
 **The far canopy's colour.** Enhanced's far trees read green-grey where
 Wowee's read warm yellow. By screen band (foliage pixels; top = the near
 crowns, far = the tree line), red and green to luminance are the same in

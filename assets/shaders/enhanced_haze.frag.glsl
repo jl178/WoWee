@@ -66,12 +66,30 @@ const float kSkyScatter = 0.35;      // of the fog colour, light from the sky
 // beside it, and at 0.8 the sky round the sun had 15% more near-white.
 const float kSunScatter = 0.65;      // of the sun colour, at even scattering
 const float kG = 0.7;
+// Enhanced's air toward the sun: the sun's light through the forward half of
+// the lobe (HG g 0.7 - Enhanced's field 037 is 0.7 or 0.8 on its profiles),
+// set against the Barrens toward an evening sun (docs/re/enhanced-lighting.md
+// 5b).
+const float kAirSun = 0.39;
+const float kAirSunStart = 400.0;  // yards of air before the sun's share
 const float kMaxLight = 0.88;        // the 8-bit scene's brightest haze channel
 const float kMaxLightHdr = 1.5;      // and the HDR scene's (enhanced_tonemap::kHazeCap)
 
 float phaseHG(float cosTheta, float g) {
     float g2 = g * g;
     return (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * g * cosTheta, 1e-4), 1.5);
+}
+
+// Its brightest channel eased onto maxLight past 70% of it (Reinhard),
+// keeping the hue; never below minTop, so light no brighter than minTop is
+// left as it is.
+vec3 softCap(vec3 light, float maxLight, float minTop) {
+    maxLight = max(maxLight, minTop + 1e-3);
+    float top = max(max(light.r, light.g), max(light.b, 1e-4));
+    float knee = max(0.7 * maxLight, minTop);
+    float over = max(top - knee, 0.0);
+    float eased = min(top, knee) + over * (maxLight - knee) / (maxLight - knee + over);
+    return light * (eased / top);
 }
 
 void main() {
@@ -96,6 +114,11 @@ void main() {
     // the fog colour's light taken in from the camera out, thinning with
     // height as the haze below. Not on the sky, whose dome carries its own
     // fog band.
+    vec3 travel = normalize(lightDir.xyz);
+    float sunUp = smoothstep(0.0, 0.08, -travel.z);
+    float cosSun = dot(-travel, v);
+    float maxLight = (int(pc.target.w + 0.5) & 8) != 0 ? kMaxLightHdr : kMaxLight;
+
     float airT = 1.0;
     vec3 airLight = vec3(0.0);
     if (pc.air.a > 0.0 && d < 1.0) {
@@ -103,7 +126,34 @@ void main() {
         float kA = v.z / kHeightScale;
         float odA = abs(kA) < 1e-5 ? baseA * len : baseA * (1.0 - exp(-kA * len)) / kA;
         airT = mix(1.0, exp(-odA * strength), outdoors);
-        airLight = fogColor.rgb * (1.0 - airT);
+        float lenNear = min(len, kAirSunStart);
+        float odNear = abs(kA) < 1e-5 ? baseA * lenNear : baseA * (1.0 - exp(-kA * lenNear)) / kA;
+        float airTNear = mix(1.0, exp(-odNear * strength), outdoors);
+        // Enhanced's layer takes in the sun through its phase lookup as well
+        // as its own light (scatter * phase(cos) * intensity): toward a low
+        // sun its air is the sun's gold, not the sky fog's colour. The
+        // Barrens at 17:45 (Jered's video frame) had its far hills orange,
+        // hue 26-27 and blue/red 0.30-0.49, where this layer alone left
+        // them purple-grey (hue 327-12, blue/red 0.73-0.94) - the Barrens'
+        // evening SkyFogColor. The forward half of the lobe only: the even
+        // part is the fog colour's, set against Enhanced's Goldshire
+        // (docs/re/enhanced-lighting.md 5b), and no view away from the sun
+        // changes. And only from kAirSunStart out: over the whole ray the
+        // gold took the hills a few hundred yards off as well, as bright as
+        // the sky (luminance 159 against Enhanced's 71-118 there), and the
+        // layers the frame shows - dark near trees and ridges, the farthest
+        // hills paling into the sky - were one gold sheet. Enhanced's own
+        // layer thickens with distance too (its curve 1 + k1 t^k0, field
+        // 036's 1-16 the likely exponent), so the near air stays clear.
+        float lobe = phaseHG(cosSun, kG) * max(cosSun, 0.0) * clamp(pc.air.r, 0.0, 1.0) * sunUp;
+        // Held under the 8-bit scene's cap even in the HDR one: the frame's
+        // hills toward the sun pale into the sky without going white (at the
+        // HDR cap the Goldshire sun view's near-white share rose 1.19% to
+        // 1.34%). From no lower than the fog colour itself, so with no lobe
+        // the layer is what it was.
+        float fogTop = max(max(fogColor.r, fogColor.g), fogColor.b);
+        vec3 sunAir = softCap(fogColor.rgb + lightColor.rgb * (kAirSun * lobe), kMaxLight, fogTop);
+        airLight = fogColor.rgb * (1.0 - airTNear) + sunAir * (airTNear - airT);
     }
 
     float run = max(L - kStart, 0.0);
@@ -121,13 +171,11 @@ void main() {
     float depthOD = abs(k) < 1e-5 ? base * run : base * (1.0 - exp(-k * run)) / k;
     float T = exp(-depthOD * strength);
 
-    vec3 travel = normalize(lightDir.xyz);
-    float sunUp = smoothstep(0.0, 0.08, -travel.z);
     // Its forward share only toward a sun the sky shows: under a sky with no
     // sun disc (Outland's, LightingParams::sunDisc) the lobe is left out - the
     // even share stays as it was, so the air elsewhere is no brighter - rather
     // than whiting out the sky round a planet as if it were the sun.
-    float phase = 0.4 + 0.6 * phaseHG(dot(-travel, v), kG) * clamp(pc.air.r, 0.0, 1.0);
+    float phase = 0.4 + 0.6 * phaseHG(cosSun, kG) * clamp(pc.air.r, 0.0, 1.0);
     vec3 light = fogColor.rgb * kSkyScatter + lightColor.rgb * (phase * kSunScatter * sunUp);
     // Capped near white: past it the haze only blows a bright sky and the
     // land under it out (the Barrens toward an evening sun, round 4).
@@ -144,12 +192,7 @@ void main() {
     // A soft knee, not a hard limit: past 70% of the cap the brightest
     // channel eases onto it (Reinhard), so a gradient round the sun has no
     // edge where the limit starts (a hard min printed a ring there).
-    float maxLight = (int(pc.target.w + 0.5) & 8) != 0 ? kMaxLightHdr : kMaxLight;
-    float top = max(max(light.r, light.g), max(light.b, 1e-4));
-    float knee = 0.7 * maxLight;
-    float over = max(top - knee, 0.0);
-    float eased = min(top, knee) + over * (maxLight - knee) / (maxLight - knee + over);
-    light *= eased / top;
+    light = softCap(light, maxLight, 0.0);
     float a = mix(1.0, T, outdoors);
     // The haze is the farther of the two (it starts kStart out): what
     // reaches the eye is the haze's light through the air, and the air's own.
