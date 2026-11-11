@@ -9355,7 +9355,10 @@ void LuaEngine::registerCoreAPI() {
         "IsEnabled=1,IsEquippedItem=1,IsEventRegistered=1,IsMouseEnabled=1,\n"
         "IsObjectType=1,IsProtected=1,IsShown=1,IsUnderMouse=1,\n"
         "IsUnit=1,IsVisible=1,LockHighlight=1,Lower=1,MoveUIPanel=1,\n"
-        "New=1,NumLines=1,OnFinished=1,OnUpdate=1,PageDown=1,PageUp=1,\n"
+        // Not OnUpdate or OnFinished: those are script names, which no
+        // widget has as a method. SparkleFrame:OnUpdate is FrameXML's own
+        // Lua table, not a widget.
+        "New=1,NumLines=1,PageDown=1,PageUp=1,\n"
         // PingLocation is a real binding now, applied after this set.
         "Play=1,Raise=1,RefreshValue=1,RegisterAutoHide=1,RegisterEvent=1,\n"
         "RegisterForClicks=1,RegisterForDrag=1,ReleaseFrame=1,\n"
@@ -9496,7 +9499,11 @@ void LuaEngine::registerCoreAPI() {
         // than at lookup time. It cannot help the family below that, which
         // answers nil - a nil cannot record anything, and the caller raises on
         // the next line and names itself in the traceback.
-        "    if known[key] then\n"
+        // Never for a script name. frame.OnUpdate is nil on every widget, and
+        // oUF's castbar does SetScript('OnUpdate', element.OnUpdate or
+        // onUpdate): a no-op here replaced its whole update, so ElvUI's cast
+        // bar never filled and showed only its red latency zone.
+        "    if known[key] and not string.find(key, '^On%u') then\n"
         "        if not seen[key] then\n"
         "            seen[key] = true\n"
         "            if __WoweeRecordMissingApi then __WoweeRecordMissingApi('noop:' .. key) end\n"

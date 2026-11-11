@@ -225,6 +225,18 @@ TEST_CASE_METHOD(Integration, "Tab runs TargetNearestEnemy from the key event", 
     truth("#calls == 1");
 }
 
+TEST_CASE_METHOD(Integration, "A script name read as a field is nil, not a method", "[lua][widget]") {
+    // oUF's castbar: SetScript('OnUpdate', element.OnUpdate or onUpdate). A
+    // no-op answering frame.OnUpdate replaced the whole update, so ElvUI's
+    // cast bar never filled or counted down.
+    run("local bar = CreateFrame('StatusBar')\n"
+        "WoweeTestOnUpdate, WoweeTestOnFinished = bar.OnUpdate, bar.OnFinished\n"
+        "WoweeTestGetValue = bar.GetValue");
+    truth("WoweeTestOnUpdate == nil");
+    truth("WoweeTestOnFinished == nil");
+    truth("type(WoweeTestGetValue) == 'function'");
+}
+
 TEST_CASE_METHOD(Integration, "Keyboard frames use layout keys while binding capture uses physical keys", "[input][lua][O7]") {
     run(R"lua(
         dialog = CreateFrame('Frame', 'LayoutDialog', UIParent)
