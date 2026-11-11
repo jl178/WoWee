@@ -25,6 +25,13 @@
 #include <cstdlib>
 #include <cstring>
 
+namespace {
+// How much of the sun's light is added to the sky straight toward a sun
+// under 12 degrees (enhanced_haze.frag): fitted to Jered's Barrens frame at
+// 17:45 (x2.5: 237 by the sun, 211 off it; x4: 241, 220; frame 234, 220).
+constexpr float kEnhancedLowSunSkyLight = 3.0f;
+}  // namespace
+
 namespace wowee {
 namespace rendering {
 
@@ -224,6 +231,9 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
             air.w = lightingManager->getLightingParams().airDensity;
             air.r = lightingManager->getLightingParams().sunDisc;
         }
+        // The sun's light on the sky toward a low sun (enhanced_haze.frag),
+        // the HDR scene only.
+        if (vkCtx->isHdrScene()) air.g = kEnhancedLowSunSkyLight;
         if (sunHaze_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.8f * wx, hazeFlags, air)) {
             vkCtx->gpuMark(cmd, "sun haze");
         }

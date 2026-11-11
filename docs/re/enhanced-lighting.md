@@ -1973,6 +1973,19 @@ sun through them) is not Duskwood: Enhanced's Duskwood profile (7791) is teal
 on every key; its gold matches Elwynn's dusk (smog `#fea83c` at 20:40), where
 the halo now applies.
 
+**Under the shoulder (round 2).** What the halo could not reach is closed
+before the tone curve, on the sky alone: the sun haze pass
+(`enhanced_haze.frag`), which already reads the depth and runs over every
+pixel once the opaque scene is done, adds the sun's light to pixels at the
+far plane, by the halo's weight (the cube of the cosine toward the sun, full
+under a 12 degree sun, gone by 30), in Enhanced's daylight with the sun shown
+and only in the HDR scene (`kEnhancedLowSunSkyLight` 3). The tone pass itself
+(`fxaa.frag`) has no depth to tell the sky by and its push block is full;
+the result is the same curve on a brighter sky. A gain on the sky instead
+reached the brightness but bleached it - each channel climbs the shoulder on
+its own, so blue caught red (blue/red 0.74 -> 0.93 at a 4x gain, frame 0.67);
+the sun's orange light added keeps red ahead.
+
 ## 10. Not done, and why
 
 - Enhanced's ZoneLight polygons (section 2b), and its keyframes for the 11

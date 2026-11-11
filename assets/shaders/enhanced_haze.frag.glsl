@@ -43,7 +43,9 @@ layout(push_constant) uniform Push {
     mat4 invViewProj;  // clip -> world, this frame's
     vec4 target;       // xy the render extent, z strength (0..2; weather thins it), w flags (4 debug, 8 HDR scene)
     vec4 air;          // Enhanced's air: a its density per yard at the ground (0 = none);
-                       // r the forward lobe's share (0 under a sky with no sun disc); gb unused
+                       // r the forward lobe's share (0 under a sky with no sun disc);
+                       // g the sun's light added to the sky toward a low sun (HDR scene only,
+                       // 0 = none); b unused
 } pc;
 
 layout(location = 0) out vec4 outColor;
@@ -197,10 +199,30 @@ void main() {
     // The haze is the farther of the two (it starts kStart out): what
     // reaches the eye is the haze's light through the air, and the air's own.
     float total = a * airT;
-    if (total >= 0.999) discard;
+    // The sky toward a low sun, lit up before the tone curve - the sky alone
+    // (depth at the far plane), the HDR scene alone, and only in Enhanced's
+    // daylight (the air's density is 0 outside it) with the sun shown.
+    // Enhanced's sky round a low sun is a pale gold near white (Jered's
+    // Barrens frame at 17:45: 234 by the sun, 220 30-40 degrees off it, 248
+    // at its brightest) that the dome's halo (skybox.frag) could not reach
+    // under the tone curve's shoulder: at full strength it stopped at 218.
+    // So the sun's own light is added to that sky, by the halo's weight -
+    // the cube of the cosine toward the sun, full under a 12 degree sun and
+    // gone by 30 - so the noon and morning skies, the ground and every model
+    // are as they were. A gain on the sky instead reached the brightness but
+    // bleached it: each channel climbs the shoulder on its own, blue caught
+    // red and the gold went white (blue/red 0.74 -> 0.93, frame 0.67).
+    vec3 skyWarm = vec3(0.0);
+    if (d >= 1.0 && pc.air.g > 0.0 && pc.air.a > 0.0 && (int(pc.target.w + 0.5) & 8) != 0) {
+        float toward = max(cosSun, 0.0);
+        float low = 1.0 - smoothstep(0.208, 0.5, -travel.z);
+        float w = toward * toward * toward * low * sunUp * clamp(pc.air.r, 0.0, 1.0) * outdoors;
+        skyWarm = lightColor.rgb * (pc.air.g * w);
+    }
+    if (total >= 0.999 && skyWarm == vec3(0.0)) discard;
     if ((int(pc.target.w + 0.5) & 4) != 0) {
         outColor = vec4(vec3(1.0 - total), 0.0);   // WOWEE_CONTACT_SHADOW_DEBUG: how much air
         return;
     }
-    outColor = vec4(light * (1.0 - a) * airT + airLight, total);
+    outColor = vec4(light * (1.0 - a) * airT + airLight + skyWarm, total);
 }
