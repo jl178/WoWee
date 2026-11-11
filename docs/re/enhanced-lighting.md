@@ -1339,6 +1339,23 @@ worst slice 11 ms (76 ms before), no hitch frame with more than 4.2 ms of
 grass in it; the hitches left are terrain tiles streaming in after the
 teleports. Frame median 16.7-16.9 ms (vsync), GPU 10.1-10.3 ms.
 
+Round 5 (Jered's Barrens frame, tall gold wheat to the horizon toward an
+evening sun): Enhanced does not draw denser or taller clutter than its data
+says - its rows are 1.12's, the Barrens' effects (647, 1935, 3614, 3615:
+density 8, `BarGra03`-`08`, `BarRoc01`/`02`) the same as 3.3.5's. Wowee drew
+none of it. 374 of 3.3.5's 580 `GroundEffectDoodad` rows name their model
+`.mdx` (the Barrens, Durotar, Ashenvale, Arathi...), and the table loader
+mapped only `.mdl` to `.m2`, so every one of those failed to load
+(`modelMissing=14`, `added=0` on each Barrens tile) and those zones were
+bare in every preset. Both now go through `pipeline::modelPathToM2`: 20000-
+29000 pieces a Barrens tile at the preset's 150%, and the wheat stands to
+the character's waist as in the frame. Cost, standing in the wheat toward
+the sun at 17:45 and switching the setting 150/0/150/0/150 in one run (three
+other clients sharing the laptop's GPU): frame median 22.9 (first, warming),
+20.1, 20.0, 20.8, 18.4 ms - no difference above the noise once the tiles
+are built. The size spread (Enhanced 0.67-1.33, Wowee 0.80-1.15, the same
+mean) is not ported; side by side it did not read.
+
 ## 8. What the Enhanced preset sets
 
 The "Enhanced" quality preset (`kGraphicsPresets[kEnhancedPresetIndex]`,

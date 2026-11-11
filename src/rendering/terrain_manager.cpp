@@ -2435,10 +2435,10 @@ void TerrainManager::ensureGroundEffectTablesLoaded() {
         std::string modelName = groundEffectDoodad->getString(i, 1);
         if (doodadId == 0 || modelName.empty()) continue;
 
-        std::string lower = toLowerCopy(modelName);
-        if (lower.size() > 4 && lower.substr(lower.size() - 4) == ".mdl") {
-            lower = lower.substr(0, lower.size() - 4) + ".m2";
-        }
+        // .mdl and .mdx alike: 374 of 3.3.5's 580 rows say .mdx (the
+        // Barrens', Durotar's, Ashenvale's...), and reading only .mdl left
+        // all of them unloaded - no clutter at all in those zones.
+        std::string lower = pipeline::modelPathToM2(toLowerCopy(modelName));
         if (lower.find('\\') != std::string::npos || lower.find('/') != std::string::npos) {
             groundDoodadModelById_[doodadId] = lower;
         } else {
