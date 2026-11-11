@@ -1986,6 +1986,29 @@ reached the brightness but bleached it - each channel climbs the shoulder on
 its own, so blue caught red (blue/red 0.74 -> 0.93 at a 4x gain, frame 0.67);
 the sun's orange light added keeps red ahead.
 
+**The dusk glow.** Jered's dusk frame (`yt_dusk_055028`, Elwynn, the sun a
+few degrees up) has a large warm glow round the sun through the trees, the
+trunks dark against it: the gap round the sun luminance 202, the air between
+the trunks 43, the trunks 20-35, every band hue 24-34. The froxel mist
+cannot give it: at a 3 degree sun its shadow map is still cast mostly from
+3.3.5's 17.5 degree direction, so the air toward the sun sits in the trees'
+shadow. It reads as unshadowed air - Enhanced's global fog layer and its sun
+haze - so `enhanced_haze.frag` adds it: the sun's light through a forward HG
+lobe (g 0.75) times the cosine, no extinction, soft-capped, and only where
+the view ray travels far: none nearer than 130 yards, whole from 400, so the
+glow is in the far air and the sky and the trunks, lamps and the player stay
+silhouettes against it (filled in from the camera, the first version lay as
+an orange disc on the near trunk and washed the inn 30 yards off); under a 15
+degree sun (full under 8, gone a little below the horizon), outdoors, the
+sun shown, under the Enhanced daylight (`kEnhancedDuskGlow` 0.3). Its gate is
+not the air's density, which is 0 once Enhanced's daylight keys end - before
+the sun is down. In Wowee's clock the frame's light is about 19:00: by 19:30
+Enhanced's sun has no light left to scatter and nothing is added. Filled in
+from the camera at 0.1 the character 30 yards from the inn went 41.5 -> 112.6
+in luminance and the trunk in front of the camera 27.7 -> 31.4; from 130
+yards out at 0.3 they are 41.2 and 27.6 (as without the glow) and the warm
+light is in the far gaps between the trees.
+
 ## 10. Not done, and why
 
 - Enhanced's ZoneLight polygons (section 2b), and its keyframes for the 11

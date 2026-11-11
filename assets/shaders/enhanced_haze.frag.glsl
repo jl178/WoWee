@@ -45,7 +45,7 @@ layout(push_constant) uniform Push {
     vec4 air;          // Enhanced's air: a its density per yard at the ground (0 = none);
                        // r the forward lobe's share (0 under a sky with no sun disc);
                        // g the sun's light added to the sky toward a low sun (HDR scene only,
-                       // 0 = none); b unused
+                       // 0 = none); b the dusk glow's strength (0 = none)
 } pc;
 
 layout(location = 0) out vec4 outColor;
@@ -73,6 +73,9 @@ const float kG = 0.7;
 // set against the Barrens toward an evening sun (docs/re/enhanced-lighting.md
 // 5b).
 const float kAirSun = 0.39;
+const float kDuskG = 0.75;             // the dusk glow's lobe: forward, soft enough to show no edge
+const float kDuskStart = 130.0;        // yards before the dusk glow begins (near things stay silhouettes)
+const float kDuskFull = 400.0;         // and where it is whole
 const float kAirSunStart = 400.0;  // yards of air before the sun's share
 const float kMaxLight = 0.88;        // the 8-bit scene's brightest haze channel
 const float kMaxLightHdr = 1.5;      // and the HDR scene's (enhanced_tonemap::kHazeCap)
@@ -158,10 +161,42 @@ void main() {
         airLight = fogColor.rgb * (1.0 - airTNear) + sunAir * (airTNear - airT);
     }
 
+    // The dusk glow: Enhanced's air toward a sun near the horizon is a large
+    // warm glow, the trees and road in front of it veiled orange (Jered's
+    // Elwynn dusk frame, about 19:30, sun 3 degrees up: the gap round the
+    // sun 202, the air between the trunks 43, the trunks 20-35, all hue
+    // 24-34). That air is lit unshadowed - Enhanced's global fog layer and
+    // this haze, not the shadowed froxel mist, whose shadow map at a 3
+    // degree sun is still cast mostly from 3.3.5's 17.5 degree direction,
+    // so the air toward the sun sat in the trees' shadow. Added light only
+    // (no extinction), and only where the view ray travels far: none
+    // nearer than kDuskStart, whole from kDuskFull - so the glow lives in
+    // the far air and the sky and the near trunks, lamps and the player
+    // stay dark against it, cut out as silhouettes. Filled in from the
+    // camera (over 250 yards, from 0) it lay as an orange disc over the
+    // trunk in front of the camera and washed the inn 30 yards off and the
+    // character (round 1). A soft forward lobe of the sun's colour, so its
+    // falloff shows no circle on the far terrain; under a 15 degree sun, full under 8
+    // and as the sun sets, gone a little below the horizon - so the noon and
+    // morning views, and every evening view away from the sun, keep what
+    // they had. Under the Enhanced daylight with the sun shown (not by the
+    // air's density, which is 0 once that daylight's keys end, before the
+    // sun is down).
+    vec3 duskLight = vec3(0.0);
+    if (pc.air.b > 0.0) {
+        float sunZ = -travel.z;
+        float dusk = smoothstep(-0.03, 0.02, sunZ) * (1.0 - smoothstep(0.139, 0.259, sunZ));
+        float lobe = phaseHG(cosSun, kDuskG) * max(cosSun, 0.0);
+        float fill = smoothstep(kDuskStart, kDuskFull, L);
+        vec3 warm = lightColor.rgb * (pc.air.b * dusk * lobe * fill * clamp(pc.air.r, 0.0, 1.0) * outdoors);
+        float wTop = max(max(warm.r, warm.g), max(warm.b, 0.0));
+        duskLight = wTop > 1e-4 ? softCap(warm, maxLight, 0.0) : vec3(0.0);
+    }
+
     float run = max(L - kStart, 0.0);
     if (run <= 0.0) {
-        if (airT >= 0.999) discard;
-        outColor = vec4(airLight, airT);
+        if (airT >= 0.999 && duskLight == vec3(0.0)) discard;
+        outColor = vec4(airLight + duskLight, airT);
         return;
     }
     // The ramp: the first kRamp yards past the start count at a growing
@@ -219,10 +254,10 @@ void main() {
         float w = toward * toward * toward * low * sunUp * clamp(pc.air.r, 0.0, 1.0) * outdoors;
         skyWarm = lightColor.rgb * (pc.air.g * w);
     }
-    if (total >= 0.999 && skyWarm == vec3(0.0)) discard;
+    if (total >= 0.999 && skyWarm == vec3(0.0) && duskLight == vec3(0.0)) discard;
     if ((int(pc.target.w + 0.5) & 4) != 0) {
         outColor = vec4(vec3(1.0 - total), 0.0);   // WOWEE_CONTACT_SHADOW_DEBUG: how much air
         return;
     }
-    outColor = vec4(light * (1.0 - a) * airT + airLight + skyWarm, total);
+    outColor = vec4(light * (1.0 - a) * airT + airLight + skyWarm + duskLight, total);
 }

@@ -30,6 +30,9 @@ namespace {
 // under 12 degrees (enhanced_haze.frag): fitted to Jered's Barrens frame at
 // 17:45 (x2.5: 237 by the sun, 211 off it; x4: 241, 220; frame 234, 220).
 constexpr float kEnhancedLowSunSkyLight = 3.0f;
+// The dusk glow's strength (enhanced_haze.frag): fitted to Jered's Elwynn
+// dusk frame.
+constexpr float kEnhancedDuskGlow = 0.3f;
 }  // namespace
 
 namespace wowee {
@@ -234,6 +237,8 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
         // The sun's light on the sky toward a low sun (enhanced_haze.frag),
         // the HDR scene only.
         if (vkCtx->isHdrScene()) air.g = kEnhancedLowSunSkyLight;
+        // The dusk glow toward a sun under 15 degrees (enhanced_haze.frag).
+        air.b = enh_.enhancedDaylight ? kEnhancedDuskGlow : 0.0f;
         if (sunHaze_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.8f * wx, hazeFlags, air)) {
             vkCtx->gpuMark(cmd, "sun haze");
         }
