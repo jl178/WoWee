@@ -132,6 +132,11 @@ const float kSkyBias = 0.35;
 // How much of the sky behind it a slab takes: all of it - the gaps between
 // a crown's leaves are already holes in the maps (alpha-tested).
 const float kSkyDensity = 1.0;
+// A slab whose top stands kSkyHighFrom yards over the point and more takes
+// less of the sky, kSkyHighOpen less from kSkyHighTo up.
+const float kSkyHighFrom = 20.0;
+const float kSkyHighTo = 50.0;
+const float kSkyHighOpen = 0.7;
 // The quad pools its looks across depths this close (yards, and per yard).
 const float kSkyQuadYards = 0.3;
 const float kSkyQuadPerYard = 0.05;
@@ -146,6 +151,11 @@ const float kModelClosed = 0.9;
 // all of it from kOpenTo.
 const float kOpenFrom = 0.3;
 const float kOpenTo = 0.9;
+// Deep shade (none of the ground round it lit) keeps this much of the light
+// the surface shaders gave it.
+const float kDeepKeep = 1.0;
+const float kDeepFrom = 60.0;
+const float kDeepTo = 90.0;
 const float kGiSky = 0.15;           // x the fog colour (the sky's horizon)
 const float kGiBounce = 0.6;         // x the sun x the ground's colour
 const float kGiBounceShaded = 0.8;   // of it with none of the ground round lit
@@ -279,6 +289,19 @@ float skyGroundAt(vec2 uv) {
     return pc.sky.z - kSkyDepth * textureLod(uSkyGround, uv, 0.0).r;
 }
 
+// The terrain's height round uv nearest to z, of the four texels about it:
+// on a slope a half-yard texel's own height is a hand off the surface
+// between, and steep ground (Teldrassil's) read as standing off the ground.
+float skyGroundNear(vec2 uv, float z) {
+    vec4 h = pc.sky.z - kSkyDepth * textureGather(uSkyGround, uv, 0);
+    vec4 d = abs(h - z);
+    float best = h.x, bd = d.x;
+    if (d.y < bd) { best = h.y; bd = d.y; }
+    if (d.z < bd) { best = h.z; bd = d.z; }
+    if (d.w < bd) { best = h.w; }
+    return best;
+}
+
 // What of the sky a point sees, weighted as an upward face takes it. Along
 // each direction, what stands at each reach is a slab from its underside to
 // its top, and hides the elevations between them: sin^2 of the top's
@@ -299,9 +322,15 @@ float skyVisibilityLane(vec3 p, vec2 uv, int lane) {
         for (int k = 0; k < kSkyReaches; ++k) {
             float r = kSkyReach[k];
             vec2 q = uv + dir * r;
-            float hi = sin2Elev((skyTop(q) - p.z - kSkyBias) / r);
+            float top = skyTop(q) - p.z;
+            float hi = sin2Elev((top - kSkyBias) / r);
             float lo = sin2Elev((skyFoot(q) - p.z) / r);
-            v *= 1.0 - kSkyDensity * max(hi - lo, 0.0);
+            // What stands far higher than the point - a canopy tens of
+            // yards up, a city's great tree, a hall's roof - takes only part
+            // of the sky: light comes in under it from the sides, and the
+            // maps cannot tell such a hollow from a solid column.
+            float high = 1.0 - kSkyHighOpen * smoothstep(kSkyHighFrom, kSkyHighTo, top);
+            v *= 1.0 - kSkyDensity * high * max(hi - lo, 0.0);
         }
         acc += v;
     }
@@ -471,7 +500,7 @@ void main() {
         float edge = kSkyReach[kSkyReaches - 1] / kSkySpan;
         skyInside = smoothstep(edge, edge + 0.08, min(se.x, se.y)) * (1.0 - clamp(shadowParams.w, 0.0, 1.0));
         if (skyInside > 0.0) {
-            groundZ = skyGroundAt(skyUv);
+            groundZ = skyGroundNear(skyUv, pos.z);
             above = pos.z - groundZ;
             // A leaf: off the ground, inside something whose underside there
             // (the lower of two looks a yard apart: a pixel on a trunk's side
@@ -673,12 +702,18 @@ void main() {
     // - a leaf keeps the bounce light above as it is: the crowns' colour was
     //   matched with it, and the warm bounce stays out of them.
     if (skyInside > 0.0) {
-        float onGround = (1.0 - smoothstep(0.25, 0.75, above)) * smoothstep(0.5, 0.8, n.z);
+        // The ground: the terrain within a yard of it, facing more up than
+        // sideways. What is taken for the ground is lit as terrain.frag
+        // lights it under the sky shade (the sun under its shadow alone);
+        // ground taken for a model was divided by a sun it never had.
+        float onGround = (1.0 - smoothstep(0.5, 1.0, abs(above))) * smoothstep(0.35, 0.6, n.z);
         float nl = dot(n, ldir);
         float ramp = mix(0.7, 1.1, 0.5 + 0.5 * clamp(nl, -1.0, 1.0));
         float rampFlat = mix(0.7, 1.1, 0.5 + 0.5 * clamp(ldir.z, -1.0, 1.0));
         ramp = mix(ramp, ramp / rampFlat, onGround);
-        float sunKeep = mix(mix(1.0, sunLit, clamp(shadowParams.y, 0.0, 1.0)), sunLit, onGround);
+        // The sun in shade keeps 1 - shadowParams.y of itself on models
+        // (m2.frag) and on the ground (terrain.frag, under the sky shade).
+        float sunKeep = mix(1.0, sunLit, clamp(shadowParams.y, 0.0, 1.0));
         vec3 ambF = amb * ramp;
         vec3 difF = lightColor.rgb * (max(nl, 0.0) * sunKeep * (1.0 - indoor));
         vec3 beforeF = max(ambF + difF, vec3(1e-3));
@@ -689,6 +724,7 @@ void main() {
         vec3 fF = fModel;
         if (onGround > 0.0) {
             vec3 gi = vec3(0.0);
+            float litGround = 1.0;
             // (Ground whose rebuilt facing turns from the sun - bumps,
             // depth noise - is asked of the shadow map as level ground.)
             float sunVis = sunLit;
@@ -713,9 +749,10 @@ void main() {
                 // Enhanced's shade; squared, as the light's colour is
                 // already scaled to hold level ground's light as the sun
                 // sinks (enhanced_palette::sunIrradianceScale).
+                litGround = groundSunlit(pos, ldir, skyLane);
                 float groundSun = pow(clamp(ldir.z, 0.0, 1.0) / kGiSunRef, kGiSunPow);
                 vec3 bounce = lightColor.rgb * ground *
-                              (kGiBounce * groundSun * mix(kGiBounceShaded, 1.0, groundSunlit(pos, ldir, skyLane)));
+                              (kGiBounce * groundSun * mix(kGiBounceShaded, 1.0, litGround));
                 vec3 skyHue = amb / max(lum(amb), 1e-3);
                 bounce = mix(bounce, skyHue * lum(bounce), kGiCool * (1.0 - dusk));
                 float open = smoothstep(kOpenFrom, kOpenTo, vis);
@@ -727,7 +764,25 @@ void main() {
             vec3 shadeLight = ambF * (occlusion * skyK) + gi;
             vec3 sunHue = lightColor.rgb / max(lum(lightColor.rgb), 1e-3);
             shadeLight = mix(shadeLight, sunHue * lum(shadeLight), kDuskWarm * dusk * shade);
-            vec3 fGround = clamp((shadeLight + difF) / beforeF, 0.0, kEnhancedMaxLift);
+            // The sun under its shadow alone: what terrain.frag kept of it in
+            // shade is taken out, and the fill above stands in. Deep shade -
+            // no sunlit ground round it, all day under a great canopy
+            // (Teldrassil's) - keeps what it had: there the sun's own light,
+            // come round and under the canopy, is all the light there is,
+            // and on the ambient and the fill alone the ground went near
+            // black and the ambient's purple.
+            vec3 difTrue = lightColor.rgb * (max(nl, 0.0) * sunLit * (1.0 - indoor));
+            // Deep: under something standing kDeepFrom yards and more over
+            // the point here or 12 yards round (a great canopy, not an oak),
+            // with none of the ground round lit.
+            float canopy = skyTop(skyUv) - pos.z;
+            for (int k = 0; k < 4; ++k) {
+                vec2 o = vec2(k < 2 ? (k == 0 ? 1.0 : -1.0) : 0.0, k < 2 ? 0.0 : (k == 2 ? 1.0 : -1.0));
+                canopy = max(canopy, skyTop(skyUv + o * (12.0 / kSkySpan)) - pos.z);
+            }
+            float deep = smoothstep(kDeepFrom, kDeepTo, canopy) * (1.0 - litGround) * shade;
+            vec3 target = mix(shadeLight + difTrue, beforeF, kDeepKeep * deep);
+            vec3 fGround = clamp(target / beforeF, 0.0, kEnhancedMaxLift);
             fF = mix(fModel, fGround, onGround);
         }
         if ((flags & 32) != 0) fF = vec3(vis);

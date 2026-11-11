@@ -1441,6 +1441,74 @@ Sheets: `sv/sheet2_matched.png` (Enhanced | before | now),
 `sv/sheet2_regress.png` (before | now), `sv/sheet2_eve.png` (before the sky
 shade | before | now).
 
+**Third round: Teldrassil.** The QA tour found Darnassus and Dolanaar far
+too dark at noon with the sky shade on: a frame mean of 0.117 and 0.148,
+against 0.214 and 0.278 with it off and 0.166 and 0.219 on Ultra, and the
+darkest twentieth near black. Under the world tree the live shadow map
+shades the ground all day. Teldrassil's ambient is dim and purple, and with
+the sun taken out by its shadow, that ambient was all the ground had. The
+fill could not put the sun's colour back. The pass multiplies each channel
+of the colour already there, with the lift capped at 2.5x, and a purple
+ambient has little green to lift. Three changes, the first doing most of
+the work:
+
+- **The terrain keeps the floor and the pass takes it out.** Under the sky
+  shade, `terrain.frag` now keeps the Enhanced floor's share of the sun under
+  the live shadow (1 - shadowParams.y), as models do. Where the live map
+  lights the ground, the baked shadow (MCSH), which the pass cannot see,
+  takes the sun whole. The bounce pass knows how much sky and how much
+  sunlit ground surround a point, and takes that share out in the open
+  shade it fills. Deep shade keeps the light as the terrain gave it. Deep
+  shade means something stands 60 to 90 yards and more over the point or
+  12 yards round it (a great canopy, not an Elwynn oak), and none of the
+  ground round it is sunlit (`groundSunlit`). Taking light out is a
+  division the pass can always make; putting it back was not. Past the
+  height field's edge, the ground keeps the floor.
+- **What stands far above hides less of the sky.** When a slab's top stands
+  20 to 50 yards over the point, it hides 30% to 100% less of the sky. A
+  great tree's crown or a hall's roof is a hollow that the maps cannot tell
+  from a solid column, and side light comes in under it.
+- **The ground is found on steep ground.** The pass now takes, of the four
+  texels round the point, the terrain height nearest it. Ground within a
+  yard of that height, facing more up than sideways, counts as ground. On
+  Teldrassil's slopes a single half-yard texel stood a hand off the surface,
+  and the pass took the ground for a model.
+
+Darnassus and Dolanaar at noon (frame mean / 5th percentile):
+
+| | Ultra | sky shade off | before | now |
+|---|---|---|---|---|
+| Darnassus | 0.166 / 0.100 | 0.214 / 0.074 | 0.117 / 0.024 | 0.200 / 0.074 |
+| Dolanaar | 0.219 / 0.094 | 0.278 / 0.052 | 0.148 / 0.028 | 0.251 / 0.049 |
+
+Goldshire and Elwynn against 9573bd7 (three runs each; `sv/avg2.py`,
+`sv/evehue.py`, `sv/rows.py`; gaps against Enhanced as in round two):
+
+| | before | now |
+|---|---|---|
+| Barrens noon road mean / p95 / p99 | 0.552 / 0.700 / 0.735 | 0.550 / 0.700 / 0.735 |
+| into the sun, pixels over 0.92 | 1.34% | 1.35% |
+| Goldshire evening / Elwynn forest / away from the sun mean | -5.0% / -3.4% / -1.5% | -5.5% / -2.6% / -1.3% |
+| evening shaded road red, blue / luminance | 1.43, 0.69 | 1.42, 0.70 |
+| crown chroma gap | +51.1% | +50.6% |
+| gap sum / region sum | 358.7 / 333.9 | 350.6 / 317.9 |
+| road shade luminance gap | +18.3% | +15.5% |
+| road "lit" luminance gap | -6.8% | -9.4% |
+| road lit / shade | -21.2% | -21.5% |
+| grass luminance gap | -10.4% | -5.8% |
+
+The one row that moved is the brightest third of the road in the inn and
+15:23 views. There it is the filled shade by the inn, which is brighter than
+the sunlit road beside it, and it came down 3 to 6% with the floor kept in
+the terrain. The pass's estimate of the terrain's light and the terrain's
+own light differ a little, and with the sun's floor in both the fill lands
+closer to its target. The shade gaps all closed, the region sum fell, and
+the cross view, whose road is sunlit, did not move.
+
+Sheets: `sv/sheet3_teldrassil.png` (Ultra | sky shade off | before | now),
+`sv/sheet3_matched.png` (Enhanced | before | now), `sv/sheet3_regress.png`
+(before | now).
+
 ## 7. Ground clutter
 
 `GroundEffectTexture` is the 1.12 table: 1060 of the 1065 changed rows went

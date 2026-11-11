@@ -342,7 +342,10 @@ void main() {
     // The baked shadow against the live one, the darker of the two (the
     // stock shader's MIN): a tree the dynamic map already shades is not
     // shaded twice, and ground beyond its reach keeps the baked shadow.
-    shadow = min(shadow, texture(uBakedShadow, LayerUV).r);
+    // (The sky shade keeps the two apart, below.)
+    float liveShadow = shadow;
+    float bakedShadow = texture(uBakedShadow, LayerUV).r;
+    shadow = min(shadow, bakedShadow);
 
     // With the HDR scene (localLightMeta.z bit 32) the clamp lifts: a face
     // the sun and the sky together light past one keeps its hue and goes to
@@ -364,7 +367,18 @@ void main() {
         float rampFlat = mix(0.7, 1.1, 0.5 + 0.5 * clamp(lightDir2.z, -1.0, 1.0));
         groundAmbient *= ramp / rampFlat;
     }
-    vec3 light = groundAmbient + (enhancedGround ? shadow : 1.0) * diff * lightColor.rgb;
+    // The sun in shade keeps the Enhanced floor's share (1 - shadowParams.y)
+    // here; the bounce pass, which knows what of the sky and the sunlit
+    // ground a point has, takes it out in the open shade it fills and keeps
+    // it in deep shade (ambient_occlusion.frag). Out past its field the
+    // ground keeps it. Taken out here, the ground under Teldrassil's great
+    // canopy - shaded all day, lit by a dim purple ambient - went near black.
+    // The baked shadow (MCSH), which the pass cannot see, takes the sun whole
+    // where the live map lights the ground; where the live map shades it
+    // too, the pass decides.
+    float sunFloor = 1.0 - clamp(shadowParams.y, 0.0, 1.0);
+    float sunShade = enhancedGround ? mix(sunFloor, 1.0, liveShadow) * mix(1.0, bakedShadow, liveShadow) : 1.0;
+    vec3 light = groundAmbient + sunShade * diff * lightColor.rgb;
     if ((localLightMeta.z & 32) == 0) light = min(light, vec3(1.0));
     vec3 lit = light * VertColor;
     vec3 result = lit * finalColor.rgb;
@@ -382,7 +396,7 @@ void main() {
     // 1 - shadowParams.y (enhanced_palette::shadowOpacity; Enhanced's shaded
     // road keeps 54% of the sunlit road's colour, the default stays at
     // stock's 70% for now), where stock holds it at 70% whatever the sky.
-    // With the sky shade there is no floor (above).
+    // With the sky shade the shadow is on the sun alone (above).
     if (enhancedGround) {
     } else if ((localLightMeta.z & 128) != 0) {
         // (shadowParams.y is over the stock 0.3 here, so `shadow` above is
