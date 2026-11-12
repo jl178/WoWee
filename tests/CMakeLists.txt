@@ -349,6 +349,15 @@ target_link_libraries(test_creature_skin_rules PRIVATE catch2_main)
 add_test(NAME creature_skin_rules COMMAND test_creature_skin_rules)
 register_test_target(test_creature_skin_rules)
 
+# ── test_creature_scale ─────────────────────────────────────
+# How big stock draws a creature: display, family by level, pets. Pure header.
+add_executable(test_creature_scale test_creature_scale.cpp ${TEST_COMMON_SOURCES})
+target_include_directories(test_creature_scale PRIVATE ${TEST_INCLUDE_DIRS})
+target_include_directories(test_creature_scale SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
+target_link_libraries(test_creature_scale PRIVATE catch2_main)
+add_test(NAME creature_scale COMMAND test_creature_scale)
+register_test_target(test_creature_scale)
+
 # ── test_framexml ───────────────────────────────────────────
 add_executable(test_framexml
     test_framexml.cpp

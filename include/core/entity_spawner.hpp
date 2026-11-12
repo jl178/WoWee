@@ -2,6 +2,7 @@
 
 #include "game/character.hpp"
 #include "core/frame_work_budget.hpp"
+#include "core/creature_scale.hpp"
 #include "game/game_services.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "rendering/animation/weapon_type.hpp"
@@ -521,6 +522,36 @@ private:
     std::unordered_map<uint32_t, std::string> modelIdToPath_;   // modelId → M2 path (from CreatureModelData.dbc)
     std::unordered_map<uint32_t, float> modelIdToScale_;        // modelId → CreatureModelData.ModelScale
     std::unordered_map<uint32_t, uint32_t> modelIdToFlags_;     // modelId → CreatureModelData.Flags
+    /// CreatureFamily.dbc's scale columns by family id (core/creature_scale.hpp).
+    std::unordered_map<uint32_t, core::CreatureFamilyScale> creatureFamilyScales_;
+    /// ChrRaces' Male/FemaleDisplayId by (race << 8 | sex), for the size a
+    /// humanoid NPC takes from its race (stock 0x71C050).
+    std::unordered_map<uint32_t, uint32_t> raceSexDisplayId_;
+    /// What a spawned creature's size was last worked out from, for the
+    /// creatures whose size can still move: a family record not yet arrived,
+    /// a family that scales with the level, or a server scale that changes.
+    /// The renderer's instance is resized when any of it does (stock
+    /// 0x72CBB0, run again when the cache record or the display changes).
+    struct CreatureScaleInputs {
+        uint32_t displayId = 0;
+        uint32_t family = 0;
+        uint32_t level = 0;
+        bool isPet = false;
+        bool familyKnown = false;
+        float serverScale = 1.0f;
+        float drawnScale = 1.0f;
+    };
+    std::unordered_map<uint64_t, CreatureScaleInputs> creatureScaleInputs_;
+    std::chrono::steady_clock::time_point lastCreatureScaleCheck_{};
+    /// The inputs as they stand now for a creature, read from its entity and
+    /// the creature cache; false when the entity is gone.
+    bool readCreatureScaleInputs(uint64_t guid, uint32_t displayId, float serverScale,
+                                 CreatureScaleInputs& out) const;
+    /// The size those inputs give: OBJECT_FIELD_SCALE_X x the unit scale
+    /// (stock 0x71C0E0 over 0x71C110).
+    float creatureDrawScale(const CreatureScaleInputs& in) const;
+    /// Resize spawned creatures whose inputs moved; a few times a second.
+    void refreshCreatureScales();
     // CharHairGeosets.dbc: key = (raceId<<16)|(sexId<<8)|variationId → geosetId (skinSectionId)
     std::unordered_map<uint32_t, uint16_t> hairGeosetMap_;
     // CharFacialHairStyles.dbc: key = (raceId<<16)|(sexId<<8)|variationId → {geoset100, geoset300, geoset200}
@@ -644,6 +675,10 @@ public:
     /// tauren males 1.35, tauren females 1.25, gnomes 1.15. Players were all
     /// drawn at 1.0.
     float playerRaceDisplayScale(uint8_t raceId, uint8_t genderId);
+    /// A creature display's own size, before any family or server scale:
+    /// extraRaceScale x CreatureModelScale x ModelScale (stock 0x71C110
+    /// with 0x71C050), 1 where that comes to zero or less.
+    float creatureDisplaySize(uint32_t displayId) const;
 private:
     std::function<void(const char*, float)> stageSink_;
     /// The frame's spawn work under one budget (core/frame_work_budget.hpp).

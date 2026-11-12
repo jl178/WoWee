@@ -175,6 +175,7 @@ void EntitySpawner::update() {
     // After the creature queue, which is what builds a morph's model.
     timed("spawn/morphs", [&] { processPendingPlayerMorphs(); });
     timed("spawn/presentation", [&] { syncUnitPresentation(); });
+    timed("spawn/creature scale", [&] { refreshCreatureScales(); });
     // The one submit for everything the queues above uploaded.
     timed("spawn/upload submit", [&] { batchEnd.end(); });
     spawnPacer_.endFrame();
@@ -1458,6 +1459,35 @@ void EntitySpawner::buildCreatureDisplayLookups() {
             }
         }
         LOG_INFO("Loaded ", modelIdToPath_.size(), " model→path mappings");
+    }
+
+    // CreatureFamily.dbc: ID, MinScale, MinScaleLevel, MaxScale,
+    // MaxScaleLevel - the same first five columns in every build. What a
+    // beast of a family is sized by (core/creature_scale.hpp): a pet always,
+    // anything else when the family's size is the larger.
+    if (auto fam = assetManager_->loadDBC("CreatureFamily.dbc"); fam && fam->isLoaded() &&
+        fam->getFieldCount() >= 5) {
+        for (uint32_t i = 0; i < fam->getRecordCount(); i++) {
+            const uint32_t id = fam->getUInt32(i, 0);
+            if (id == 0) continue;
+            core::CreatureFamilyScale f;
+            f.minScale = fam->getFloat(i, 1);
+            f.minScaleLevel = static_cast<int32_t>(fam->getUInt32(i, 2));
+            f.maxScale = fam->getFloat(i, 3);
+            f.maxScaleLevel = static_cast<int32_t>(fam->getUInt32(i, 4));
+            creatureFamilyScales_[id] = f;
+        }
+    }
+    // ChrRaces.dbc MaleDisplayId (4) / FemaleDisplayId (5): the display whose
+    // CreatureModelScale a humanoid NPC of that race and sex draws at.
+    if (auto races = assetManager_->loadDBC("ChrRaces.dbc"); races && races->isLoaded() &&
+        races->getFieldCount() >= 6) {
+        for (uint32_t i = 0; i < races->getRecordCount(); i++) {
+            const uint32_t race = races->getUInt32(i, 0);
+            if (race == 0 || race > 0xFF) continue;
+            raceSexDisplayId_[race << 8] = races->getUInt32(i, 4);
+            raceSexDisplayId_[(race << 8) | 1u] = races->getUInt32(i, 5);
+        }
     }
 
     // Resolve gryphon/wyvern display IDs by exact model path so taxi mounts have textures.
@@ -2865,6 +2895,101 @@ float EntitySpawner::creatureDisplayScale(uint32_t displayId) const {
     return it != displayDataMap_.end() ? it->second.displayScale : 1.0f;
 }
 
+float EntitySpawner::creatureDisplaySize(uint32_t displayId) const {
+    auto disp = displayDataMap_.find(displayId);
+    if (disp == displayDataMap_.end()) return 1.0f;
+    // 0x71C050: a display with a CreatureDisplayInfoExtra takes the size of
+    // the display its race and sex are drawn with - a tauren NPC is as big as
+    // a tauren player, 1.35, though its own row says 1.0.
+    float raceScale = 1.0f;
+    if (disp->second.extraDisplayId != 0) {
+        if (auto x = humanoidExtraMap_.find(disp->second.extraDisplayId); x != humanoidExtraMap_.end()) {
+            const uint32_t key = (static_cast<uint32_t>(x->second.raceId) << 8) | x->second.sexId;
+            if (auto r = raceSexDisplayId_.find(key); r != raceSexDisplayId_.end())
+                raceScale = creatureDisplayScale(r->second);
+        }
+    }
+    const float s = raceScale * disp->second.displayScale * creatureModelScale(displayId);
+    return s > 0.0f ? s : 1.0f;
+}
+
+namespace {
+// OBJECT_FIELD_SCALE_X as the creature spawn reads it: unset or absurd is 1.
+float unitObjectScale(const game::Entity& e) {
+    const uint16_t idx = game::fieldIndex(game::UF::OBJECT_FIELD_SCALE_X);
+    if (idx == 0xFFFF) return 1.0f;
+    const uint32_t raw = e.getField(idx);
+    if (raw == 0) return 1.0f;
+    float s = 0.0f;
+    std::memcpy(&s, &raw, sizeof(s));
+    return (s > 0.01f && s < 100.0f) ? s : 1.0f;
+}
+}  // namespace
+
+bool EntitySpawner::readCreatureScaleInputs(uint64_t guid, uint32_t displayId, float serverScale,
+                                            CreatureScaleInputs& out) const {
+    out = CreatureScaleInputs{};
+    out.displayId = displayId;
+    out.serverScale = serverScale;
+    if (!gameHandler_) return false;
+    auto e = gameHandler_->getEntityManager().getEntity(guid);
+    if (!e || e->getType() != game::ObjectType::UNIT) return false;
+    auto u = std::static_pointer_cast<game::Unit>(e);
+    out.level = u->getLevel();
+    const uint16_t petIdx = game::fieldIndex(game::UF::UNIT_FIELD_PETNUMBER);
+    out.isPet = petIdx != 0xFFFF && u->getField(petIdx) != 0;
+    const auto& cache = gameHandler_->getCreatureInfoCache();
+    if (auto it = cache.find(u->getEntry()); it != cache.end()) {
+        out.familyKnown = true;
+        out.family = it->second.family;
+    }
+    return true;
+}
+
+float EntitySpawner::creatureDrawScale(const CreatureScaleInputs& in) const {
+    const core::CreatureFamilyScale* fam = nullptr;
+    if (in.family != 0) {
+        if (auto it = creatureFamilyScales_.find(in.family); it != creatureFamilyScales_.end())
+            fam = &it->second;
+    }
+    return in.serverScale *
+           core::creatureUnitScale(creatureDisplaySize(in.displayId), fam, in.level, in.isPet);
+}
+
+void EntitySpawner::refreshCreatureScales() {
+    if (creatureScaleInputs_.empty() || !gameHandler_ || !renderer_) return;
+    auto* cr = renderer_->getCharacterRenderer();
+    if (!cr) return;
+    const auto t = std::chrono::steady_clock::now();
+    if (t - lastCreatureScaleCheck_ < std::chrono::milliseconds(250)) return;
+    lastCreatureScaleCheck_ = t;
+    for (auto it = creatureScaleInputs_.begin(); it != creatureScaleInputs_.end();) {
+        const uint64_t guid = it->first;
+        auto inst = creatureInstances_.find(guid);
+        std::shared_ptr<game::Entity> e;
+        if (inst != creatureInstances_.end()) e = gameHandler_->getEntityManager().getEntity(guid);
+        CreatureScaleInputs cur;
+        if (!e || !readCreatureScaleInputs(guid, it->second.displayId, unitObjectScale(*e), cur)) {
+            it = creatureScaleInputs_.erase(it);
+            continue;
+        }
+        CreatureScaleInputs& was = it->second;
+        if (cur.family != was.family || cur.familyKnown != was.familyKnown ||
+            cur.level != was.level || cur.isPet != was.isPet ||
+            cur.serverScale != was.serverScale) {
+            cur.drawnScale = creatureDrawScale(cur);
+            if (std::abs(cur.drawnScale - was.drawnScale) > 1e-4f) {
+                cr->setInstanceScale(inst->second, cur.drawnScale);
+                LOG_DEBUG("Creature 0x", std::hex, guid, std::dec, " resized ", was.drawnScale,
+                          " -> ", cur.drawnScale, " (family ", cur.family, ", level ", cur.level,
+                          cur.isPet ? ", pet" : "", ", server ", cur.serverScale, ")");
+            }
+            was = cur;
+        }
+        ++it;
+    }
+}
+
 uint32_t EntitySpawner::creatureDisplayParticleColor(uint32_t displayId) const {
     auto it = displayDataMap_.find(displayId);
     return it != displayDataMap_.end() ? it->second.particleColorId : 0u;
@@ -2921,9 +3046,27 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
     // per-unit scale the server sets - and only the last of those was applied,
     // so every display sharing a model came out the same size. That is one
     // model at 0.6 and at 1.5 both drawing at 1.0.
+    //
+    // And the display's size is not always the one that counts: a creature
+    // whose family has a size by level (CreatureFamily.dbc) takes that when
+    // it is the larger, and a pet always takes it (stock 0x71C110,
+    // core/creature_scale.hpp). A hunter's Frostworg is a 3.0 display and
+    // drew three times the size of a level 80 wolf, which is what the wolf
+    // family says it is. A humanoid's race size comes in here too.
     const float dispScale = creatureDisplayScale(displayId);
     const float serverScale = scale;
-    scale *= dispScale * creatureModelScale(displayId);
+    {
+        CreatureScaleInputs in;
+        if (readCreatureScaleInputs(guid, displayId, serverScale, in)) {
+            scale = creatureDrawScale(in);
+            in.drawnScale = scale;
+            creatureScaleInputs_[guid] = in;
+        } else {
+            // Not a creature the entity manager holds (a player's morph
+            // form): the display's size and the server's, as before.
+            scale *= dispScale * creatureModelScale(displayId);
+        }
+    }
 
     // Measured: this server sends 1.0 for every creature whose display asks
     // for a size of its own, so it does not fold CreatureDisplayInfo's scale
@@ -2962,7 +3105,8 @@ void EntitySpawner::spawnOnlineCreature(uint64_t guid, uint32_t displayId, float
                         ", entry ", entry, ") draws ", path,
                         " at ", scale, " (server ", serverScale,
                         " x display ", dispScale,
-                        " x model ", creatureModelScale(displayId), ")");
+                        " x model ", creatureModelScale(displayId), ", size ",
+                        creatureDisplaySize(displayId), ")");
         }
     }
 

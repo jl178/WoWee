@@ -2175,6 +2175,7 @@ uint32_t EntitySpawner::releaseCreatureInstance(uint64_t guid) {
     creatureSpawnRetryWindowsUsed_.erase(guid);
     creaturePermanentFailureGuids_.erase(guid);
     deadCreatureGuids_.erase(guid);
+    creatureScaleInputs_.erase(guid);
 
     auto it = creatureInstances_.find(guid);
     if (it == creatureInstances_.end()) return 0;
