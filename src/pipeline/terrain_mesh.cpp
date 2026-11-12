@@ -348,7 +348,13 @@ bool TerrainMeshGenerator::chunkFractionsAt(const float chunkPosition[3],
     const float minX = chunkPosition[0] - 8.0f * unitSize;
     const float maxY = chunkPosition[1];
     const float minY = chunkPosition[1] - 8.0f * unitSize;
-    if (glX < minX || glX > maxX || glY < minY || glY > maxY) return false;
+    // A hair of slack on every edge: two neighbours' edges are each the
+    // header's float, and they need not meet exactly, so a point on the seam
+    // (a camera straight behind a player stood on y = 600 in the Culling of
+    // Stratholme: 494 chunks from the map's edge) fell between both and read
+    // as no ground at all. The fractions are clamped below.
+    constexpr float kSeam = 0.01f;
+    if (glX < minX - kSeam || glX > maxX + kSeam || glY < minY - kSeam || glY > maxY + kSeam) return false;
 
     fracY = std::clamp((chunkPosition[0] - glX) / unitSize, 0.0f, 8.0f);
     fracX = std::clamp((chunkPosition[1] - glY) / unitSize, 0.0f, 8.0f);
