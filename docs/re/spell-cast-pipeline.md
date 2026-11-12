@@ -189,6 +189,11 @@ Then:
   - Anything else: play `AnimID` (`0x7385C0`). A cast kit (type 0)
     records it at `+0xFA4` (`[0x3E9]`), which the missile launch waits on.
 - `AnimID` -1 means no animation. 0 is Stand.
+- Nothing here looks at the target. Directed or omni is the data's: the
+  priest heals all share precast kit 99 (AnimID 52 ReadySpellOmni) and cast
+  kit 270 (54 SpellCastOmni) - Power Word: Shield (visual 784), Renew (280),
+  Flash Heal (3077), Lesser Heal (285) - so they raise the hands whether
+  cast on self or on a party member; Fireball's kits name the directed pair.
 - After the kit, the sheath is re-checked (`0x738180`, below).
 
 ### Choosing the sequence (`0x7385C0`)
@@ -565,6 +570,7 @@ rows have a place.
 | 26 | The missile model is made at SpellVisualEffectName.Scale | always 1 | `VisualRow::missileScale` |
 | 27 | The missile targeting kit plays from launch to landing (`0x7022D0`, `0x6FF410`) | not played | on the target (state, Hold) or at the point (birth replayed), retired as its missile lands |
 | 28 | Chain effects draw with fog off and by RenderLayer 0..3 (`0x9AB070`) | fogged like a ribbon, in creation order | unfogged, sorted by layer |
+| 29 | The cast animation is the spell's kits' AnimID for any caster and target: no directed/omni switch from the target, self-cast, group or instance (`0x73B140` reads kit +8 and hands it to `0x7385C0`, which only resolves fallbacks) | an instant's animation call carried no spell: casting_ is false for an instant and its SPELL_START clears the prediction, so the kits were not found and the target guess played - Power Word: Shield, Renew on a party member released in SpellCastDirected (53) instead of the kit's SpellCastOmni (54); the same for other units' instants | every start and release names its spell (`SpellCastAnimCallback` spellId) |
 
 Not changed:
 

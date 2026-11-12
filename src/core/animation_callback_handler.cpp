@@ -371,7 +371,8 @@ void AnimationCallbackHandler::setupCallbacks() {
     //   OMNI     - self-cast / no explicit target (Arcane Explosion, buffs)
     //   AREA     - ground-targeted AoE           (Blizzard, Rain of Fire)
     gameHandler_.setSpellCastAnimCallback([this](uint64_t guid, bool start, bool isChannel,
-                                                  game::SpellCastType castType) {
+                                                  game::SpellCastType castType,
+                                                  uint32_t castSpellId) {
         auto* cr = renderer_.getCharacterRenderer();
         if (!cr) return;
 
@@ -401,7 +402,13 @@ void AnimationCallbackHandler::setupCallbacks() {
         // Whether the spell is known: then its kits alone say what plays.
         bool kitSpellKnown = false;
         {
-            uint32_t kitSpell = isLocalPlayer ? gameHandler_.getCurrentCastSpellId() : 0;
+            // The spell the packet named, for every caster (0x73B140 plays the
+            // kits of the spell being cast, whoever casts it at whom). The
+            // state lookups below are left for a call that names none: an
+            // instant has no current cast and its SPELL_START has cleared
+            // the prediction, so they found nothing for it.
+            uint32_t kitSpell = castSpellId;
+            if (kitSpell == 0 && isLocalPlayer) kitSpell = gameHandler_.getCurrentCastSpellId();
             // A cast just sent: the build-up starts before SMSG_SPELL_START,
             // when only the prediction knows the spell.
             if (kitSpell == 0 && isLocalPlayer) kitSpell = gameHandler_.getPredictedCastSpellId();

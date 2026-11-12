@@ -654,3 +654,81 @@ TEST_CASE("a logout whose session has gone ends at the login screen", "[replay]"
     CHECK(s.handler().getState() == wowee::game::WorldState::DISCONNECTED);
     CHECK(s.sent().of(wowee::game::Opcode::CMSG_CHAR_ENUM).empty());
 }
+
+namespace {
+
+constexpr uint32_t kPowerWordShield = 48066;
+constexpr uint64_t kPartyMember = 0x0000000000000088ull;
+
+// Spell::SendSpellStart for an instant: caster and unit packed, the cast
+// count, spell, flags, a cast time of 0 and a unit target.
+wowee::network::Packet instantStart(uint64_t caster, uint32_t spellId, uint64_t target) {
+    wowee::network::Packet p(wowee::game::wireOpcode(wowee::game::Opcode::SMSG_SPELL_START));
+    p.writePackedGuid(caster);
+    p.writePackedGuid(caster);
+    p.writeUInt8(1);
+    p.writeUInt32(spellId);
+    p.writeUInt32(0x2);
+    p.writeUInt32(0);
+    p.writeUInt32(0x2);  // TARGET_FLAG_UNIT
+    p.writePackedGuid(target);
+    return p;
+}
+
+// Spell::SendSpellGo: one hit target, no misses, a unit target.
+wowee::network::Packet instantGo(uint64_t caster, uint32_t spellId, uint64_t target) {
+    wowee::network::Packet p(wowee::game::wireOpcode(wowee::game::Opcode::SMSG_SPELL_GO));
+    p.writePackedGuid(caster);
+    p.writePackedGuid(caster);
+    p.writeUInt8(1);
+    p.writeUInt32(spellId);
+    p.writeUInt32(0x100);
+    p.writeUInt32(0);
+    p.writeUInt8(1);
+    p.writeUInt64(target);
+    p.writeUInt8(0);
+    p.writeUInt32(0x2);  // TARGET_FLAG_UNIT
+    p.writePackedGuid(target);
+    return p;
+}
+
+struct AnimCall {
+    uint64_t guid;
+    bool start;
+    bool hardStop;
+    uint32_t spellId;
+};
+
+}  // namespace
+
+// The cast animation is the spell's own kits' (0x73B140 plays the cast kit's
+// AnimID), so every call that can play one has to name the spell. An instant
+// is no current cast and its SPELL_START clears the prediction, so the
+// animation path used to find no spell for it and guess from the target:
+// Power Word: Shield on a party member released in SpellCastDirected.
+TEST_CASE("an instant cast on someone else names its spell to the cast animation", "[replay]") {
+    for (const uint64_t caster : {Session::kPlayerGuid, kOtherHunter}) {
+        CAPTURE(caster);
+        Session s;
+        s.spawnPlayer({{UF::UNIT_FIELD_HEALTH, 181}, {UF::UNIT_FIELD_LEVEL, 80}});
+        s.receive(UpdateObject().create(kPartyMember, wowee::game::ObjectType::PLAYER,
+                                        {{UF::UNIT_FIELD_HEALTH, 100}, {UF::UNIT_FIELD_LEVEL, 80}}));
+        if (caster != Session::kPlayerGuid)
+            s.receive(UpdateObject().create(caster, wowee::game::ObjectType::PLAYER,
+                                            {{UF::UNIT_FIELD_HEALTH, 100}, {UF::UNIT_FIELD_LEVEL, 80}}));
+        std::vector<AnimCall> calls;
+        s.handler().setSpellCastAnimCallback(
+            [&](uint64_t guid, bool start, bool isChannel, wowee::game::SpellCastType,
+                uint32_t spellId) { calls.push_back({guid, start, !start && isChannel, spellId}); });
+        if (caster == Session::kPlayerGuid) s.handler().castSpell(kPowerWordShield, kPartyMember);
+        s.receive(instantStart(caster, kPowerWordShield, kPartyMember));
+        s.receive(instantGo(caster, kPowerWordShield, kPartyMember));
+        size_t named = 0;
+        for (const auto& c : calls) {
+            if (c.guid != caster || c.hardStop) continue;
+            CHECK(c.spellId == kPowerWordShield);
+            ++named;
+        }
+        CHECK(named > 0);
+    }
+}

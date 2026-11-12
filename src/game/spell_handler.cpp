@@ -1483,7 +1483,7 @@ void SpellHandler::castSpell(uint32_t spellId, uint64_t targetGuid) {
         if (castMs > 0 && owner_.spellCastAnimCallbackRef()) {
             const SpellCastType type = target == 0 ? SpellCastType::AREA
                 : (target == owner_.getPlayerGuid() ? SpellCastType::OMNI : SpellCastType::DIRECTED);
-            owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), true, false, type);
+            owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), true, false, type, spellId);
         }
         predictedPrecastSpellId_ = spellId;
     }
@@ -1991,7 +1991,7 @@ void SpellHandler::clearPlayerCastState() {
     // release is SMSG_SPELL_GO's alone.
     if (owner_.spellCastAnimCallbackRef())
         owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), false, /*hard stop*/true,
-                                          SpellCastType::OMNI);
+                                          SpellCastType::OMNI, 0);
 }
 
 void SpellHandler::onCasterDied(uint64_t guid) {
@@ -2015,7 +2015,7 @@ void SpellHandler::onCasterDied(uint64_t guid) {
         }
     }
     if (owner_.spellCastAnimCallbackRef())
-        owner_.spellCastAnimCallbackRef()(guid, false, /*hard stop*/true, SpellCastType::OMNI);
+        owner_.spellCastAnimCallbackRef()(guid, false, /*hard stop*/true, SpellCastType::OMNI, 0);
 }
 
 void SpellHandler::fireCastEnd(uint64_t guid, const stock_cast::CastEndSteps& steps,
@@ -2045,7 +2045,7 @@ void SpellHandler::endPlayerCast(stock_cast::CastRef cast, uint8_t result) {
         cancelCastVisual(owner_.getPlayerGuid());
         if (owner_.spellCastAnimCallbackRef())
             owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), false, /*hard stop*/true,
-                                              SpellCastType::OMNI);
+                                              SpellCastType::OMNI, 0);
     }
     fireCastEnd(owner_.getPlayerGuid(), steps, cast);
     pendingCasts_.remove(cast);
@@ -2066,7 +2066,7 @@ void SpellHandler::endUnitCast(uint64_t guid, stock_cast::CastRef cast, uint8_t 
         unitCastStates_.erase(guid);
         cancelCastVisual(guid);
         if (owner_.spellCastAnimCallbackRef())
-            owner_.spellCastAnimCallbackRef()(guid, false, /*hard stop*/true, SpellCastType::OMNI);
+            owner_.spellCastAnimCallbackRef()(guid, false, /*hard stop*/true, SpellCastType::OMNI, 0);
     }
     fireCastEnd(guid, steps, cast);
 }
@@ -3099,7 +3099,7 @@ void SpellHandler::updateTimers(float dt) {
                 it = unitCastStates_.erase(it);
                 if (guid != owner_.getPlayerGuid()) cancelCastVisual(guid);
                 if (guid != owner_.getPlayerGuid() && owner_.spellCastAnimCallbackRef())
-                    owner_.spellCastAnimCallbackRef()(guid, false, /*hard stop*/true, SpellCastType::OMNI);
+                    owner_.spellCastAnimCallbackRef()(guid, false, /*hard stop*/true, SpellCastType::OMNI, 0);
                 continue;
             }
         }
@@ -3112,7 +3112,7 @@ void SpellHandler::stopRestorationPresentation() {
     const uint32_t stoppedSpell = restorationSpellId_;
     if (owner_.spellCastAnimCallbackRef()) {
         owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), false, true,
-                                          SpellCastType::OMNI);
+                                          SpellCastType::OMNI, 0);
     }
     restorationActive_ = false;
     restorationSpellId_ = 0;
@@ -3181,7 +3181,7 @@ void SpellHandler::refreshRestorationFromPlayerAuras() {
                  " durationMs=", totalMs);
         if (owner_.spellCastAnimCallbackRef()) {
             owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), true, true,
-                                              SpellCastType::OMNI);
+                                              SpellCastType::OMNI, spellId);
         }
         if (owner_.addonEventCallbackRef()) {
             owner_.addonEventCallbackRef()("UNIT_SPELLCAST_CHANNEL_START",
@@ -3438,7 +3438,7 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
         s.interruptible  = owner_.isSpellInterruptible(data.spellId);
         s.castType       = castType;
         if (owner_.spellCastAnimCallbackRef()) {
-            owner_.spellCastAnimCallbackRef()(data.casterUnit, true, false, castType);
+            owner_.spellCastAnimCallbackRef()(data.casterUnit, true, false, castType, data.spellId);
         }
     }
 
@@ -3487,7 +3487,7 @@ void SpellHandler::handleSpellStart(network::Packet& packet) {
         }
 
         if (owner_.spellCastAnimCallbackRef() && !precastPredicted) {
-            owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), true, false, castType);
+            owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), true, false, castType, data.spellId);
         }
 
         // Hearthstone: pre-load terrain at bind point
@@ -3710,15 +3710,16 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
             else if (data.targetGuid == 0 && data.hitCount > 1)
                 goType = SpellCastType::AREA;
             if (owner_.spellCastAnimCallbackRef()) {
-                // Instant item spells have no SMSG_SPELL_START, so publish the
-                // SPELL_GO id just long enough for the animation callback to
-                // distinguish potions from generic instant magic.
-                currentCastSpellId_ = data.spellId;
-                owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), true, false, goType);
+                // The spell goes with the call: an instant is no current
+                // cast (casting_ is false, so getCurrentCastSpellId() is 0)
+                // and SMSG_SPELL_START has already cleared the prediction.
+                // Its kits were then not found, and PW:S on a party member
+                // released in the target guess's SpellCastDirected.
+                owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), true, false, goType, data.spellId);
                 // Straight to the release, as for other units below: there is
                 // no cast to hold, and nothing else ends one, so the
                 // character stood in ReadySpell with its hands up.
-                owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), false, false, goType);
+                owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), false, false, goType, data.spellId);
             }
         }
 
@@ -3749,7 +3750,7 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
 
         if (owner_.spellCastAnimCallbackRef() && !rangedWeaponAttack && !restorationLoop &&
             !triggeredMidCast) {
-            owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), false, false, SpellCastType::OMNI);
+            owner_.spellCastAnimCallbackRef()(owner_.getPlayerGuid(), false, false, SpellCastType::OMNI, data.spellId);
         }
 
         // The bar's STOP follows UNIT_SPELLCAST_SUCCEEDED below (0x7FECC0
@@ -3795,12 +3796,12 @@ void SpellHandler::handleSpellGo(network::Packet& packet) {
                 owner_.npcSwingCallbackRef()(data.casterUnit, 0, data.spellId);
         } else if (!wasTrackedCast && !triggered && !rangedWeaponAttack &&
                    owner_.spellCastAnimCallbackRef()) {
-            owner_.spellCastAnimCallbackRef()(data.casterUnit, true, false, npcGoType);
+            owner_.spellCastAnimCallbackRef()(data.casterUnit, true, false, npcGoType, data.spellId);
         }
         if (!abilityAnim && (wasTrackedCast || !triggered) && !rangedWeaponAttack &&
             !triggeredMidCast && owner_.spellCastAnimCallbackRef()) {
             owner_.spellCastAnimCallbackRef()(data.casterUnit, false, false,
-                wasTrackedCast ? castIt->second.castType : npcGoType);
+                wasTrackedCast ? castIt->second.castType : npcGoType, data.spellId);
         }
         // Another unit's cast is heard only through its kit's sound, at the
         // caster (the visual below). The school bank's cast sound is not
@@ -6367,7 +6368,7 @@ void SpellHandler::handleSpellFailure(network::Packet& packet) {
             unitCastStates_.erase(it);
             cancelCastVisual(failGuid);
             if (owner_.spellCastAnimCallbackRef())
-                owner_.spellCastAnimCallbackRef()(failGuid, false, /*hard stop*/true, SpellCastType::OMNI);
+                owner_.spellCastAnimCallbackRef()(failGuid, false, /*hard stop*/true, SpellCastType::OMNI, 0);
         }
         endUnitCast(failGuid, {castCount, failSpellId}, failReason);
     }
@@ -7394,7 +7395,7 @@ void SpellHandler::handleChannelStart(network::Packet& packet) {
         if (chanCaster == owner_.getPlayerGuid() && owner_.getTargetGuid() != 0)
             chanType = SpellCastType::DIRECTED;
         if (owner_.spellCastAnimCallbackRef()) {
-            owner_.spellCastAnimCallbackRef()(chanCaster, true, true, chanType);
+            owner_.spellCastAnimCallbackRef()(chanCaster, true, true, chanType, chanSpellId);
         }
         // The channel's kit (Arcane Missiles' glowing hands, Drain Life) on
         // the caster for as long as it runs.
@@ -7443,7 +7444,7 @@ void SpellHandler::handleChannelUpdate(network::Packet& packet) {
         cancelCastVisual(chanCaster2);
         // Stop channeling animation - return to idle
         if (owner_.spellCastAnimCallbackRef()) {
-            owner_.spellCastAnimCallbackRef()(chanCaster2, false, true, SpellCastType::OMNI);
+            owner_.spellCastAnimCallbackRef()(chanCaster2, false, true, SpellCastType::OMNI, 0);
         }
         auto unitId = owner_.guidToUnitId(chanCaster2);
         if (!unitId.empty())
