@@ -478,7 +478,21 @@ No scale, offset or fade; they live as long as the item model.
   `extraRaceScale × CDI.CreatureModelScale × CMD.ModelScale`, ≤ 0 → 1.
   extraRaceScale (0x71C050) is the CDI scale of the Extra race's own display.
   A creature family with level scaling (`MinScale + (MaxScale - MinScale) *
-  t`) wins when larger, or always for a pet. **Render scale** (0x71C0E0) =
+  t`) wins when larger, or always for a pet. In detail: the family is the
+  creature cache record's (`unit+0x964` -> `+0x14`, the same read as
+  UnitCreatureFamily's 0x7153E0), the level UNIT_FIELD_LEVEL
+  (`fields+0xC0`), `t = clamp(level - MinScaleLevel, 0, span) / span` with
+  `span = MaxScaleLevel - MinScaleLevel` (t = 0 for span 0), and "a pet" is a
+  non-zero UNIT_FIELD_PETNUMBER (`fields+0x114`). The family replaces the
+  whole display product, extraRaceScale and ModelScale included. Worked out
+  again by 0x72CBB0 (display from `fields+0xF4`), which runs when the cache
+  record arrives with a family (0x72CE3B) and on a display change. So a
+  tamed Frostworg (display 26331, 3.0) is a level 80 wolf at the wolf
+  family's 1.0, and a wild Young Wolf (0.4 display, level 1) draws at 0.7.
+  Wowee: `core/creature_scale.hpp`, applied by EntitySpawner at spawn and
+  again when the family, level, pet number or object scale changes; before
+  2026-11-12 it drew server scale × CDI × CMD and read no family at all.
+  **Render scale** (0x71C0E0) =
   that × `unit+0x9C` × OBJECT_FIELD_SCALE_X × (mounted ? the mount display's
   scale : 1). Player displays: tauren male CDI 1.35, tauren female CMD 1.25,
   gnomes CDI 1.15.
