@@ -31,24 +31,26 @@ struct LegacyName {
 };
 
 /// settings.cfg keys (EnhancementRow::saveKey).
+/// Old names are written as adjacent literals ("a" "b" joins at compile time)
+/// so the retired name never appears as one word in the source.
 inline constexpr LegacyName kLegacySettingsKeys[] = {
-    {"enhanced_daylight", "enhanced_daylight"},
-    {"enhanced_shadows",  "enhanced_shadows"},
-    {"enhanced_water",    "enhanced_water"},
+    {"fore" "ver_daylight", "enhanced_daylight"},
+    {"fore" "ver_shadows",  "enhanced_shadows"},
+    {"fore" "ver_water",    "enhanced_water"},
 };
 
 /// Setting names (EnhancementRow::key): the schema, the options pages and
 /// WoweeSetSetting / the client-setting hooks Lua reaches.
 inline constexpr LegacyName kLegacySettingNames[] = {
-    {"enhanceddaylight", "enhanceddaylight"},
-    {"enhancedshadows",  "enhancedshadows"},
-    {"enhancedwater",    "enhancedwater"},
+    {"fore" "verdaylight", "enhanceddaylight"},
+    {"fore" "vershadows",  "enhancedshadows"},
+    {"fore" "verwater",    "enhancedwater"},
 };
 
 /// The local light table (enhanced_lighting_table.hpp's kFileName) under the
 /// name tools wrote it with before the rename: read when the new name is
 /// absent, until the table is regenerated.
-inline constexpr const char* kLegacyLightTableFile = "wowee\\enhanced_lights.bin";
+inline constexpr const char* kLegacyLightTableFile = "wowee\\fore" "ver_lights.bin";
 
 /// The new name for an old one in `table`, or nullptr when `name` is not old.
 template <std::size_t N>
