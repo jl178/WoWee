@@ -5432,6 +5432,70 @@ void WMORenderer::setM2Renderer(M2Renderer* renderer) {
     if (m2Renderer_) m2Renderer_->setPortalVisibility(&doodadVisible_);
 }
 
+bool WMORenderer::findEnclosingGroup(const glm::vec3& camPos, size_t& outInstance,
+                                     uint32_t& outFileGroup) const {
+    namespace sp = stock_wmo_portal;
+    // How far the building's surfaces may stand from the camera, in yards.
+    constexpr float kEncloseReach = 40.0f;
+    float bestVolume = std::numeric_limits<float>::max();
+    bool found = false;
+    for (size_t idx : tl_candidateScratch) {
+        const auto& instance = instances[idx];
+        auto it = loadedModels.find(instance.modelId);
+        if (it == loadedModels.end()) continue;
+        const ModelData& model = it->second;
+        const glm::vec3 local = glm::vec3(instance.invModelMatrix * glm::vec4(camPos, 1.0f));
+        // The smallest interior group whose box holds the camera.
+        int pick = -1;
+        float pickVolume = std::numeric_limits<float>::max();
+        for (size_t gi = 0; gi < model.groups.size(); ++gi) {
+            const auto& group = model.groups[gi];
+            const uint32_t fi = group.fileIndex;
+            const uint32_t flags = fi < model.portalGraph.groupFlags.size()
+                ? model.portalGraph.groupFlags[fi] : group.groupFlags;
+            if (flags & (sp::kGroupExterior | sp::kGroupNotUnderCamera)) continue;
+            if (glm::any(glm::lessThan(local, group.boundingBoxMin)) ||
+                glm::any(glm::greaterThan(local, group.boundingBoxMax))) continue;
+            const glm::vec3 size = group.boundingBoxMax - group.boundingBoxMin;
+            const float volume = size.x * size.y * size.z;
+            if (volume < pickVolume) {
+                pickVolume = volume;
+                pick = static_cast<int>(gi);
+            }
+        }
+        if (pick < 0 || pickVolume >= bestVolume) continue;
+        // The building round it: any surface of any of its groups, a ray
+        // straight up and four level ones (in the model's own axes, which
+        // are a building's walls').
+        const auto hitWithin = [&](const glm::vec3& dir) {
+            for (const auto& group : model.groups) {
+                if (!trianglesAlongRay(group, local, dir, tl_triScratch)) continue;
+                const auto& verts = group.collisionVertices;
+                const auto& indices = group.collisionIndices;
+                for (uint32_t t0 : tl_triScratch) {
+                    if (t0 + 2 >= indices.size()) continue;
+                    const float t = rayTriangleIntersect(local, dir, verts[indices[t0]], verts[indices[t0 + 1]],
+                                                         verts[indices[t0 + 2]]);
+                    if (t >= 0.0f && t < kEncloseReach) return true;
+                }
+            }
+            return false;
+        };
+        if (!hitWithin(glm::vec3(0.0f, 0.0f, 1.0f))) continue;
+        int sides = 0;
+        const glm::vec3 level[4] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}};
+        for (const glm::vec3& d : level) {
+            if (hitWithin(d)) ++sides;
+        }
+        if (sides < 3) continue;
+        bestVolume = pickVolume;
+        outInstance = idx;
+        outFileGroup = model.groups[static_cast<size_t>(pick)].fileIndex;
+        found = true;
+    }
+    return found;
+}
+
 bool WMORenderer::findCameraGroup(const glm::vec3& camPos, std::optional<float> groundBelow,
                                   size_t& outInstance, uint32_t& outFileGroup, bool groundIsHole) const {
     namespace sp = stock_wmo_portal;
@@ -5476,26 +5540,50 @@ bool WMORenderer::findCameraGroup(const glm::vec3& camPos, std::optional<float> 
         const glm::vec3 localOrigin = glm::vec3(instance.invModelMatrix * glm::vec4(rayStart, 1.0f));
         // Unnormalised, so t is in world yards whatever the scale.
         const glm::vec3 localDir = glm::vec3(instance.invModelMatrix * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f));
+        constexpr float kBoxMargin = 0.5f;
+        const glm::vec3 camLocal = glm::vec3(instance.invModelMatrix * glm::vec4(camPos, 1.0f));
+        const auto inBox = [&](const auto& g) {
+            return !glm::any(glm::lessThan(camLocal, g.boundingBoxMin - glm::vec3(kBoxMargin))) &&
+                   !glm::any(glm::greaterThan(camLocal, g.boundingBoxMax + glm::vec3(kBoxMargin)));
+        };
+        // Whether the camera is within this building's interior at all: in
+        // the box of one of its interior groups. A stairwell is the case: the
+        // camera over the stairs stands in the upper room's box, whose floor
+        // is open there, and the floor the ray meets is the stairs' or the
+        // ground floor's, a group whose box ends under the camera. Taken
+        // alone, that box test called the camera outside (the ground under
+        // the house was the nearest floor), the walk went from outside and
+        // the house was not drawn from within - the Culling of Stratholme's
+        // first house, flipping as the camera moved a hand's width.
+        bool inInterior = false;
+        for (const auto& g : model.groups) {
+            const uint32_t f = g.fileIndex < model.portalGraph.groupFlags.size()
+                ? model.portalGraph.groupFlags[g.fileIndex] : g.groupFlags;
+            if (!(f & (sp::kGroupExterior | sp::kGroupNotUnderCamera)) && inBox(g)) {
+                inInterior = true;
+                break;
+            }
+        }
         for (size_t gi = 0; gi < model.groups.size(); ++gi) {
             const auto& group = model.groups[gi];
             const uint32_t fi = group.fileIndex;
             const uint32_t flags = fi < model.portalGraph.groupFlags.size()
                 ? model.portalGraph.groupFlags[fi] : group.groupFlags;
             if (flags & sp::kGroupNotUnderCamera) continue;
-            // An interior group holds the camera only when the camera is in
-            // its box. Without this, a camera above a city whose ray slipped
-            // past the street (over a roof edge or a gap) met a floor of the
-            // sewers 50 yards down, was put inside them, and the walk from
-            // there sealed the view: Dalaran's whole city vanished while its
-            // loose props floated, depending on where the camera orbited.
-            if (!(flags & sp::kGroupExterior)) {
-                constexpr float kBoxMargin = 0.5f;
-                const glm::vec3 camLocal = glm::vec3(instance.invModelMatrix * glm::vec4(camPos, 1.0f));
-                if (glm::any(glm::lessThan(camLocal, group.boundingBoxMin - glm::vec3(kBoxMargin))) ||
-                    glm::any(glm::greaterThan(camLocal, group.boundingBoxMax + glm::vec3(kBoxMargin)))) {
-                    continue;
-                }
-            }
+            // An interior group's floor holds the camera only when the camera
+            // is inside the building's interior (some interior group's box).
+            // Without this, a camera above a city whose ray slipped past the
+            // street (over a roof edge or a gap) met a floor of the sewers 50
+            // yards down, was put inside them, and the walk from there sealed
+            // the view: Dalaran's whole city vanished while its loose props
+            // floated, depending on where the camera orbited. Not the floor's
+            // own box alone: see inInterior.
+            // And then only a floor within a storey or two below: a stairwell
+            // drops a few yards, the city's sewers fifty.
+            constexpr float kOpenFloorReach = 12.0f;
+            const bool ownBox = (flags & sp::kGroupExterior) || inBox(group);
+            if (!ownBox && !inInterior) continue;
+            const float reach = ownBox ? sp::kCameraRayLength : kOpenFloorReach;
             if (!trianglesAlongRay(group, localOrigin, localDir, tl_triScratch)) continue;
             const auto& verts = group.collisionVertices;
             const auto& indices = group.collisionIndices;
@@ -5513,7 +5601,7 @@ bool WMORenderer::findCameraGroup(const glm::vec3& camPos, std::optional<float> 
                                                      verts[indices[triStart]],
                                                      verts[indices[triStart + 1]],
                                                      verts[indices[triStart + 2]]);
-                if (t >= 0.0f && t < best) {
+                if (t >= 0.0f && t < best && t < reach) {
                     best = t;
                     found = true;
                     bestInst = idx;
@@ -5528,6 +5616,28 @@ bool WMORenderer::findCameraGroup(const glm::vec3& camPos, std::optional<float> 
         outInstance = bestInst;
         outFileGroup = bestGroup;
         return true;
+    }
+    // No map object floor under the camera, only the ground (or nothing):
+    // outside, unless the building stands round it. A house set on the
+    // terrain has no floor of its own where its ground floor is the ground -
+    // Culling of Stratholme's first house, under and beside its stairs - and
+    // the world ray then meets the terrain and calls a camera inside it
+    // outside: the walk goes from outside and the house is not drawn from
+    // within, flipping as the camera moves a hand's width over the edge of
+    // the floor it does have. Stock seeds its walk with a second group
+    // (0x7af280) found by where the camera is, not by a floor; stood in for
+    // here by the building enclosing the camera: inside an interior group's
+    // box, with the building's own surfaces overhead and on at least three
+    // of four sides. Not over a floor of an exterior group (a street under
+    // an arch is outside whatever stands round it): that returned above.
+    {
+        size_t encInst = 0;
+        uint32_t encGroup = 0;
+        if (findEnclosingGroup(camPos, encInst, encGroup)) {
+            outInstance = encInst;
+            outFileGroup = encGroup;
+            return true;
+        }
     }
     if (groundHit) return false;  // the ground is the floor under the camera
     // Over a hole with no map object floor under it: outside, as before the
@@ -5616,11 +5726,33 @@ bool WMORenderer::computeVisibility(const Camera& camera, std::optional<float> g
             const glm::vec3 camLocal = glm::vec3(inst.invModelMatrix * glm::vec4(camPos, 1.0f));
             const sp::Planes full = sp::rectPlanes(localClip, sp::Rect::full());
             auto& iv = instanceVis_[camInst];
+            // The second seed (0x7af280): the room the camera is in by where
+            // it is, which need not be the floor's under it - over a
+            // stairwell the floor met is the room below, and a walk from
+            // there alone left the room the camera stands in undrawn (the
+            // Culling of Stratholme's first house, from its stairs). The
+            // smallest interior group whose box holds the camera; walking
+            // from it as well can only add groups.
+            uint32_t camGroup2 = 0xffffffffu;
+            {
+                float vol2 = std::numeric_limits<float>::max();
+                for (const auto& grp : model.groups) {
+                    const uint32_t fi = grp.fileIndex;
+                    if (fi >= model.portalGraph.groupFlags.size()) continue;
+                    const uint32_t f = model.portalGraph.groupFlags[fi];
+                    if (f & (sp::kGroupExterior | sp::kGroupNotUnderCamera)) continue;
+                    if (glm::any(glm::lessThan(camLocal, grp.boundingBoxMin)) ||
+                        glm::any(glm::greaterThan(camLocal, grp.boundingBoxMax))) continue;
+                    const glm::vec3 sz = grp.boundingBoxMax - grp.boundingBoxMin;
+                    const float v = sz.x * sz.y * sz.z;
+                    if (v < vol2) { vol2 = v; camGroup2 = fi; }
+                }
+            }
             sp::walkFromInside(model.portalGraph, localClip, camLocal, camGroup,
                                [&](uint32_t gi) {
                                    const auto& b = model.fileGroupBoxes[gi];
                                    return sp::boxVisible(full, b.first, b.second);
-                               }, iv.res);
+                               }, iv.res, camGroup2);
             iv.walked = true;
             outdoor = iv.res.outdoor;
             if (iv.res.skybox) visSkybox_ = model.skyboxName;

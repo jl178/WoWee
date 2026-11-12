@@ -183,6 +183,27 @@ TEST_CASE("from inside, a portal into an exterior group opens the outdoor view",
     }
 }
 
+TEST_CASE("from inside, the second seed group is drawn and walked from too", "[stockwmoportal]") {
+    const sp::Graph g = corridor(3);
+    const auto all = [](uint32_t) { return true; };
+    sp::WalkResult res;
+    // In room 1 looking back at the exterior, seeded from room 2 (the floor
+    // under the camera is the room beyond): room 2 alone would leave room 1,
+    // where the camera stands, undrawn - the second seed draws it, and the
+    // outdoors opens through its portal as before.
+    const glm::vec3 eye(15.0f, 0.0f, 2.0f);
+    sp::walkFromInside(g, viewProj(eye, {-20.0f, 0.0f, 2.0f}), eye, 2, all, res);
+    CHECK_FALSE(res.drawn[1]);
+    sp::walkFromInside(g, viewProj(eye, {-20.0f, 0.0f, 2.0f}), eye, 2, all, res, 1);
+    CHECK(res.drawn[1]);
+    CHECK(res.drawn[2]);
+    CHECK_FALSE(res.outdoor.empty());
+    // The same group twice is one seed.
+    sp::walkFromInside(g, viewProj(eye, {-20.0f, 0.0f, 2.0f}), eye, 1, all, res, 1);
+    CHECK(res.drawn[1]);
+    CHECK_FALSE(res.drawn[0]);
+}
+
 TEST_CASE("a rectangle's planes cull boxes to that part of the screen", "[stockwmoportal]") {
     const glm::vec3 eye(0.0f, 0.0f, 0.0f);
     const glm::mat4 vp = viewProj(eye, {10.0f, 0.0f, 0.0f});

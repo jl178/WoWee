@@ -310,17 +310,24 @@ void walkFromOutside(const Graph& g, const glm::mat4& localToClip, const glm::ve
 }
 
 /// The camera stands in `seed` of this instance (0x795d40 + 0x7ad1f0).
+/// `seed2`, when it names another group, is the second group 0x795d40 puts
+/// in the seed list (0x7af280): the walk starts from both, and either one
+/// with 0x40140 opens the outdoor view.
 template <typename InFrustum>
 void walkFromInside(const Graph& g, const glm::mat4& localToClip, const glm::vec3& camLocal,
-                    uint32_t seed, InFrustum&& groupInFrustum, WalkResult& res) {
+                    uint32_t seed, InFrustum&& groupInFrustum, WalkResult& res,
+                    uint32_t seed2 = 0xffffffffu) {
     res.reset(g.groupFlags.size());
     if (seed < g.groupFlags.size()) {
         const uint32_t f = g.groupFlags[seed];
         res.interior = (f & (kGroupExterior | kGroupExteriorLit)) == 0;
         if (f & kGroupSeedOpensOutdoors) res.outdoor.unite(Rect::full());
     }
+    if (seed2 != seed && seed2 < g.groupFlags.size() && (g.groupFlags[seed2] & kGroupSeedOpensOutdoors))
+        res.outdoor.unite(Rect::full());
     Walker w(g, localToClip, camLocal, true, res);
     w.walk(seed, 0xffff, Rect::full());
+    if (seed2 != seed && seed2 < g.groupFlags.size()) w.walk(seed2, 0xffff, Rect::full());
     for (uint32_t gi = 0; gi < g.groupFlags.size(); ++gi) {
         if ((g.groupFlags[gi] & kGroupAlwaysDraw) && groupInFrustum(gi)) res.draw(gi, Rect::full());
     }

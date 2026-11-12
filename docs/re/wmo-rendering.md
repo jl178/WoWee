@@ -446,7 +446,20 @@ them once a frame on the main thread, before the WMO, M2 and terrain culls.
     the walls, and the inn was not drawn for a second or so after a
     teleport in, until the camera's ease brought it further in. Over a hole
     with no map object floor under it the camera is still outside (not the
-    smallest interior box round it);
+    smallest interior box round it). An interior group's floor counts when
+    the camera is within the building's interior (any of its interior
+    groups' boxes, the floor within 12 yards below), not only within that
+    group's own box: over a stairwell the camera is in the upper room's box
+    and the floor met is the room below's. And with no map object floor
+    under it at all, the camera is inside when the building encloses it
+    (in an interior group's box, its surfaces overhead and on three of four
+    sides): a house set on the terrain has none of its own under its ground
+    floor, and the Culling of Stratholme's first house flipped between
+    drawn and see-through as the camera moved a hand's width on its stairs;
+  - seeds the walk from two groups, as stock does with 0x7af280's second
+    one: the camera's floor's, and the smallest interior group whose box
+    holds the camera (the room it is in, which over a stairwell is not the
+    floor's);
   - walks the camera's instance from inside (`walkFromInside`), then every
     other instance in the frustum from outside (`walkFromOutside`) - through
     the outdoor rectangle when the camera is inside - and adds the camera's
@@ -492,7 +505,7 @@ them once a frame on the main thread, before the WMO, M2 and terrain culls.
   (ADT doodads) and water are still culled by the camera frustum alone, and
   when the outdoors is open through a doorway the terrain is not narrowed
   to the portal rectangle (0x79a790 narrows everything).
-- No occluders (0x7ccfa0), no second seed group (0x7af280), and the 0x8000
+- No occluders (0x7ccfa0), the second seed group is found by where the camera is, not read from 0x7af280, and the 0x8000
   second fog set is not used.
 - Units and game objects are not culled by the walk.
 

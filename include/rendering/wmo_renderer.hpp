@@ -1322,6 +1322,9 @@ private:
     void releasePortalDoodads(WMOInstance& inst);
     /// The group the camera stands over (0x795d40): the nearest floor under it
     /// within 1760 yards. Returns the instance index and its file group.
+    /// The interior group whose building stands round the camera (see
+    /// findCameraGroup), over the candidates findCameraGroup gathered.
+    bool findEnclosingGroup(const glm::vec3& camPos, size_t& outInstance, uint32_t& outFileGroup) const;
     bool findCameraGroup(const glm::vec3& camPos, std::optional<float> groundBelow,
                          size_t& outInstance, uint32_t& outFileGroup, bool groundIsHole = false) const;
 
