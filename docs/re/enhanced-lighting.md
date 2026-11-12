@@ -1558,6 +1558,50 @@ every shot's saturation on those same pixels (`fgap/bars2.py`
 `crown_gap`). On that mask round three's baseline is +44%, and +43% with
 round three.
 
+**The sunlit road (round four).** The largest measured gap left on the
+three matched Goldshire views was the sunlit road: 9.9% darker than
+Enhanced's (road lit L), bluer and greyer (b/L +25%, chroma -15%), with
+the shaded road 14% too bright and lit/shade 1.60-1.66 against Enhanced's
+1.91-2.33. Turned off one at a time (ca47718, the same views and run),
+the sky shade or the bounce light (which carries the sky shade's build)
+takes the lit road to -4.9%, b/L +12%, chroma -7%. Ambient occlusion, the
+fill light row and the sun haze change it by under a point. Per channel,
+the sky shade took 9-12% of the lit road's red and green and none of its
+blue. The cause is its ground rebuild in `ambient_occlusion.frag`: every
+ground pixel is rebuilt as ambient x occlusion x sky seen + the sun, so
+sunlit ground also lost the plain fill, the bounce pass's warm stand-in
+for Enhanced's probe GI that sunlit ground keeps everywhere else. Two
+narrower fixes measured nothing. Keeping only the ambient's sky
+visibility on lit ground left the lit road at -9.8%. Keeping the fill only
+where the sky is closed in left it at -9.1%: Goldshire's road sees as much
+sky as the Barrens'.
+
+**Ported:** the rebuild is weighed by its own shade weight, so sunlit
+ground keeps what the bounce pass gave it. Kept at every sun height, it
+also lifted the Barrens' noon road (sun 65 degrees up) from 0.551 to 0.576
+in mean, past its blow-out bar. So it applies under a sun below 40 degrees
+and eases back to the rebuild by 55 (`kLitKeepSun0/1`). That cut-off is
+fitted to the bar, not read from Enhanced. Bars (ca47718 -> now):
+
+| bar | before | now |
+|---|---|---|
+| road lit L (gap) | -9.9% | -4.8% |
+| road lit b/L / chroma (gap) | +25.0% / -15.1% | +16.8% / -12.0% |
+| road lit/shade (gap) | -20.9% | -17.6% |
+| region sum | 279.4 | 266.0 |
+| Barrens noon road mean / p95 / p99 | 0.551 / 0.700 / 0.734 | 0.551 / 0.700 / 0.735 |
+| Goldshire into the sun (near-white) | 0.22% | 0.23% |
+| Westfall 6:18 white | 0.07% | 0.05% |
+| eve / forest against y5 | -5.6% / -3.0% | -2.2% / -2.8% |
+| evening shaded road r/L, b/L | 1.419, 0.696 | 1.415, 0.699 |
+| Darnassus / Dolanaar noon mean | 0.200 / 0.255 | 0.200 / 0.256 |
+| crown gap (fixed mask) | +27.0% | +25.4% |
+
+The evening's sunlit road (17:51, the sun 17 degrees up) takes the fill
+too: lit L 0.320 -> 0.372 and a cooler hue (r/L 1.48 -> 1.39, b/L 0.565 ->
+0.620). What is left of the road gap is its blue (lit b/L +17%) and the
+shaded road's brightness (+16%).
+
 ## 7. Ground clutter
 
 `GroundEffectTexture` is the 1.12 table: 1060 of the 1065 changed rows went

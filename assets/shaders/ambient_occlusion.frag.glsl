@@ -151,6 +151,11 @@ const float kModelClosed = 0.9;
 // all of it from kOpenTo.
 const float kOpenFrom = 0.3;
 const float kOpenTo = 0.9;
+// Sunlit ground keeps the light the bounce pass gave it (the plain fill)
+// under a sun lower than kLitKeepSun0 (sin of 40 degrees), the sky shade's
+// rebuild under one higher than kLitKeepSun1 (55 degrees).
+const float kLitKeepSun0 = 0.643;
+const float kLitKeepSun1 = 0.819;
 // Deep shade (none of the ground round it lit) keeps this much of the light
 // the surface shaders gave it.
 const float kDeepKeep = 1.0;
@@ -783,6 +788,19 @@ void main() {
             float deep = smoothstep(kDeepFrom, kDeepTo, canopy) * (1.0 - litGround) * shade;
             vec3 target = mix(shadeLight + difTrue, beforeF, kDeepKeep * deep);
             vec3 fGround = clamp(target / beforeF, 0.0, kEnhancedMaxLift);
+            // The rebuild is for the ground in shade. On sunlit ground it
+            // also took the plain fill (the bounce pass's warm stand-in for
+            // Enhanced's probe GI) that sunlit ground keeps everywhere else:
+            // the lit road at Goldshire 9:22 lost a tenth of its red and
+            // green and none of its blue with the sky shade on (lit L -11%,
+            // b/L +24% against Enhanced, lit/shade 1.6 against 1.9-2.3). By
+            // the shade's own weight, sunlit ground keeps what the bounce
+            // light gave it - under a sun below 40 degrees, easing back to
+            // the rebuild by 55: kept at every height it lifted the Barrens'
+            // noon road (65 degrees) 4.5%, past its blow-out bar. The
+            // height is a fit to that bar, not Enhanced's.
+            float litKeep = (1.0 - shade) * (1.0 - smoothstep(kLitKeepSun0, kLitKeepSun1, ldir.z));
+            fGround = mix(fGround, f, litKeep);
             fF = mix(fModel, fGround, onGround);
         }
         if ((flags & 32) != 0) fF = vec3(vis);
