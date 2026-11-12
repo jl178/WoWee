@@ -323,7 +323,13 @@ void main() {
     float lit = (sunUp > 0.0 || vol.shafts.x > 0.0) ? sunVisibility(p) : 0.0;
     if (vol.shafts.x > 0.0) imageStore(uVisibilityOut, cell, vec4(lit));
     if (sunUp > 0.0) {
-        light += lightColor.rgb * (lit * phase * sunUp * vol.lighting.x);
+        // Under Enhanced's light the mist's own sunlight (not the canopy
+        // shafts below) fades in from the camera: 30% at 4 yards, full by
+        // 40. The near air's sunlit veil over everything in front of the
+        // camera eased the evening and forest views and the crowns' chroma
+        // (docs/re/enhanced-lighting.md 5c, the near air).
+        float nearSun = enhancedSun ? mix(0.3, 1.0, smoothstep(4.0, 40.0, depth)) : 1.0;
+        light += lightColor.rgb * (lit * phase * sunUp * vol.lighting.x * nearSun);
     }
 
     // Enhanced's canopy shafts (vol.shafts.x > 0 only under Enhanced's light,

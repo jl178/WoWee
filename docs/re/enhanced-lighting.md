@@ -955,6 +955,36 @@ Westfall 6:18 0.26% white, Barrens dawn and dusk 0%, Goldshire into the
 sun 0.19% (ring.py), Elwynn's canopy beam and both moonbeam views within
 0.01 of their mean at nine times.
 
+**The near air over the road** (dbcb6e7). The haze agent's ablations put
+part of the Goldshire road's remaining gaps in the mist: the shaded road
++15-16% too bright against Enhanced (+10% with the mist off), the lit
+road's b/L +17% (+13%). Six changes to the mist's first 40 yards were
+measured with the fgap bars (all under Enhanced's light; road rows are the
+gap to Enhanced over the three matched views, run-to-run noise about one
+point):
+
+| change | road shade L | road lit b/L | Darnassus / Dolanaar | evening / forest | crown gap |
+|---|---|---|---|---|---|
+| none (dbcb6e7) | +13.6% | +14.6% | 0.200 / 0.255 | -5.2% / -3.0% | +26.0% |
+| A: the fog-colour (ambient) part 35% at 4 yd, full by 40 | +10.5% | +11.0% | 0.195 / 0.250 | -7.8% / -6.3% | +24.2% |
+| B: A, and that light warmer and less blue | +9.9% | +10.7% | 0.194 / 0.250 | -7.5% / -6.2% | +26.7% |
+| C: the warmer ambient alone | +13.2% | +13.8% | 0.199 / 0.255 | -5.4% / -2.9% | +30.4% |
+| **D: the sunlit (non-shaft) part 30% at 4 yd, full by 40** | +12.7% | +14.9% | 0.200 / 0.255 | -4.8% / -3.0% | +17.0% |
+| E: D at 55% | +12.5% | +14.2% | 0.200 / 0.256 | -5.6% / -3.0% | +19.9% |
+| F: A only where the air round a cell was sunlit | +12.4% | +12.8% | 0.200 / 0.250 | -5.1% / -3.0% | +24.5% |
+
+The shaded road's excess is the near air's ambient light, and Teldrassil's
+canopy views take their brightness from that same air in the same
+geometry: every cut that moved the road (A, B, F - gating by the sunlit
+air round a cell did not separate them, Dolanaar's clearing trips it)
+darkened Darnassus and Dolanaar below their bars and their 5th
+percentiles with them, as the haze's air-start attempt had. A warmer
+ambient (C) barely moves b/L and raises the crowns' chroma. D is kept:
+it leaves the road and Teldrassil where they were and eases the evening
+and forest views and the crown gap (+26% -> +17%); Barrens 0.547, Westfall
+6:18 0.04% white, into the sun 0.24%. E keeps less of that. The road's
+gaps are not the mist's to close.
+
 ## 6. Global illumination ("Secondary Lighting")
 
 Enhanced-era shaders with no names in the community listfile
