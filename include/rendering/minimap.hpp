@@ -239,6 +239,12 @@ private:
     // the roots that have any, so a building without tiles keeps the terrain.
     std::unordered_map<std::string, std::string> wmoTrsLookup_;
     std::unordered_set<std::string> wmoTileRoots_;
+    /// Per WMO root, the one image every tile of it names, when they all
+    /// name the same one ("" once two differ): a set of placeholders.
+    std::unordered_map<std::string, std::string> wmoRootSoleHash_;
+    /// Roots whose tiles are all one empty image: no map of their own.
+    std::unordered_map<std::string, bool> wmoRootBlank_;
+    [[nodiscard]] bool wmoRootIsBlank(const std::string& root);
     bool trsParsed = false;
 
     // Tile texture cache: hash → VkTexture

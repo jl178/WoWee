@@ -399,7 +399,10 @@ void Minimap::parseTRS() {
             std::string lower = key;
             std::transform(lower.begin(), lower.end(), lower.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            wmoTileRoots_.insert(lower.substr(0, lower.size() - 10));
+            std::string root = lower.substr(0, lower.size() - 10);
+            auto [soleIt, fresh] = wmoRootSoleHash_.try_emplace(root, hashFile);
+            if (!fresh && soleIt->second != hashFile) soleIt->second.clear();
+            wmoTileRoots_.insert(std::move(root));
             wmoTrsLookup_[std::move(lower)] = hashFile;
         }
     }
@@ -671,10 +674,37 @@ void Minimap::compositePass(VkCommandBuffer cmd, const glm::vec3& centerWorldPos
 // WMO mode: a building's own minimap tiles
 // --------------------------------------------------------
 
+// A WMO whose every tile is one and the same empty image has no map of its
+// own: the Culling of Stratholme's town is one collision shell, an indoor
+// group over the whole instance whose 48 tiles all name one transparent
+// 256x256 image. Drawn, that was a black minimap everywhere in the
+// instance; such a set is taken as no tiles, as a WMO md5translate names
+// none for is, and the terrain's map stays.
+bool Minimap::wmoRootIsBlank(const std::string& root) {
+    auto known = wmoRootBlank_.find(root);
+    if (known != wmoRootBlank_.end()) return known->second;
+    bool blank = false;
+    auto sole = wmoRootSoleHash_.find(root);
+    if (sole != wmoRootSoleHash_.end() && !sole->second.empty()) {
+        // Read once per root, on the CPU: the tile textures are uploaded
+        // as plain RGBA and keep no coverage of their own.
+        const pipeline::BLPImage img = assetManager->loadTexture("Textures\\Minimap\\" + sole->second + ".blp");
+        if (img.isValid()) {
+            float rgb[3];
+            float coverage = 1.0f;
+            img.averageColor(rgb, coverage);
+            blank = coverage <= 0.01f;
+        }
+        if (blank) LOG_INFO("Minimap: ", root, "'s tiles are all one empty image; its map is the terrain's");
+    }
+    wmoRootBlank_[root] = blank;
+    return blank;
+}
+
 bool Minimap::setWmoView(const WmoView& view) {
     if (!trsParsed) parseTRS();
     if (view.tileRoot.empty() || !wmoTileRoots_.count(view.tileRoot) ||
-        view.currentGroup >= view.groups.size()) {
+        view.currentGroup >= view.groups.size() || wmoRootIsBlank(view.tileRoot)) {
         clearWmoView();
         return false;
     }
