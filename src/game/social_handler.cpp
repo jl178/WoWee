@@ -3077,7 +3077,7 @@ void SocialHandler::handleGuildRoster(network::Packet& packet) {
     // The argument is "you may request a roster", and every reader answers it
     // with `if arg1 then GuildRoster() end` - friendsframe, the guild bank and
     // the calendar all do exactly that. Sending true here would have each of
-    // them request a roster, whose reply would fire this again, enhanced.
+    // them request a roster, whose reply would fire this again, indefinitely.
     if (owner_.addonEventCallbackRef())
         owner_.addonEventCallbackRef()("GUILD_ROSTER_UPDATE", {eventBool(false)});
 }
@@ -5481,7 +5481,7 @@ void SocialHandler::handleArenaTeamRoster(network::Packet& packet) {
     // Fired with no arguments, and that is the whole contract. pvpframe reads
     // arg1 as "the roster you hold is stale, ask for it again" and only
     // redraws from what arrived when arg1 is absent - so any argument at all
-    // would answer this roster by requesting another one, enhanced. A zero
+    // would answer this roster by requesting another one, indefinitely. A zero
     // would do it too, zero being true in Lua.
     if (owner_.addonEventCallbackRef()) {
         owner_.addonEventCallbackRef()("ARENA_TEAM_ROSTER_UPDATE", {});

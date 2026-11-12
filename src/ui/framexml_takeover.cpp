@@ -457,7 +457,7 @@ const Check kChecks[] = {
         {UiElement::MicroMenu,    "CharacterMicroButton MainMenuBarPerformanceBar"},
         // MainMenuExpBar is the bar itself; ExhaustionTick is the rested
         // marker that rides on it. Checked against the XML rather than
-        // guessed - a name invented here reports NOT BUILT enhanced and reads
+        // guessed - a name invented here reports NOT BUILT indefinitely and reads
         // as a fault in the interface rather than in this list.
         {UiElement::XpBar,        "MainMenuExpBar ExhaustionTick"},
         // Both hang off the minimap cluster, so if either is in the wrong

@@ -1,10 +1,10 @@
 #pragma once
 
-/// "Far field (the reference client)": the land past the view distance drawn in its
-/// own colours, lit and fogged as the near ground is, out to Enhanced's
+/// "Far field (enhanced)": the land past the view distance drawn in its
+/// own colours, lit and fogged as the near ground is, out to the reference client's
 /// horizonClip.
 ///
-/// the reference client draws full detail to horizonStart (1900 yards) and a
+/// The reference client draws full detail to horizonStart (1900 yards) and a
 /// low-detail horizon to horizonClip (7000), with a fog that ends at 18000
 /// (docs/re/enhanced-lighting.md). The stock 3.3.5 client draws the WDL
 /// heights past its far clip in the flat fog colour (terrain.md section 8),
@@ -40,7 +40,7 @@
 
 namespace wowee::rendering::far_field {
 
-/// How far the far field reaches, in yards: Enhanced's horizonClip.
+/// How far the far field reaches, in yards: the reference client's horizonClip.
 inline constexpr float kReach = 7000.0f;
 /// The near limit is the far clip less this: half a chunk's diagonal
 /// (33.33 x sqrt 2 / 2 = 23.57) and a little.

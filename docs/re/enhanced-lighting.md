@@ -1,17 +1,17 @@
-# the reference client's lighting and atmosphere
+# The reference client's lighting and atmosphere
 
-What the official "the reference client" client (product `wowf`, build 1.60.1.70862,
+What the official reference client (product `wowf`, build 1.60.1.70862,
 launched Nov 4 2026) does to make 1.12's world look the way it does, read from
 its binary, its shaders and its data rather than from screenshots, and what
 Wowee took from it.
 
-Sources, all from Jered's install (`_enhanced_/`, the shared CASC store) and
+Sources, all from Jered's install (`_reference_/`, the shared CASC store) and
 the same build's files on wago.tools (same build config
 `5ada954223f7c409ea172361f5c9e565`):
 
-- `_enhanced_/Wow.exe` (77 MB, x64, D3D12) - strings, CVar registrations.
-- `_enhanced_/WTF/Config.wtf` - the settings Jered runs (graphicsQuality 6).
-- `_enhanced_/Logs/gx.log` - the device and what it enabled.
+- `_reference_/Wow.exe` (77 MB, x64, D3D12) - strings, CVar registrations.
+- `_reference_/WTF/Config.wtf` - the settings Jered runs (graphicsQuality 6).
+- `_reference_/Logs/gx.log` - the device and what it enabled.
 - Shaders: `shaders/{compute,pixel,vertex}/dx_6_0/*.bls`. A `.bls` is a
   `GXSH` container of zlib streams holding DXIL; inflated and disassembled
   with `dxc -dumpbin` (DirectXShaderCompiler 1.10). cbuffer *struct* names
@@ -27,9 +27,9 @@ The scripts that did this are in the session scratchpad
 (`scripts/bls_extract.py`, `dis_all.py`, `lut.py`, `lut2.py`, `cmp.py`,
 `palette.py`, `ground*.py`); nothing from the client was executed.
 
-## 1. What Enhanced is
+## 1. What the reference client is
 
-Enhanced is not a new renderer bolted onto 1.12. `gx.log` names it "World of
+The reference client is not a new renderer bolted onto 1.12. `gx.log` names it "World of
 Warcraft Retail x86_64 1.60.1.70862", it uses the retail shader family
 (`SM6`), and its exe carries the whole retail settings set. It is the modern
 (12.x, Midnight-era) engine running 1.12's world with re-authored data. Its
@@ -41,7 +41,7 @@ look comes from three things:
    `giQuality`), PBR water, and colour grading.
 2. Re-authored light data: every outdoor `Light` on the two continents has
    new `LightParams` and twelve keyframes a day instead of seven, with new
-   columns only Enhanced has.
+   columns only the reference client has.
 3. Distance: `farclip 7000`, `horizonStart 1900`, `horizonClip 7000`, and
    fog that ends far past what is drawn.
 
@@ -58,11 +58,11 @@ nothing below needs hardware ray tracing.
 
 `Light` row 1 (the map default of Eastern Kingdoms, used across Northshire
 and most of Elwynn) points at `LightParams` 12 in Classic Era and 7748 in
-Enhanced. Era has keys at 0, 3, 6, 12, 18, 21, 22 h; Enhanced at 0, 4.5, 5.5,
+the reference client. Era has keys at 0, 3, 6, 12, 18, 21, 22 h; the reference client at 0, 4.5, 5.5,
 7, 8, 12, 15, 17, 18, 19.5, 20.67, 21.5 h - a slow dawn and a long golden
 evening. At noon:
 
-| | Era (1.12) | Enhanced |
+| | Era (1.12) | the reference client |
 |---|---|---|
 | DirectColor | `#ff8800` | `#eabd8a` |
 | AmbientColor | `#68829a` | `#68829a` |
@@ -73,13 +73,13 @@ evening. At noon:
 | new F052 | - | 1.35 (night 1.0, dawn/dusk 1.5) |
 
 Over every light matched by ID and position on maps 0 and 1, sampled 8-17 h
-(`palette.py`): Enhanced's direct light keeps its brightness but loses ~19% of
+(`palette.py`): the reference client's direct light keeps its brightness but loses ~19% of
 its saturation (chroma ratio 0.81: a whiter sun), ambient is ~15% brighter,
 the sky's fog colour ~30% brighter and more saturated, the sky's middle band
 ~19% brighter. The lights were re-authored one by one - a single matrix does
 not fit them (error 0.1 per channel) - so these are trends, not a formula.
 
-**Ported** as the "Daylight (the reference client)" row (`enhancedDaylight`,
+**Ported** as the "Enhanced daylight" row (`enhancedDaylight`,
 `include/rendering/enhanced_palette.hpp`, applied in `LightingManager::update`
 after the band blend): each colour's luminance and chroma scaled by the
 measured trend (direct x1.03 / x0.81, ambient x1.15 / x1.08, sky top x1.09 /
@@ -88,7 +88,7 @@ x1.11 / x0.72), weighted by dnc.db's day intensity, on maps 0 and 1, not
 under water. 3.3.5's old-world lights are 1.12's, so the trend applies to
 what Wowee reads.
 
-Enhanced-only columns (names unknown; no public definitions exist):
+Reference-only columns (names unknown; no public definitions exist):
 
 - LightData `Field_1_60_1_69876_045..059`. 048 (1 or 1.5), 049 (0.3-4, mostly
   1 or 1.5), 051 (0.1-8; Light 1: 1 by day, 2 at dawn, 3 at night), 052 (0.1-5;
@@ -103,11 +103,11 @@ Enhanced-only columns (names unknown; no public definitions exist):
   `_031` is 0.001 on 370 rows; `_037` 0.7/0.8; `_036` 1/8/16/32.
   `SsaoSettingsID` is 116 on 260 of 882 rows (section 4).
 
-## 2b. Per-zone keyframes: Enhanced's own light, re-keyed to 3.3.5
+## 2b. Per-zone keyframes: the reference client's own light, re-keyed to 3.3.5
 
-The trend above is now only the fallback. With the "Daylight (the reference client)"
-row on, every 3.3.5 light on maps 0 and 1 that has a Enhanced counterpart is
-sampled from Enhanced's own keyframes; the rest keep the trend.
+The trend above is now only the fallback. With the "Enhanced daylight"
+row on, every 3.3.5 light on maps 0 and 1 that has a reference counterpart is
+sampled from the reference client's own keyframes; the rest keep the trend.
 
 **Columns.** Classic Era 1.15's LightData against 3.3.5's LightIntBand and
 LightFloatBand for the same LightParams ids (1.12's rows; `colmap.py`): 99%
@@ -119,102 +119,102 @@ RiverClose, RiverFar - the DB2 names 11 and 12 the other way round from the
 order Wowee's enum gives them. Float bands 0-3 are FogEnd, FogScaler,
 SunFogAngle (always 1: celestial glow through) and CloudDensity; 4 and 5
 are not in the DB2 (0.95 and 1 throughout). Units are 3.3.5's: Light 1's
-noon FogEnd is 18000 in Era, 3.3.5 and Enhanced alike, so Enhanced's fog is
+noon FogEnd is 18000 in Era, 3.3.5 and the reference client alike, so the reference client's fog is
 read exactly as 3.3.5's is (and on the same 1/36 scale; the "18000 yards"
 of section 5 is 500 yards in 3.3.5's reading). Times are half-minutes.
 
 **Which light.** Light ids are shared: 186 of 3.3.5's 209 lights on the two
-continents are at the same place and size in Enhanced. But Enhanced moved or
+continents are at the same place and size in the reference client. But the reference client moved or
 shrank some (Mulgore's 201 from 1131 to 105 yards, Ashenvale's 192 to 22)
 because it also lights by **ZoneLight polygons** (`ZoneLight`,
 `ZoneLightPoint`, 17 on maps 0 and 1: Elwynn, Mulgore, Ashenvale, Durotar
 north, Orgrimmar, Wetlands, Burning Steppes, Blasted Lands, Stormwind
 Harbor, Hyjal...): inside one, its light is the canvas instead of the map
 default. So the match is by ground: each 3.3.5 light is sampled over its
-area (32x32, weighted by its own falloff), Enhanced's lights are painted at
+area (32x32, weighted by its own falloff), the reference client's lights are painted at
 each point as the stock client paints them (canvas, then farthest first),
-and the Enhanced light with the largest share wins. Map defaults take map
-defaults; a 1.12 light that Enhanced gave to the default or a zone polygon
+and the reference light with the largest share wins. Map defaults take map
+defaults; a 1.12 light that the reference client gave to the default or a zone polygon
 takes that; a light 3.3.5 added (TBC/WotLK: 54, 59, 60, 70, 1763...) or one
-no Enhanced light holds half of keeps the trend. Result: 198 of 209 lights,
-both slots clear and storm, 112 Enhanced profiles, 1287 keys. Moved: 20, 50
+no reference light holds half of keeps the trend. Result: 198 of 209 lights,
+both slots clear and storm, 112 reference profiles, 1287 keys. Moved: 20, 50
 and 78 to Burning Steppes' 7 (its polygon), 202 to Mulgore's 201, 201 and
 239 to the Kalimdor default, 34 to 31. Unmatched: 54, 59, 60, 70, 71, 192,
 204, 248, 255, 269, 1763.
 
 **What is copied.** The colour and fog bands of the clear and storm slots,
-up to 16 keys (Enhanced has 12). A column a Enhanced profile leaves at zero on
-every key is one Enhanced does not use (water colours on 115 of 126 outdoor
+up to 16 keys (the reference client has 12). A column a reference profile leaves at zero on
+every key is one the reference client does not use (water colours on 115 of 126 outdoor
 profiles, the shadow grey, the second cloud layer); 3.3.5's band stays. A
-zero FogEnd on one key means no fog end there (Enhanced sets it on 277 of
+zero FogEnd on one key means no fog end there (the reference client sets it on 277 of
 1455 keys) and is left out of that band. LightParams fields (skybox, glow,
-water alphas) stay 3.3.5's: Enhanced's Glow is 0 on 120 of 126 (its bloom is
+water alphas) stay 3.3.5's: the reference client's Glow is 0 on 120 of 126 (its bloom is
 separate) and its skyboxes 712/715 do not exist in 3.3.5. Underwater and
 death slots stay stock.
 
-**Not used.** Enhanced's extra columns (above) and retail's
+**Not used.** The reference client's extra columns (above) and retail's
 `HorizonAmbientColor`/`GroundAmbientColor` (837 keys, near the ambient: a
 sky/ground hemisphere ambient). From the data alone: 057 is close to the
 DirectColor (mean RGB distance 47), 055 to SkyBand1 (72); the intensities
 051/052/058 need a linear pipeline to mean anything (section 9b). The
 ZoneLight polygons themselves are not shipped: where 3.3.5 has only its map
-default (most of Elwynn, Wetlands), Enhanced's zone light is not applied -
+default (most of Elwynn, Wetlands), the reference client's zone light is not applied -
 Elwynn's 16849 (LightParams 7747) differs from the default's 7748 only in
 the dawn sun.
 
-**The ambient is bounded (an approximation).** A few Enhanced profiles carry
+**The ambient is bounded (an approximation).** A few reference profiles carry
 ambients far outside the rest - Mulgore's LightParams 7567 is `#bae6ff` by
 day, `#cb84ff` at 19:30 and `#1d9eff` at night - which on 3.3.5's clamped
-8-bit lighting read as a strong violet or cyan cast. Enhanced must scale
+8-bit lighting read as a strong violet or cyan cast. The reference client must scale
 them in its linear pipeline, but no column explains how: its 058 is
 0.5-0.8 on those keys and 1-2 on Light 1's darker ambient, yet over all
 outdoor keys no column makes ambient brightness more consistent. So the
-generator bounds each key's ambient by what Enhanced's zones use at that
+generator bounds each key's ambient by what the reference client's zones use at that
 hour: every half hour, the 90th percentile of the ambient's luminance and
 of its chroma (distance from its grey) over all the shipped profiles; a key
 above either is scaled down, then pulled toward its grey, keeping its hue.
 210 of 1287 keys move (median 22/255 on the largest channel); 7567's become
 `#697d89` by day, `#9167af` at 19:30 and `#3a7bac` at midnight. When
-Enhanced's scaling is understood this should be replaced by it.
+the reference client's scaling is understood this should be replaced by it.
 
 **Where the data lives.** The converted table is Blizzard's data, so it is
-not in the source tree (the repository is public). `tools/enhanced_light_gen.py`
-(3.3.5 DBCs + Enhanced CSVs) writes it to the client data's override folder,
-`<data>/override/wowee/enhanced_lights.bin` (125 KB; layout in
-`include/rendering/enhanced_lights.hpp`), and `LightingManager` reads it
-through the AssetManager as `wowee\enhanced_lights.bin`, as an override pack
+not in the source tree (the repository is public). `tools/enhanced_lighting_gen.py`
+(3.3.5 DBCs + reference CSVs) writes it to the client data's override folder,
+`<data>/override/wowee/enhanced_lighting_table.bin` (125 KB; layout in
+`include/rendering/enhanced_lighting_table.hpp`), and `LightingManager` reads it
+through the AssetManager as `wowee\enhanced_lighting_table.bin`, as an override pack
 file. Without it the log says so once and the row uses the averaged trend
 everywhere; a file that fails its checks is treated the same way. The test
-reads a made-up two-key table, not Enhanced's.
+reads a made-up two-key table, not the reference client's.
 
 **Code.** `LightingManager::loadEnhancedProfiles` builds, at load, one profile
 per linked light and slot over the slot's stock profile; `profileForSlot` returns it while the row is on, on maps 0 and 1,
 not under water (a storm slot that falls back to the clear set falls back to
-Enhanced's). The trend now applies per light before the blend, only to lights
-sampled from 3.3.5; it is linear, so on a map without Enhanced links the
+the reference client's). The trend now applies per light before the blend, only to lights
+sampled from 3.3.5; it is linear, so on a map without reference links the
 result equals the old after-blend trend. Off is stock exactly: the profiles
 are not looked up.
 
 **Seen in the lab** (Enhanced preset, the row off and on, 6:30 to 20:30, in
 Goldshire, Westfall, Darkshire, the Crossroads and Bloodhoof; the
-`sky:` log line counts the lights on Enhanced data as `enhanced=`):
+`sky:` log line counts the lights on reference data as `enhanced=`):
 Goldshire's noon sun is whiter and its sky brighter, as section 2's table
 says; Darkshire keeps its blue night-in-daytime; the Barrens' haze toward
 a morning sun is paler. Mulgore changed most. Before the ambient bound it
 was washed pale by day, violet at dusk and cyan at night. With the bound,
 Bloodhoof and Thunder Bluff at noon are close to 3.3.5 with a cooler
 shade, and at 23:00 they are a clean blue night. At 19:30 both are still
-warmer and pinker than 3.3.5: Enhanced's orange sun (`#ff6d00`) is over a
+warmer and pinker than 3.3.5: the reference client's orange sun (`#ff6d00`) is over a
 violet ambient that sits at the 90th percentile of what the other zones
 use at that hour. A 75th-percentile bound would have moved 533 of the
-1287 keys, so the bound stays at the 90th. Only two Enhanced captures exist
+1287 keys, so the bound stays at the 90th. Only two reference captures exist
 (Northshire, Goldshire); none of Mulgore was available to check against.
 
-## 2c. Exposure: Enhanced's colours on 3.3.5's path
+## 2c. Exposure: the reference client's colours on 3.3.5's path
 
 Jered's first morning on the keyframes (Goldshire road toward a high sun,
 `jered_now.png`) blew the top third of the screen to white-yellow, washed
-the foliage and took the sunlit cobbles near white. Enhanced's light data is
+the foliage and took the sunlit cobbles near white. The reference client's light data is
 authored for its linear, tone-mapped pipeline; read raw it stacks with
 everything after it. Measured against 3.3.5's bands for the same lights
 (every linked light, clear slot, 8:00-17:00):
@@ -228,25 +228,25 @@ everything after it. Measured against 3.3.5's bands for the same lights
   to the ambient, gives what adding them as *light* gives - both decoded
   with the 2.2 power, summed, encoded back: (0.98, 0.87, 0.79) at that noon,
   warm and under white. With the HDR scene the sum is left unclamped and the
-  sun carries Enhanced's F052 (1.35, eased in by the day intensity) before
+  sun carries the reference client's F052 (1.35, eased in by the day intensity) before
   the renderer's own 1.25 by day and the tone map.
 - **The sky** is not: its bands are x1.26-1.30 3.3.5's (SkyMiddle 1.26,
   Band1 1.30, Band2 1.29, Smog 1.29, Fog 1.29, CloudSun 1.27, cloud layer
   1.29; 3762 samples each), their 75th percentile 1.30-1.31 and no higher.
   Most keys are 1.12's colour times 1.3 per channel, clipped at 255
-  (Westfall's noon SkyMiddle `#3c919e` -> `#4ebdcd`): an exposure Enhanced's
+  (Westfall's noon SkyMiddle `#3c919e` -> `#4ebdcd`): an exposure the reference client's
   pipeline takes back. It is divided out as the table is read
-  (`enhanced_lights::kSkyExposure`, channels 2-7, 10, 11), and out of the
+  (`enhanced_lighting_table::kSkyExposure`, channels 2-7, 10, 11), and out of the
   trend's sky luminance for the lights without keyframes.
-- **The stock glow.** Enhanced's LightParams Glow is 0 on 106 of the 112
+- **The stock glow.** The reference client's LightParams Glow is 0 on 106 of the 112
   linked profiles (its bloom is separate); 3.3.5's same slots carry 0.5-1,
-  and its blur squared over a sky as bright as Enhanced's was most of the
+  and its blur squared over a sky as bright as the reference client's was most of the
   white sheet at Westfall's noon. Linked lights keep half of it
   (`enhanced_palette::kGlowScale`): with none the picture fell to 0.21-0.23
-  mean luminance against Enhanced's captures' 0.32; half gives 0.25-0.26
+  mean luminance against the reference captures' 0.32; half gives 0.25-0.26
   with the sky still under white.
 
-And the passes after it, each only under its Enhanced row:
+And the passes after it, each only under its enhanced row:
 
 - The sun haze's light is held by its brightest channel (hue kept) at 0.88
   in the 8-bit scene and 1.5 under the HDR tone map (it was 1.3 and 3 per
@@ -262,11 +262,11 @@ And the passes after it, each only under its Enhanced row:
   luminance, faded out as the brightest channel nears 0.9,
   `enhanced_palette::kHdrExposure`) and lit surfaces carry more chroma (x1.35
   from 0.25 luminance up, easing to x0.8 at the top, `kHdrSaturation`).
-  Matched against Jered's live Enhanced captures at Goldshire 9:22, into the
+  Matched against Jered's live reference captures at Goldshire 9:22, into the
   sun and away from it (lit and shade are the brightest and darkest thirds
   of the world view):
 
-  | | Enhanced | old preset | now |
+  | | the reference client | old preset | now |
   |---|---|---|---|
   | lit luminance | 0.44 / 0.59 | 0.43 / 0.49 | 0.46 / 0.51 |
   | lit chroma | 0.62 / 0.65 | 0.46 / 0.53 | 0.63 / 0.69 |
@@ -274,19 +274,19 @@ And the passes after it, each only under its Enhanced row:
   | lit / shade | 2.07 / 2.27 | 2.08 / 1.95 | 2.27 / 2.14 |
 
   and the Barrens' noon road at 0.1% of pixels over 0.92 (old preset
-  11.1%). Tried and left: a straight exposure (1.25-1.4) reached Enhanced's
+  11.1%). Tried and left: a straight exposure (1.25-1.4) reached the reference client's
   mean but took the Barrens' dirt to a glowing orange; a lift of the low end
   greyed the shade and flattened the picture; the sun past its F052 (1.7)
   put 8.5% of the Barrens' road over 0.92 (with the lift still on).
   (Superseded by section 2d: the lift and the boost are now 1 and the sun
-  2x; and Enhanced's sun keeps 3.3.5's north-west bearing - the "east of the
+  2x; and the reference client's sun keeps 3.3.5's north-west bearing - the "east of the
   road" read here was the minimap's character arrow.)
 - The final write is
-  dithered (a triangular dither of one level) under the Enhanced rows: the
+  dithered (a triangular dither of one level) under the enhanced rows: the
   shoulder and the grade spread a sky's gradient over a few 8-bit levels,
   which showed as rings round the sun.
 - The colour grade fades out over 0.6-0.9 of a pixel's brightest channel:
-  Enhanced's curve lifts the upper mid-tones of an already tone-mapped
+  The reference client's curve lifts the upper mid-tones of an already tone-mapped
   picture, and on 3.3.5's 0.7-0.9 sunlit ground it drove them to white.
 
 Checked with the HDR row on (the Enhanced preset as Jered runs it): the
@@ -298,16 +298,16 @@ blob: Goldshire into the sun 0.6% at most (the disc at 9:00 is 0.25%;
 across the sun and at night none. Westfall at noon looking up at the
 zenith sun keeps 7% (58.5% before): there the stock picture itself clips
 red and green over half the screen (Ultra: 47% of pixels with a channel at
-255), and Enhanced's bluer sky makes that clip white rather than yellow.
+255), and the reference client's bluer sky makes that clip white rather than yellow.
 The comparison sheets are in the session scratchpad (`ovx/shots/`).
 
 ## 2d. The sun's place, and what the sun lights
 
-**Where Enhanced puts the sun.** Read from Wow.exe 1.60.1.70862 (file
+**Where the reference client puts the sun.** Read from Wow.exe 1.60.1.70862 (file
 offsets; no DB2 - LightParams' SunPolar/SunAzimuth are 0 on 873 of 882
 profiles, which leaves the engine's own tables). 3.3.5's DayNight tables
 (stock_day_night.hpp) are keyframes of {day fraction, radians}; the same
-layout sits in Enhanced's `.data`:
+layout sits in the reference client's `.data`:
 
 - 0x48f7400: the **light**'s theta (225 degrees, all day) and phi (127 at
   midnight and noon, 110 at six) - byte for byte 3.3.5's 0xd390c4/0xd390e4.
@@ -321,32 +321,32 @@ layout sits in Enhanced's `.data`:
 
 So there is no latitude, tilt or per-map term and no east-west arc: the
 bearing is fixed in the north-west as in 3.3.5, the light's direction is
-3.3.5's, and what Enhanced changed is how high the sun climbs (65 degrees at
+3.3.5's, and what the reference client changed is how high the sun climbs (65 degrees at
 noon, not 85) and when it rises and sets (05:58 and 19:54, not 06:10 and
 20:30). The tables are not referenced by a direct RIP-relative load in
 `.text` (searched for every disp32 into them), so which one drives the
 shadow map is not proven from code; the captures agree with the stock
 bearing: at 09:23 (092315) the camera looks east-south-east and the fence
 fronts and the character's sides turned toward it are sunlit, the light
-from behind; at 15:23 (enhanced_02) the inn view (the same framing as
+from behind; at 15:23 (reference_02) the inn view (the same framing as
 Wowee's yaw 225 one, where the sun stands) looks into the sun. Earlier
-notes here said Enhanced's 9:22 sun stood east of the road; that was the
+notes here said the reference client's 9:22 sun stood east of the road; that was the
 character's facing on the minimap, not the camera's.
 
-**Ported** (Enhanced's daylight only): `stock_day_night::kEnhancedSunPhi`,
+**Ported** (enhanced daylight only): `stock_day_night::kEnhancedSunPhi`,
 `enhancedSunDirection`; `LightingManager` takes the sun's direction from it
 while `enhancedActive_` (the sprite, the leaf light, the haze's phase, the
 shafts, the HDR sun's day weight). The light direction is unchanged.
 
 **What the sun lights.** Split by region, the canopy's gap was the tree
 crowns (foliage pixels in the top third): luminance +29%, 90th percentile
-+41%, chroma +38%, blue/luminance -23% against Enhanced, with the grass
++41%, chroma +38%, blue/luminance -23% against the reference client, with the grass
 matching. Halving the sun on every M2 moved the crowns by under 0.02:
 they are lit by the sky (ambient) alone, at 0.25-0.30 - inside the band
 the composite's mid-tone lift (kHdrExposure x1.3, section 2c) and chroma
-boost (kHdrSaturation x1.35) act on. Enhanced brightens what its sun
+boost (kHdrSaturation x1.35) act on. The reference client brightens what its sun
 reaches (F052 is a sun intensity); the lift brightened everything at that
-luminance. So, with the HDR scene under the Enhanced daylight: the lift and
+luminance. So, with the HDR scene under the enhanced daylight: the lift and
 the boost are 1 (off) and the sun's light by day is 2x Light.dbc's
 (enhanced_tonemap::kSunLight, was 1.25). Tried: sun 1.6 and 1.7 left the
 sunlit ground 22-25% short; 2.0 with the boost kept took the ground's
@@ -356,9 +356,9 @@ chroma +20%.
 into the tone curve's shoulder: paler, its cobbles near white (its ground's
 99th percentile luminance 0.86 against 0.76 before, 2.1% of it with a
 channel over 0.92 against 0.07%) - and the Barrens' sun was already
-"sooo bright" to Jered. Enhanced's own tone curve was not read (its
+"sooo bright" to Jered. The reference client's own tone curve was not read (its
 `ffxcolorcorrection` is a plain power, and the shader that tone maps its
-linear scene is not among those extracted). Under Enhanced's daylight,
+linear scene is not among those extracted). Under enhanced daylight,
 outdoors and by day the knee moves from 0.8 to 0.5
 (enhanced_tonemap::kEnhancedKnee, eased by the indoor factor and the sun's
 height): the Reinhard shoulder starts at half of white, so what passes it
@@ -380,11 +380,11 @@ commit before this one), the 2x sun alone, and now:
 (The old road's 73% over 0.85 was its red channel flat near the top - a
 saturated orange sheet; now the cobbles keep their texture.)
 
-Measured (the three matched Goldshire views; gap is Wowee against Enhanced,
-mean of the views; before = the commit before this one, now = Enhanced's
+Measured (the three matched Goldshire views; gap is Wowee against the reference client,
+mean of the views; before = the commit before this one, now = the reference client's
 sun table, the 2x sun, no lift or boost, the 0.5 knee):
 
-| region | Enhanced | before | now |
+| region | the reference client | before | now |
 |---|---|---|---|
 | crown luminance | 0.25 0.26 0.25 | +26% | +17% |
 | crown 90th pct | 0.31 0.32 0.32 | +40% | +20% |
@@ -406,7 +406,7 @@ The grass rows are mostly the measure: they count pixels of grass's hue
 turns 8-12 degrees toward yellow (82.6 -> 70.8 at the inn, 64.2 -> 53.1 at
 the crossroads, 70.5 -> 62.1 at 15:23), so the yellower half leaves the
 count. The same pixels in both builds: luminance -3%, +1%, +7%; chroma
--4%, +10%, +8%. What is real is that hue: Enhanced's lower band keeps more
+-4%, +10%, +8%. What is real is that hue: the reference client's lower band keeps more
 yellow-green (32%, 23%, 17% of its pixels between 45 and 65 degrees
 against Wowee's 6-8%), and its grass is green where Wowee's is now olive.
 
@@ -416,20 +416,20 @@ Elsewhere: into the sun at 9:22 4.2% of pixels have a channel over 0.92
 percentile +0.011..+0.015, 95th -0.046..-0.055, lit/shade 1.89-2.02
 (2.22-2.37) - a little flatter at the top. Sheets in the session
 scratchpad: `fgap/sheet_k.png` (the Barrens, the inn and into the sun:
-before | 2x sun, knee 0.8 | now), `fgap/sheet_g.png` (Enhanced | before |
+before | 2x sun, knee 0.8 | now), `fgap/sheet_g.png` (the reference client | before |
 now), `fgap/sheet_g_regress.png`.
 
-## 2e. Lit and shadowed from Enhanced's sun
+## 2e. Lit and shadowed from the reference client's sun
 
-Section 2d found that Enhanced's sun tables keep 3.3.5's bearing, so the
+Section 2d found that the reference client's sun tables keep 3.3.5's bearing, so the
 light was left on the stock table. The captures say otherwise about what
-it lights: at 9:23 Enhanced's crossroads road lies in the sun with tree
+it lights: at 9:23 the reference client's crossroads road lies in the sun with tree
 shade in patches, golden flagstones (hue 34-37 degrees) beside warm shade;
 under 3.3.5's light (north-west, 30 degrees up at 9:22) the trees shade the
 whole road, held at 70% by the stock floor - a flat red-brown (28-32).
-Lighting the world from the sun's disc instead (by day; Enhanced's sun is
+Lighting the world from the sun's disc instead (by day; the reference client's sun is
 37 degrees up at 9:22, 65 at noon, 17 at 17:51) puts the road in the sun
-and dapples it as Enhanced's is. So, under Enhanced's daylight
+and dapples it as the reference client's is. So, under the enhanced daylight
 (`LightingManager`, `enhanced_palette::sunLightDirection`):
 
 - The world's light and its shadows come from the sun, eased in over the
@@ -445,19 +445,19 @@ and dapples it as Enhanced's is. So, under Enhanced's daylight
   within about 20 degrees of the disc (a smoothstep from 25 to 5 degrees,
   85%): with it on the disc the bright air round the sun was a wide
   near-white field (4.6% of the view over 0.92). Radial luminance by 20 px
-  from the disc: Enhanced 1.00 0.88 0.65 0.56 0.47, before 0.94 0.88 0.79
+  from the disc: the reference client 1.00 0.88 0.65 0.56 0.47, before 0.94 0.88 0.79
   0.73 0.68, now 0.92 0.81 0.72 0.65 0.61 (the mist off: 0.88 0.83 0.67
   0.63 0.58 - the rest is the sky and the glare).
 - Two-sided leaf cards seen from their back are lit as their back (the
   sunward cards seen from the shade glowed as if lit), and the leaf light
   is 0.25 (1.3 elsewhere); grass blades take the ground's light.
 - The terrain's shadow floor follows the sky's opacity
-  (`enhanced_palette::shadowOpacity`), held at 3.3.5's 0.3. Enhanced's shade
+  (`enhanced_palette::shadowOpacity`), held at 3.3.5's 0.3. The reference client's shade
   on the crossroads' flagstones keeps 54% of its sunlit colour (opacity
-  0.46): that gave the road Enhanced's lit/shade (2.2) and warm shade but
+  0.46): that gave the road the reference client's lit/shade (2.2) and warm shade but
   took the evening and forest views 11-25% darker (0.36: forest -11.5%).
 
-The inn-side crowns that read yellow are Enhanced's own: its obj0 ADT
+The inn-side crowns that read yellow are the reference client's own: its obj0 ADT
 places the same models at the same spots and scales (ElwynnTreeMid01 at
 (-9482.6, 46.0) x0.86 and (-9485.2, 44.9) x1.23), the model's geometry is
 3.3.5's, and its textures are the same art at 1024 px (canopy texels
@@ -479,11 +479,11 @@ against the commit before this one:
 | gap sum (section 2d's 20 rows) | 319 | 292 |
 
 Left as it is: the forest view is 6% darker - a slope facing the camera
-under Enhanced's higher 10:00 sun (44 degrees against the stock light's
-31), which the flat-ground scaling does not hold; no Enhanced capture of
+under the reference client's higher 10:00 sun (44 degrees against the stock light's
+31), which the flat-ground scaling does not hold; no reference capture of
 that view says whether darker is right. And the crowns' chroma is about
 +20% (+15% with the leaf light off). Sheets in the session scratchpad:
-`fgap/sheet_y5.png` (Enhanced | before | now), `fgap/sheet_y5_regress.png`.
+`fgap/sheet_y5.png` (the reference client | before | now), `fgap/sheet_y5_regress.png`.
 
 ## 3. Colour grading
 
@@ -494,13 +494,13 @@ slice (`b*31`, two slices lerped by `frac`), red and green the texel
 is on the display-encoded LDR image, after the glow and tone curve.
 
 Which LUT is used is LightData's `ColorGradingFileDataID` per keyframe. On
-the two continents 181 of Enhanced's 870 LightParams set it, all on the 12:00
+the two continents 181 of the reference client's 870 LightParams set it, all on the 12:00
 key only; the 8:00 and 15:00 keys either side carry 0. Eastern Kingdoms'
 outdoor lights use 8286666 (70 of 83 lights), Kalimdor's 8286665 (103 of
 132); 8286667 and 8248426 appear in a few instances. 1140733 is the identity
 LUT (mean error 0.002).
 
-Every Enhanced LUT is *separable*: `lut(r,g,b) = (c(r), c(g), c(b))` with zero
+Every reference LUT is *separable*: `lut(r,g,b) = (c(r), c(g), c(b))` with zero
 error, so each is one 32-point curve. 8286666:
 
 ```
@@ -514,7 +514,7 @@ Shadows untouched, mid-tones x1.10 (0.52 -> 0.56, 0.65 -> 0.73, 0.77 ->
 saturation (median chroma x1.13) with no hue shift. This is a large part of
 the "polished" daytime look: brighter, punchier mid-tones without a tint.
 
-**Ported** as the "Colour grade (the reference client)" row (`colorGrade`,
+**Ported** as the "Colour grade (enhanced)" row (`colorGrade`,
 `include/rendering/enhanced_grade.hpp`, the end of `fxaa.frag`): both curves
 exactly, map 0 -> 8286666, map 1 -> 8286665, other maps none; weight by the
 hour as the keyframes interpolate (0 at 8:00, 1 at 12:00, 0 at 15:00), times
@@ -525,7 +525,7 @@ already runs; cost below the profiler's noise.
 
 The exe registers Intel's ASSAO (`Engine/Source/ShaderEffect/ASSAO.cpp`,
 `assao*` CVars with Intel's own descriptions) and ships its shaders
-(`assao_generateq0..q3`, `assao_smartblur`, `assao_apply`). Enhanced's
+(`assao_generateq0..q3`, `assao_smartblur`, `assao_apply`). The reference client's
 `LightParams.SsaoSettingsID` is 116 on 260 rows, including Light 1 of both
 continents. `SSAOSettings` 116:
 
@@ -539,7 +539,7 @@ continents. `SSAOSettings` 116:
 | ShadowPower | 3 | (1.5) |
 | ShadowClamp | 1 | (0.98) |
 
-Row 106 (5 rows) is Radius 4, Mult 1.15, Power 1.6. So Enhanced's AO is
+Row 106 (5 rows) is Radius 4, Mult 1.15, Power 1.6. So the reference client's AO is
 tight (a yard) and very contrasty: three times ASSAO's default strength and
 twice its power. It is what seats grass, roots, crates and walls into the
 ground.
@@ -555,9 +555,9 @@ value), blended dst * src, before the contact shadows. Needs a one-sample
 depth (no MSAA, as the contact shadows).
 
 Two departures, both from side-by-side shots in Goldshire: the multiplier
-is ASSAO's default 1 (x4.3) instead of Enhanced's 3, and the ambient keeps at
-least 0.6 of itself. At Enhanced's 3 the road, every shaded bush and the
-characters' legs went near black: Enhanced adds its probe GI (section 6) over
+is ASSAO's default 1 (x4.3) instead of the reference client's 3, and the ambient keeps at
+least 0.6 of itself. At the reference client's 3 the road, every shaded bush and the
+characters' legs went near black: the reference client adds its probe GI (section 6) over
 the occluded ambient and Wowee has nothing to add back. Three lessons from
 getting it to work, kept in the shader: the projection's [1][1] is negative
 (Vulkan's flip), so the disk radius needs its absolute value; world
@@ -604,7 +604,7 @@ and of trees in the wind show no grey patches at any frame.
 Two systems:
 
 1. **Classic distance fog**, now retail's `PSFog` (14 float4 per fog, 12 of
-   them in `SceneData`) with main fog + height fog. Enhanced's outdoor data
+   them in `SceneData`) with main fog + height fog. The reference client's outdoor data
    uses almost none of the extras: `FogDensity` set on 218 of 6008 keys,
    `FogHeight` on 84, `MainFogStartDist` never. Its outdoor fog ends at
    `FogEnd` 18000 with `FogScaler` 0.25 by day: past the 7000-yard far clip.
@@ -638,27 +638,27 @@ Wowee already has a froxel volumetric fog (`lightShafts`, `mistDensity`,
 `volumetric_fog_inject.comp`) with shadowed in-scattering, a height falloff
 and HG phase; the Enhanced preset keeps its stock mist (section 8c). Wowee's base
 extinction works out at 0.0013/yd in Elwynn by day, the same order as the
-0.001 that 370 of Enhanced's LightParams carry in `Field_12_0_1_65617_031`
+0.001 that 370 of the reference client's LightParams carry in `Field_12_0_1_65617_031`
 (a likely volumetric density; unconfirmed).
 
-**Ported** as the "Sun haze (the reference client)" row (`sunHaze`,
+**Ported** as the "Sun haze (enhanced)" row (`sunHaze`,
 `assets/shaders/enhanced_haze.frag.glsl`, a full-screen pass after the
 opaque scene, blended `src.rgb + dst * src.a`): one global layer of the
 model above over the whole view, integrated in closed form along each
 pixel's ray instead of in cells - density `0.00022/yd * exp(-(z - ground) /
 220 yd)` (first 0.0006; section 8c), clear for 120 yd and ramping in over 400, sky pixels taken to 5000 yd, in-scattering
 of the fog colour (x0.35) and the sun (x1.1 times HG g 0.7 mixed 60/40 with
-even scattering; Enhanced's phase table itself was not read), outdoors
+even scattering; the reference client's phase table itself was not read), outdoors
 only. Wowee's froxel mist still does the shadowed shafts in the first 400
 yards; with the haze on, the screen-space sun shafts (no stronger, section 8b)
 keep three quarters of the sun's hue instead of half. 0.06 ms at 1280x540.
-The constants were set side by side against Enhanced's Goldshire afternoon
+The constants were set side by side against the reference client's Goldshire afternoon
 (section 9). Not ported: the cubic slice spacing, several layers, the
 height fades' per-zone values, and the phase table - data not decoded.
 
-## 5b. The air: Enhanced's global fog layer, decoded
+## 5b. The air: the reference client's global fog layer, decoded
 
-What lifts Enhanced's dark tones from about twenty yards out (section 9,
+What lifts the reference client's dark tones from about twenty yards out (section 9,
 gap 6) is not its distance fog. Read from the shaders and the data:
 
 **The distance fog** (`PSFog`, 14 float4 per fog, read by
@@ -670,7 +670,7 @@ of 5446721): two paths, picked by row 1.x. The legacy one is
 (a plane, row 2, faded by row 3.w, cubic coefficients in rows 9-11), the
 colour lerped from row 6 to row 13 (EndFogColor) by distance and a sun
 fog colour toward row 8's direction. Which path and every row are filled on
-the CPU from LightData's fog columns; Enhanced's outdoor keys leave
+the CPU from LightData's fog columns; the reference client's outdoor keys leave
 FogDensity, the height fog, MainFogStart/End, EndFogColor and SunFogColor
 at 0 (Elwynn's LightParams 7748 on every key) and set only FogEnd (18000
 at noon, a single key without one at 8:00) and FogScaler (0.08-0.25). So
@@ -696,26 +696,26 @@ The layer's values come from **LightParams' new columns**: field 031 is
 them field 035 is 1 (0 on 508 profiles that have no 031) - a switch and a
 density per yard. Field 037 (0.7 or 0.8 on 856) has the spread of an
 anisotropy and 036 (1, 8, 16...) of the distance curve's exponent; they are
-not used here. Of the 112 Enhanced profiles the 3.3.5 lights link to, 108
+not used here. Of the 112 reference profiles the 3.3.5 lights link to, 108
 carry the layer at 0.001/yd (Elwynn's 7748 among them).
 
-Its colour was the open question. LightData field 055 (a Enhanced-only
+Its colour was the open question. LightData field 055 (a reference-only
 colour, set on 527 keys of 44 profiles, every one with field 035 on) is
 pale green-grey at Elwynn's 8:00 (`#b6cbb0`), white-blue at noon, rose at
 dusk: it reads like an air colour. Tried as the layer's light it measured
 worse: the added light came out yellow (red and green +0.046, blue +0.018
 on the inn view) once the HDR mid-tone lift and chroma (section 2c) had
 taken the brighter canopy, and the canopy's blue fell. The light's fog
-colour (SkyFogColor, channel 7, Enhanced's own `#73a29d` at 8:00, cool
+colour (SkyFogColor, channel 7, the reference client's own `#73a29d` at 8:00, cool
 blue-green) closed the floor and raised the canopy's blue. So 055 is left
 unread; the layer scatters the fog colour.
 
-**Ported** (the "Sun haze (the reference client)" row, Enhanced preset only):
-`tools/enhanced_light_gen.py` writes `WFL2` tables - `WFL1` plus each
-profile's density (field 031 where field 035 is on); `enhanced_lights::parse`
+**Ported** (the "Sun haze (enhanced)" row, Enhanced preset only):
+`tools/enhanced_lighting_gen.py` writes `WFL2` tables - `WFL1` plus each
+profile's density (field 031 where field 035 is on); `enhanced_lighting_table::parse`
 reads both, a `WFL1` table meaning no air. `LightingManager` carries it as
 `LightingParams::airDensity`, blended between lights like the rest, 0 on
-3.3.5's own profiles, under water and outside Enhanced's daylight. The haze
+3.3.5's own profiles, under water and outside the enhanced daylight. The haze
 pass (`enhanced_haze.frag`) takes it in its spare push vec4 and lays the fog
 colour's light over every opaque pixel, `T = exp(-od)` with the density
 thinning with height as the haze's own (220-yard scale above the ground
@@ -723,15 +723,15 @@ under the player), from the camera out, thinned by weather as the haze is,
 outdoors only and not on the sky (the dome has its fog band). The haze,
 farther (it starts 120 yards out), composites behind it. One more `exp` in a
 pass that already runs. Regenerate the local table with the command in
-section 2b's tools line (`enhanced_light_gen.py --dbc ... --enhanced ...
---out <data>/override/wowee/enhanced_lights.bin`); a client older than this
+section 2b's tools line (`enhanced_lighting_gen.py --dbc ... --reference ...
+--out <data>/override/wowee/enhanced_lighting_table.bin`); a client older than this
 refuses a `WFL2` table and falls back to the averaged trend, so the two go
 together.
 
 Measured (the three matched Goldshire views; one build, the `WFL1` table
-then the `WFL2`; gap is Wowee against Enhanced, mean over the views):
+then the `WFL2`; gap is Wowee against the reference client, mean over the views):
 
-| region | Enhanced | no air | air | gap no air | gap air |
+| region | the reference client | no air | air | gap no air | gap air |
 |---|---|---|---|---|---|
 | world 5th pct luminance | 0.18 0.20 0.17 | 0.14 0.17 0.12 | 0.15 0.19 0.12 | -24% | -18% |
 | foliage 10th pct luminance | 0.21 0.20 0.19 | 0.17 0.17 0.12 | 0.22 0.21 0.13 | -24% | -6% |
@@ -744,14 +744,14 @@ then the `WFL2`; gap is Wowee against Enhanced, mean over the views):
 | foliage chroma | 0.34 0.36 0.40 | 0.43 0.49 0.39 | 0.45 0.50 0.42 | +19% | +24% |
 
 The floor closes by a quarter to three quarters; what it costs is the lit
-canopy, which was already too bright for Enhanced's and takes the veil's
+canopy, which was already too bright for the reference client's and takes the veil's
 light on top (then the HDR mid-tone lift and chroma). Over all fifteen
-measured regions the summed gap moves 313 -> 310: the air is Enhanced's, the
+measured regions the summed gap moves 313 -> 310: the air is the reference client's, the
 canopy's brightness is a separate gap. Elsewhere (Goldshire 17:51, the
 Barrens at noon, Elwynn's forest at 10:00, Goldshire with the sun behind)
 the frame's mean rises 0.005-0.015, its 5th percentile 0.010-0.018, its
 contrast (sd) falls 0.001-0.005. Sheets in the session scratchpad:
-`fgap/sheet_c.png` (Enhanced | no air | air).
+`fgap/sheet_c.png` (the reference client | no air | air).
 
 **Toward the sun** (Jered's Barrens video frame, about 17:45, looking into
 a low sun over the wheat). By band in the frame: sky round the sun luminance
@@ -759,18 +759,18 @@ a low sun over the wheat). By band in the frame: sky round the sun luminance
 at about 35 degrees 118 hue 27, the acacias and ground in the middle
 distance 71-110 hue 26, the near wheat 85 hue 29, blue/red 0.15-0.67 all
 through - one warm gold that grows with distance. The Barrens' light
-(Enhanced's 7626/7636) does give that gold, but in its smog and band colours
+(the reference client's 7626/7636) does give that gold, but in its smog and band colours
 and the sun's (`#f8bd72`, `#ee9a54` at 17-18h); its SkyFogColor, which the
 air scattered evenly, is purple-grey (`#6e7289`, `#70697f`), and at
 0.001/yd the air took the hills beyond a few hundred yards to it (hue 327-12,
 blue/red 0.73-0.94). FogEnd is 0 on those keys (18000 at noon), so the
-distance fog adds nothing near. Enhanced's layer takes in the sun through its
+distance fog adds nothing near. The reference client's layer takes in the sun through its
 phase lookup as well (`scatter * phase * intensity`), so the air now does
 too: the sun's light through the forward half of a Henyey-Greenstein lobe
 (g 0.7; field 037 is 0.7-0.8), x0.39, held under the 8-bit cap, and only
 from 400 yards out - over the whole ray the near ridges went as bright as
 the sky (luminance 159 against the frame's 71-118) and the layering was
-lost. Enhanced's own curve thickens with distance (`1 + k1 t^k0`, field 036
+lost. The reference client's own curve thickens with distance (`1 + k1 t^k0`, field 036
 the likely exponent), the same intent. Views away from the sun are
 unchanged; on the far cliffs of the matched view hue 17 -> 26 and blue/red
 0.65 -> 0.54 (frame 27, 0.49), the near and middle bands within 1-3
@@ -779,23 +779,23 @@ share 1.19% -> 1.31%, bar 1.315%; region sum 270.0 -> 265.9). What is left:
 the frame's sky round the sun is brighter and paler (234 against 208) - the
 sky and the tone, not the air.
 
-**The far canopy's colour.** Enhanced's far trees read green-grey where
+**The far canopy's colour.** The reference client's far trees read green-grey where
 Wowee's read warm yellow. By screen band (foliage pixels; top = the near
 crowns, far = the tree line), red and green to luminance are the same in
-both - 1.02 : 1.03 in Enhanced, 1.01-1.03 : 1.03-1.04 in Wowee - so it is
+both - 1.02 : 1.03 in the reference client, 1.01-1.03 : 1.03-1.04 in Wowee - so it is
 not the leaf textures or a tint, which would move red against green. What
-differs is blue alone: 0.71-0.78 of luminance in Enhanced's near crowns
+differs is blue alone: 0.71-0.78 of luminance in the reference client's near crowns
 against 0.53-0.55 in Wowee's, 0.65-0.74 against 0.62-0.66 at the tree
 line. The air takes the tree line's blue up by 0.02-0.04 and the near
 crowns' by 0.01-0.04; most of the rest is at twenty yards, too near for
-any air - the leaves' own light: Enhanced's are lit more by the sky's blue
+any air - the leaves' own light: the reference client's are lit more by the sky's blue
 ambient than by its orange morning sun, which at Goldshire 9:22 stands
-elsewhere in Enhanced (section 2c) and leaves the camera-facing leaves in
+elsewhere in the reference client (section 2c) and leaves the camera-facing leaves in
 the shade.
 
 ## 5c. Canopy shafts
 
-Enhanced's forests by day (a YouTube frame of a Night Elf forest, the
+The reference client's forests by day (a YouTube frame of a Night Elf forest, the
 sun high behind the canopy) show beams of sunlit haze from the gaps in
 the leaves down to the ground, bright against darker air in the shade;
 at dusk on a Duskwood road a large warm glow round the low sun with the
@@ -803,7 +803,7 @@ trunks cut out of it; at night in a Night Elf village blue moonbeams
 through the canopy. Wowee's mist drew none of this: one soft column at
 most, from a large gap.
 
-**What Enhanced does.** `volumefogmaterialinjection.bls` (6227849, the
+**What the reference client does.** `volumefogmaterialinjection.bls` (6227849, the
 froxel inject) binds `PSShadowData` - `CSMInfo`, `VSMInfo` and the world
 shadow - and per cell takes one `SampleCmpLevelZero` of the cascades (a
 2D array) and one of the virtual shadow map through its page table,
@@ -828,7 +828,7 @@ lit cell forty degrees off the sun adds about as much as the fog colour's
 ambient beside it, and the forward lobe is pulled back within 20 degrees
 of the sun (section 2e), where beams would be brightest.
 
-**Ported** (Enhanced's light only, the Light shafts row on;
+**Ported** (the reference client's light only, the Light shafts row on;
 `enhanced_shafts.hpp`, `VolumetricFog::FrameInputs::shaftStrength`,
 `volumetric_fog_inject.comp`). A sunlit cell within 60 yards (fading out
 by 120) also looks at the shade round it - four taps on a level ring 2.5
@@ -858,7 +858,7 @@ from (3.3.5's night light, 34 degrees up in Teldrassil at 23:00), in the
 night light's own colour, 17.5 times the mist's sun scatter before that
 colour (the day's 3.5 times 5; 18 at first). Thinned by
 cloud and rain as the sun shafts are, gone indoors (the interior factor).
-Off (Enhanced's
+Off (the reference client's
 light off, or `WOWEE_ENHANCED_SHAFTS=0`), the mist is the stock one, cell
 for cell; `WOWEE_ENHANCED_SHAFTS=strength,night,ring,reach` tunes it.
 
@@ -889,10 +889,10 @@ unchanged (0.036-0.042). The frame's GPU time moved -0.27 to +1.0 ms,
 all of it in the scene pass, which the shafts do not touch (its own spread
 between runs of one build is that wide).
 
-Not matched: Enhanced's dusk. Its glow round a low sun is unshadowed air -
+Not matched: the reference client's dusk. Its glow round a low sun is unshadowed air -
 its global fog layer and sun haze - with the trunks cut out of it; here at
 19:30 the light, and so the shadow map, still comes mostly from 3.3.5's
-stock direction (Enhanced's light only eases onto the sun over its first 9
+stock direction (the reference client's light only eases onto the sun over its first 9
 degrees, section 2e), so the air toward a 3-degree sun is in the trees'
 shadow and the mist has little lit air to show. The large warm glow
 belongs to the sun haze (`enhanced_haze.frag`), not the mist.
@@ -904,7 +904,7 @@ Westfall's 6:18 sun it took 7.6% of the view to white (min channel over
 0.97; mist off 0.1%, Ultra 0%), 1.8% at 7:00. Both are gone: the lobe is
 back on the light's direction and pulled back at every height. That alone
 left 4.3% - the stock lobe already whitens a view along hundreds of yards
-of lit air toward a sun on the horizon. So under Enhanced's light the
+of lit air toward a sun on the horizon. So under the enhanced light the
 integrate pass now holds the light the air adds under a ceiling set by the
 sky behind it: the fog colour (the sky's horizon) plus 0.35 of the sun's
 colour, so a dark night sky does not choke the moonbeams; untouched up to
@@ -930,26 +930,26 @@ channel over 0.97, the QA tour's measure; mean = the frame's luminance):
 to 0b5540d). At nine times, with the beams thinned only a third toward
 white, the shafts laid a gold veil over Goldshire's crowns facing the 9:22
 sun (about 38 degrees up): the top third of the inn view went to
-saturation 0.464, luminance 0.348, hue 43 against Enhanced's 0.355, 0.283,
+saturation 0.464, luminance 0.348, hue 43 against the reference client's 0.355, 0.283,
 57, and the low-sun fix above did not change it (re-measured on 0927302).
 3.5 times, and seven tenths toward white by day, brings it to about 0.03
-of Enhanced's; the 15:23 gold and the moonbeams (their strength held at
+of the reference client's; the 15:23 gold and the moonbeams (their strength held at
 17.5) stay. A lobe of g 0.3 instead of 0.6 (less toward the morning sun,
 more at 15:23) and fading the shafts out between 10 and 25 yards above the
 ground were tried at 3.5-4 and measured the same within the run-to-run
 noise of these views (about 0.015 in the top third's saturation). Measured with `sv/crown.py` (top third of the world area; "fixed
-mask" = the crown pixels of the shafts-off frame, its gap to Enhanced's
+mask" = the crown pixels of the shafts-off frame, its gap to the reference client's
 crown saturation):
 
-| top third (sat / luminance / hue) | Enhanced | shafts off | shafts at 9 | shafts at 3.5 (two runs) |
+| top third (sat / luminance / hue) | the reference client | shafts off | shafts at 9 | shafts at 3.5 (two runs) |
 |---|---|---|---|---|
 | Goldshire inn 9:22, facing the sun | 0.355 / 0.283 / 57 | 0.363-0.366 / 0.271-0.278 / 56-60 | 0.464 / 0.348 / 43 | 0.387-0.397 / 0.302-0.312 / 51-54 |
 | Goldshire 15:23 | 0.41 / 0.32 / 39 | 0.358-0.378 / 0.263-0.277 / 42-44 | 0.466 / 0.348 / 40 | 0.373-0.384 / 0.291-0.297 / 43 |
 | crown gap, fixed mask, mean of three views | | +25% | +51% | +33-35% |
 
-The inn's top third is still 0.03-0.04 more saturated than Enhanced's, but
+The inn's top third is still 0.03-0.04 more saturated than the reference client's, but
 its shafts-off frame is itself 0.01 over and the views move about 0.015
-between runs; the 15:23 view sits 0.03 under Enhanced's gold, as it did
+between runs; the 15:23 view sits 0.03 under the reference client's gold, as it did
 with the shafts off. Elsewhere the low-sun and shaft views are as before:
 Westfall 6:18 0.26% white, Barrens dawn and dusk 0%, Goldshire into the
 sun 0.19% (ring.py), Elwynn's canopy beam and both moonbeam views within
@@ -957,10 +957,10 @@ sun 0.19% (ring.py), Elwynn's canopy beam and both moonbeam views within
 
 **The near air over the road** (dbcb6e7). The haze agent's ablations put
 part of the Goldshire road's remaining gaps in the mist: the shaded road
-+15-16% too bright against Enhanced (+10% with the mist off), the lit
++15-16% too bright against the reference client (+10% with the mist off), the lit
 road's b/L +17% (+13%). Six changes to the mist's first 40 yards were
-measured with the fgap bars (all under Enhanced's light; road rows are the
-gap to Enhanced over the three matched views, run-to-run noise about one
+measured with the fgap bars (all under the enhanced light; road rows are the
+gap to the reference client over the three matched views, run-to-run noise about one
 point):
 
 | change | road shade L | road lit b/L | Darnassus / Dolanaar | evening / forest | crown gap |
@@ -987,7 +987,7 @@ gaps are not the mist's to close.
 
 ## 6. Global illumination ("Secondary Lighting")
 
-Enhanced-era shaders with no names in the community listfile
+reference-era shaders with no names in the community listfile
 (`unknown_8xxxxxx_generatemip-guide`, `unknown_8316767/8316772_gen-gla`, i.e.
 names sorting between "generatemips" and "guidedfilter" - `gi...`) carry the
 types `ProbeMetaData { float4; int; float; float; int }`, `GIRayRecord
@@ -1022,9 +1022,9 @@ horizon colour (x0.35) and sun bounced off the ground from below
 face turns up or down, occluded as the ambient is, outdoors only. It costs
 nothing over the occlusion pass it rides in.
 
-## 6b. Bounce light ("Bounce light (the reference client)")
+## 6b. Bounce light ("Bounce light (enhanced)")
 
-The fill light (section 6) is the same colour everywhere. What Enhanced's
+The fill light (section 6) is the same colour everywhere. What the reference client's
 probes add varies with place: under its canopies the shade is darker and a
 muted green, beside a sunlit wall or open ground it is warm, a forest floor
 the sky cannot see is dim. Those colours change over yards, not pixels, and
@@ -1088,7 +1088,7 @@ pass for it).
 Against Jered's live captures (the darkest third of the world view as
 shade):
 
-| view | | Enhanced | row off | row on |
+| view | | the reference client | row off | row on |
 |---|---|---|---|---|
 | Goldshire 9:22 into the sun | shade luminance | 0.216 | 0.223 | 0.211 |
 | | shade r : g : b / luminance | 1.06 1.02 0.73 | 1.04 1.08 0.47 | 1.04 1.09 0.45 |
@@ -1106,8 +1106,8 @@ darkens where it lies under the Trade District's tree (the grid drawn over
 it shows the crown's disc there); its buildings are groups of the city's
 one WMO, mostly over 48 yards, so the walls there are not in the grid.
 
-The shade under the trees moves toward Enhanced's: darker and less golden
-(red down against green). What it does not close is the blue in Enhanced's
+The shade under the trees moves toward the reference client's: darker and less golden
+(red down against green). What it does not close is the blue in the reference client's
 shade (its shade is 0.71-0.73 blue to luminance, Wowee's 0.42-0.47 with or
 without the row): 3.3.5's leaf and grass textures have almost no blue for
 any light to bring out, and Wowee's later passes (the HDR saturation, the
@@ -1131,14 +1131,14 @@ scratchpad (`gi/sheet_c1.png`, `gi/sheet_c2.png`, `gi/seq_walk.png`,
 
 ## 6c. The shade's hue
 
-Enhanced's shade in Jered's live Goldshire 9:22 captures is a near-neutral
+The reference client's shade in Jered's live Goldshire 9:22 captures is a near-neutral
 warm grey: the darkest third of the world view 1.05 : 1.03 : 0.72 red :
 green : blue to luminance, chroma (max - min) / max 0.46-0.57. Wowee's
 under the Enhanced preset was a saturated yellow-green, 1.05 : 1.09 : 0.41
 and chroma 0.67-0.72, with the sunlit third matching (chroma 0.64-0.70
 against 0.62-0.65).
 
-What it is not. Enhanced's light data at that hour already gives an ambient
+What it is not. The reference client's light data at that hour already gives an ambient
 the colour of a blue sky (0.40, 0.51, 0.60; the sun 0.73, 0.40, 0.13), and
 Wowee shades with it: the yellow is 3.3.5's leaf, grass and dirt textures,
 which carry almost no blue for any light to bring out. Tinting the shade's
@@ -1150,9 +1150,9 @@ curve is per channel and near the identity below 0.3 (section 3), and the
 HDR chroma boost already starts at 0.25 luminance, so neither was what
 warmed it.
 
-What it is: Enhanced's shade is Wowee's with a little over half its chroma,
+What it is: the reference client's shade is Wowee's with a little over half its chroma,
 round a slightly cooler grey. So, in the final composite under the HDR
-scene and the Enhanced daylight (`fxaa.frag`, beside the lit chroma boost),
+scene and the enhanced daylight (`fxaa.frag`, beside the lit chroma boost),
 by day (`enhanced_palette::dayShare`, the sun's sprite 0-0.15 up) and
 outdoors:
 
@@ -1166,12 +1166,12 @@ outdoors:
   Duskwood's teal shade keeps its colour (unchanged, 0.32 : 1.26 : 1.46).
 
 And the canopy's ambient is 0.9 as bright under the crowns (it was 0.8):
-with the sun behind, the shade had gone darker than Enhanced's (0.214 against
+with the sun behind, the shade had gone darker than the reference client's (0.214 against
 0.243).
 
-| view (darkest third) | | Enhanced | before | now |
+| view (darkest third) | | the reference client | before | now |
 |---|---|---|---|---|
-| Goldshire 9:22, the inn (Enhanced's 09:22 framing) | luminance | 0.216 | 0.192 | 0.205 |
+| Goldshire 9:22, the inn (the reference client's 09:22 framing) | luminance | 0.216 | 0.192 | 0.205 |
 | | r : g : b / luminance | 1.06 1.02 0.73 | 1.06 1.06 0.52 | 1.04 1.02 0.79 |
 | | chroma | 0.46 | 0.68 | 0.38 |
 | Goldshire 9:22, the crossroads (09:23:15 framing) | luminance | 0.243 | 0.235 | 0.253 |
@@ -1184,13 +1184,13 @@ with the sun behind, the shade had gone darker than Enhanced's (0.214 against
 
 The sunlit third is where it was: chroma 0.64-0.69 (0.64-0.68 before),
 luminance 0.45-0.55 (the same within 0.01); lit/shade 2.10-2.27 on the two
-matched views (2.24-2.38; Enhanced 2.07-2.27). Elwynn's forest floor goes
+matched views (2.24-2.38; reference 2.07-2.27). Elwynn's forest floor goes
 from 0.25 to 0.49 blue (forest_a) and 0.50 to 0.75 (forest_b); the Barrens'
 noon shade, mostly above the band, 0.58 -> 0.62; Duskwood, the Lion's Pride
 inside and Goldshire at 22:30 unchanged within a shot's noise. Cost below
 the profiler's noise (the composite 1.95-2.36 ms windows either way, Iris
 Xe 1280x540). Sheets in the session scratchpad: `shade/sheet_goldshire.png`
-(Enhanced | before | now), `shade/sheet_regress.png`.
+(the reference client | before | now), `shade/sheet_regress.png`.
 
 ## 6d. The ambient turned toward the sun
 
@@ -1198,14 +1198,14 @@ Measured against Jered's three Goldshire captures (09:22 at the inn and the
 crossroads, 15:23 at the inn), region by region at matched views, the
 largest gaps left under the Enhanced preset were all the canopy's: it was as
 bright as the road under it (canopy/ground luminance 0.97-0.99 against
-Enhanced's 0.58-0.86), more saturated (foliage chroma 0.48-0.51 against
+the reference client's 0.58-0.86), more saturated (foliage chroma 0.48-0.51 against
 0.34-0.40), its sunlit leaves brighter (90th percentile 0.44-0.46 against
 0.33-0.35) and yellower (canopy blue/luminance 0.42-0.62 against 0.67-0.72).
 Turning the leaf light off moved none of it (within 0.02); the HDR mid-tone
 lift does most of the brightening, but taking it out darkens the road with
 the leaves.
 
-**What Enhanced's shader does.** `material3_mesh_ps` (5446721, permutation 26
+**What the reference client's shader does.** `material3_mesh_ps` (5446721, permutation 26
 read in full) lights a model with `PSGlobalLight`, eleven float4: rows 0-2
 the hemisphere ambient (sky, horizon, ground), row 3 the light's direction,
 row 6 its colour, row 10 the up axis. The ambient is the horizon colour
@@ -1220,13 +1220,13 @@ with `(away, toward)` = (0.4562, 1.2333) on its linear path and (0.7, 1.1)
 on its display-encoded one - the same ramp (0.4562^(1/2.2) = 0.700,
 1.2333^(1/2.2) = 1.100). `material3_wmo_ps` (5446718) carries the identical
 block (twelve permutations with both pairs); the terrain's
-`terrainlightmap` does not. So in Enhanced a model's side turned from the
+`terrainlightmap` does not. So in the reference client a model's side turned from the
 sun takes 0.7 of the ambient and its sunward side 1.1: a tree's crown reads
 round, its far side and underside deep, and the leaves' own sunlit chroma
 sits on a darker body.
 
 **Ported** (Enhanced preset only): `enh_bits::kEnhancedAmbient` (128), set by
-the renderer while Enhanced's daylight lights the frame
+the renderer while enhanced daylight lights the frame
 (`LightingManager::isEnhancedActive`: the Daylight row, maps 0 and 1, above
 water); `m2.frag` (outdoor models), `wmo.frag` (the outdoor light mode) and
 `character.frag` (units outdoors) scale their ambient by
@@ -1238,9 +1238,9 @@ turns it off for side-by-side work. One mix and multiply per lit pixel, no
 texture or shadow reads (not profiled separately).
 
 Measured (the three matched views, the ramp off then on, one build; gap is
-Wowee against Enhanced, mean over the views):
+Wowee against the reference client, mean over the views):
 
-| region | Enhanced | off | on | gap off | gap on |
+| region | the reference client | off | on | gap off | gap on |
 |---|---|---|---|---|---|
 | canopy / ground luminance | 0.78 0.58 0.86 | 0.99 0.97 0.86 | 0.85 0.95 0.74 | +32% | +20% |
 | foliage chroma | 0.34 0.36 0.40 | 0.48 0.51 0.46 | 0.41 0.49 0.38 | +32% | +17% |
@@ -1252,8 +1252,8 @@ Wowee against Enhanced, mean over the views):
 | ground luminance (terrain, unchanged) | 0.36 0.51 0.37 | 0.31 0.37 0.32 | 0.32 0.37 0.30 | -18% | -19% |
 
 The canopy rows close by a third to a half. What opens is the floor: the
-darkest tones of models go darker, where Enhanced's are lifted - and
-Enhanced's floor is lifted only at distance (the near road's 5th percentile
+darkest tones of models go darker, where the reference client's are lifted - and
+the reference client's floor is lifted only at distance (the near road's 5th percentile
 is Wowee's within 0.01; the canopy and far band are 0.04-0.06 brighter), by
 a cool grey veil (section 9, gap 1 below). Elsewhere (Goldshire 17:51, the
 Barrens at noon, Elwynn's forest at 10:00) the frame's mean moves under
@@ -1262,38 +1262,38 @@ scratchpad: `fgap/sheet_f.png` (off | on), `fgap/final_sheet.png`.
 
 ## 6e. The sky over each point
 
-The gaps left after 6d were the shade's: Enhanced's shaded road is the
+The gaps left after 6d were the shade's: the reference client's shaded road is the
 ambient's colour (a cool, brownish grey), Wowee's kept 70% of the sun's
-orange (3.3.5's shadow floor), and under Enhanced's trees the shade is darker
-than in the open. Enhanced's probe GI (section 6, giQuality 3) is what makes
+orange (3.3.5's shadow floor), and under the reference client's trees the shade is darker
+than in the open. The reference client's probe GI (section 6, giQuality 3) is what makes
 that difference: it adds light where the sky and lit surfaces are seen, and
 little under a canopy. The bounce grid's crown discs (6b) could not stand in
 for it - they mark most of Elwynn as covered, so a fill keyed on them lifted
 nothing.
 
-All of it is the "Sky shade (the reference client)" row (`skyShade`, Enhanced page,
+All of it is the "Sky shade (enhanced)" row (`skyShade`, Enhanced page,
 on in the Enhanced preset), which needs the bounce light on. It flips live.
 Off is the bounce light exactly as it was: the pass's `BOUNCE_GRID` build
 (`ambient_bounce`/`ambient_fill.frag.spv`, byte for byte the commit before;
 the sky code is a third define, `SKY_FIELD`, in `ambient_sky`/
 `ambient_sky_fill.frag.spv`), no height field made or drawn, and the
-terrain's floor - the terrain's Enhanced light is its own bit,
+terrain's floor - the terrain's reference light is its own bit,
 `enh_bits::kSkyShade`, set only while the pass is the sky build. Jered keeps
 the warm classic shade that way; on, the shaded road and the evening road go
 grey-blue.
 
-**Enhanced's terrain light.** Its terrain pixel shader (FDID 2990783,
+**The reference client's terrain light.** Its terrain pixel shader (FDID 2990783,
 permutation 0) lights the ground as `material3_mesh_ps` lights models: the
 hemisphere ambient by the half-Lambert ramp toward the sun (6d's
 0.4562/1.2333 or 0.7/1.1, no normalisation), plus the sun by `max(N.L, 0)`.
 Its shadow comes in two ways, picked by a constant (the w of the first
 row of one of its constant buffers): with it set, the sun is unshadowed and
 the whole colour is scaled by `0.7 + 0.3 * shadow` (3.3.5's floor); with it
-clear, the shadow scales the sun alone and there is no floor. Enhanced's
+clear, the shadow scales the sun alone and there is no floor. The reference client's
 captures match the second (lit that way, Wowee's shaded road's red and blue
-to luminance come within 2% of Enhanced's), so under Enhanced's
+to luminance come within 2% of the reference client's), so under the reference client's
 daylight `terrain.frag` does that: ambient by the ramp, shadow on the sun
-only. One change from Enhanced: the ramp is divided by flat ground's value
+only. One change from the reference client: the ramp is divided by flat ground's value
 under the same sun, so level ground keeps the ambient it had and only slopes
 turn darker or lighter. Unnormalised, the Barrens' noon road (sun 65 degrees
 up, ramp 1.08) went over its brightness bar (0.576/0.727/0.749).
@@ -1338,7 +1338,7 @@ about 95 and 115 yards from the field's middle, and leaves (below) skip it.
 `WOWEE_SKY_DEBUG=1` darkens each pixel by it; `WOWEE_SKY_FIELD=0` leaves
 the field undrawn and the term out.
 
-**Using it**, under Enhanced's daylight and outdoors (the light each surface
+**Using it**, under the enhanced daylight and outdoors (the light each surface
 shader gave the pixel is taken apart again, as the occlusion pass does):
 
 - **Leaves** - a point well off the ground inside something whose underside
@@ -1356,7 +1356,7 @@ shader gave the pixel is taken apart again, as the occlusion pass does):
   of its chroma, x 0.8 to 1 by how much of the ground on two rings 3 and 8
   yards out the world shadow map says is lit (a point on each, turned by
   the pixel's place in its quad), x (sin of the sun's height / sin 37
-  degrees)^2, 35% of it in the sky's hue (Enhanced's shade keeps the
+  degrees)^2, 35% of it in the sky's hue (the reference client's shade keeps the
   ambient's colour). The square: the light's colour is already scaled to
   hold level ground's light as the sun sinks
   (`enhanced_palette::sunIrradianceScale`), and with the plain ratio
@@ -1368,10 +1368,10 @@ shader gave the pixel is taken apart again, as the occlusion pass does):
 The forest (Elwynn 10:00, a meadow wholly in tree shadow) and Goldshire's
 evening road are the two views the fill is held by: with the shadow on the
 sun alone and no fill they were 16% and 10% darker than before (branch
-`wip-enhanced-ground`), and Enhanced's own captures do not show them.
+`wip-enhanced-ground`), and the reference client's own captures do not show them.
 
 Measured against the commit before this one, rebuilt and run through the
-same harness (`before`), and Enhanced (gap, mean of the three matched
+same harness (`before`), and the reference client (gap, mean of the three matched
 Goldshire views; the bars as set for this change):
 
 | | before | now (mean of 3 runs) | bar |
@@ -1391,7 +1391,7 @@ sums and 3-6 on the crown chroma - NPCs walk through the views, the wind
 turns the leaves - so the bars are read on the mean of three runs. One of
 the three went over the crown chroma and gap sum bars on its own.)
 
-Region by region (gap against Enhanced, mean of the three views):
+Region by region (gap against the reference client, mean of the three views):
 
 | region | before | now |
 |---|---|---|
@@ -1408,13 +1408,13 @@ Region by region (gap against Enhanced, mean of the three views):
 | far chroma | -0.0% | -10.5% |
 | world 5th percentile | -12.7% | -17.7% |
 
-The shade is Enhanced's colour now - the ambient's, not 3.3.5's orange floor -
+The shade is the reference client's colour now - the ambient's, not 3.3.5's orange floor -
 and darker under the canopy than in the open. What got worse is the "lit
 road": the brightest third of the road pixels now takes in the lifted open
 shade beside the sunlit cobbles (the inn view's left half), which is bluer
 than sunlight; the picture's chroma overall, 3.3.5's warm shade having been
 much of it; and the darkest tones, under the crowns. The shade's luminance
-is still 13% over Enhanced's, and Enhanced's lit/shade on the road (1.9-2.3)
+is still 13% over the reference client's, and the reference client's lit/shade on the road (1.9-2.3)
 is not reached (1.5-1.7, as before): the evening and forest views hold the
 fill up.
 
@@ -1435,12 +1435,12 @@ three reaches and two ring points took it to this. On the CPU, each part
 rebuilds the doodads' static caster list once (and the world map's next
 part rebuilds it back), within the noise of the frame times measured.
 
-Sheets in the session scratchpad: `sv/sheet_matched.png` (Enhanced | before |
+Sheets in the session scratchpad: `sv/sheet_matched.png` (the reference client | before |
 now, the three Goldshire views), `sv/sheet_regress.png` (before | now: the
 evening, the forest, the Barrens, into the sun, away from it).
 
 **Second round: the fill kept to shade, and dusk.** Jered kept the cooler
-shade. Two Enhanced frames he added (a Night Elf forest by day, a road at
+shade. Two reference frames he added (a Night Elf forest by day, a road at
 dusk) set the next changes: by day, warm sun patches sit beside deep, cool
 shade; at dusk the shade is dark and warm brown, not grey-blue.
 
@@ -1462,7 +1462,7 @@ shade; at dusk the shade is dark and warm brown, not grey-blue.
   back the ground's chroma, which the grey fill had taken.
 
 Measured against this row as it was (commit 08431fc, three runs each;
-`sv/avg2.py` in the session scratchpad; gaps against Enhanced, mean of the
+`sv/avg2.py` in the session scratchpad; gaps against the reference client, mean of the
 matched Goldshire views):
 
 | | before | now |
@@ -1490,15 +1490,15 @@ Notes on the table:
 
 What this round does not reach:
 
-- The road's lit/shade ratio (Enhanced 1.9-2.3, Wowee 1.5-1.7). The lit
-  road is 10% darker than Enhanced's, and what is left of the fill holds
+- The road's lit/shade ratio (the reference client 1.9-2.3, Wowee 1.5-1.7). The lit
+  road is 10% darker than the reference client's, and what is left of the fill holds
   the forest and evening views.
 - The darkest tones (the 5th percentile), which are under the crowns.
 - The grass and verge, now 9-14 points darker as the table measures them.
   With the warmer fill, shaded grass slides toward yellow and out of the
   grass hue band, so the darker pixels are what the band keeps.
 
-Sheets: `sv/sheet2_matched.png` (Enhanced | before | now),
+Sheets: `sv/sheet2_matched.png` (the reference client | before | now),
 `sv/sheet2_regress.png` (before | now), `sv/sheet2_eve.png` (before the sky
 shade | before | now).
 
@@ -1514,7 +1514,7 @@ ambient has little green to lift. Three changes, the first doing most of
 the work:
 
 - **The terrain keeps the floor and the pass takes it out.** Under the sky
-  shade, `terrain.frag` now keeps the Enhanced floor's share of the sun under
+  shade, `terrain.frag` now keeps the enhanced floor's share of the sun under
   the live shadow (1 - shadowParams.y), as models do. Where the live map
   lights the ground, the baked shadow (MCSH), which the pass cannot see,
   takes the sun whole. The bounce pass knows how much sky and how much
@@ -1543,7 +1543,7 @@ Darnassus and Dolanaar at noon (frame mean / 5th percentile):
 | Dolanaar | 0.219 / 0.094 | 0.278 / 0.052 | 0.148 / 0.028 | 0.251 / 0.049 |
 
 Goldshire and Elwynn against 9573bd7 (three runs each; `sv/avg2.py`,
-`sv/evehue.py`, `sv/rows.py`; gaps against Enhanced as in round two):
+`sv/evehue.py`, `sv/rows.py`; gaps against the reference client as in round two):
 
 | | before | now |
 |---|---|---|
@@ -1567,7 +1567,7 @@ closer to its target. The shade gaps all closed, the region sum fell, and
 the cross view, whose road is sunlit, did not move.
 
 Sheets: `sv/sheet3_teldrassil.png` (Ultra | sky shade off | before | now),
-`sv/sheet3_matched.png` (Enhanced | before | now), `sv/sheet3_regress.png`
+`sv/sheet3_matched.png` (the reference client | before | now), `sv/sheet3_regress.png`
 (before | now).
 
 **The crown chroma bar, held to fixed pixels.** The crown chroma gap rose
@@ -1577,8 +1577,8 @@ the three matched views puts all of the rise on the canopy shafts (0b5540d,
 away from the sun (cross) never moved. In the two views toward the sun
 (inn, 15:23) the shafts lay a gold mist over the top third of the frame. In
 the inn view that band goes from saturation 0.36, hue 56 to 0.46, hue 43,
-where Enhanced's is 0.36, hue 57, so the morning shafts overshoot; at 15:23
-they come close to Enhanced's gold (0.43 / 41 against 0.41 / 39). The bar
+where the reference client's is 0.36, hue 57, so the morning shafts overshoot; at 15:23
+they come close to the reference client's gold (0.43 / 41 against 0.41 / 39). The bar
 made this look worse than it is. The crown region was picked by hue (foliage
 55-165) and saturation in each shot, so as the mist turned the leaves
 orange, half the region's pixels left the band and the most saturated ones
@@ -1590,8 +1590,8 @@ round three.
 
 **The sunlit road (round four).** The largest measured gap left on the
 three matched Goldshire views was the sunlit road: 9.9% darker than
-Enhanced's (road lit L), bluer and greyer (b/L +25%, chroma -15%), with
-the shaded road 14% too bright and lit/shade 1.60-1.66 against Enhanced's
+the reference client's (road lit L), bluer and greyer (b/L +25%, chroma -15%), with
+the shaded road 14% too bright and lit/shade 1.60-1.66 against the reference client's
 1.91-2.33. Turned off one at a time (ca47718, the same views and run),
 the sky shade or the bounce light (which carries the sky shade's build)
 takes the lit road to -4.9%, b/L +12%, chroma -7%. Ambient occlusion, the
@@ -1600,7 +1600,7 @@ the sky shade took 9-12% of the lit road's red and green and none of its
 blue. The cause is its ground rebuild in `ambient_occlusion.frag`: every
 ground pixel is rebuilt as ambient x occlusion x sky seen + the sun, so
 sunlit ground also lost the plain fill, the bounce pass's warm stand-in
-for Enhanced's probe GI that sunlit ground keeps everywhere else. Two
+for the reference client's probe GI that sunlit ground keeps everywhere else. Two
 narrower fixes measured nothing. Keeping only the ambient's sky
 visibility on lit ground left the lit road at -9.8%. Keeping the fill only
 where the sky is closed in left it at -9.1%: Goldshire's road sees as much
@@ -1611,7 +1611,7 @@ ground keeps what the bounce pass gave it. Kept at every sun height, it
 also lifted the Barrens' noon road (sun 65 degrees up) from 0.551 to 0.576
 in mean, past its blow-out bar. So it applies under a sun below 40 degrees
 and eases back to the rebuild by 55 (`kLitKeepSun0/1`). That cut-off is
-fitted to the bar, not read from Enhanced. Bars (ca47718 -> now):
+fitted to the bar, not read from the reference client. Bars (ca47718 -> now):
 
 | bar | before | now |
 |---|---|---|
@@ -1638,7 +1638,7 @@ shaded road's brightness (+16%).
 from density 0 to 8 with no doodads (a default, no effect). Doodads gained
 `Size_variation 0.67..1.33` and `Rotation_variation 0..360` on every row
 (Wowee scatters at 0.80..1.15 and a random yaw) and a `TerrainColorGradingRampID`
-that is 0 everywhere. So Enhanced's denser look is its settings
+that is 0 everywhere. So the reference client's denser look is its settings
 (`groundEffectDensity 48` on retail's scale, `groundEffectDist 200`) and its
 models, not new placement data. The Enhanced preset uses the clutter maximum.
 
@@ -1659,8 +1659,8 @@ costs are not in the cells and remain: the first sight of each ground
 effect derives its profile from the effect's doodad models (one 40-80 ms
 frame each, seven in Goldshire), and the finished field's upload packs and
 stages 175264 blades (10-13 ms, once per rebuild). Side by side the blades
-also read as dark stubs against an afternoon sun, nothing like Enhanced's
-lit clutter. So the preset carries Enhanced's distance (200 yd, its
+also read as dark stubs against an afternoon sun, nothing like the reference client's
+lit clutter. So the preset carries the reference client's distance (200 yd, its
 groundEffectDist) and the terrain's own density and height for the grass
 rows but leaves the generator off; prewarming the profiles at zone load,
 packing the upload across frames, and lighting the blades are what it
@@ -1688,7 +1688,7 @@ grass in it; the hitches left are terrain tiles streaming in after the
 teleports. Frame median 16.7-16.9 ms (vsync), GPU 10.1-10.3 ms.
 
 Round 5 (Jered's Barrens frame, tall gold wheat to the horizon toward an
-evening sun): Enhanced does not draw denser or taller clutter than its data
+evening sun): the reference client does not draw denser or taller clutter than its data
 says - its rows are 1.12's, the Barrens' effects (647, 1935, 3614, 3615:
 density 8, `BarGra03`-`08`, `BarRoc01`/`02`) the same as 3.3.5's. Wowee drew
 none of it. 374 of 3.3.5's 580 `GroundEffectDoodad` rows name their model
@@ -1701,26 +1701,26 @@ the character's waist as in the frame. Cost, standing in the wheat toward
 the sun at 17:45 and switching the setting 150/0/150/0/150 in one run (three
 other clients sharing the laptop's GPU): frame median 22.9 (first, warming),
 20.1, 20.0, 20.8, 18.4 ms - no difference above the noise once the tiles
-are built. The size spread (Enhanced 0.67-1.33, Wowee 0.80-1.15, the same
+are built. The size spread (reference 0.67-1.33, Wowee 0.80-1.15, the same
 mean) is not ported; side by side it did not read.
 
 ## 8. What the Enhanced preset sets
 
 The "Enhanced" quality preset (`kGraphicsPresets[kEnhancedPresetIndex]`,
-`enhancedEnhancements()`): Ultra's rows plus ambient occlusion, the colour
-grade, Enhanced's daylight, the Medium light volume at the stock mist
+`enhancedLookEnhancements()`): Ultra's rows plus ambient occlusion, the colour
+grade, enhanced daylight, the Medium light volume at the stock mist
 (High's volume cost 2.5 ms more GPU at 1280x540 for little visible
 difference side by side; twice the mist was too foggy in play, section 8c),
-soft particles (Enhanced's "Depth Based
-Opacity"), HD water and sky reflections with the "Water (the reference client)" row
-over them (its PBR water and SSR; enhanced-water.md); 1900-yard (Enhanced's horizonStart, with the far field past it)
+soft particles (the reference client's "Depth Based
+Opacity"), HD water and sky reflections with the "Water (enhanced)" row
+over them (its PBR water and SSR; enhanced-water.md); 1900-yard (the reference client's horizonStart, with the far field past it)
 view distance, 500-yard shadows, ground clutter 150%, and FXAA instead of
-MSAA (Enhanced's anti-aliasing is CMAA2, a post filter, and the occlusion
+MSAA (the reference client's anti-aliasing is CMAA2, a post filter, and the occlusion
 pass needs a one-sample depth), and the bounce light (section 6b) over the
 fill. Round 2 added the fill light, the sun haze
 (with stronger, golder screen-space shafts) and bloom at 0.6: what is
 brighter than 0.8 in nine taps of the glow's quarter-size scene, added on
-(`fxaa.frag` `bloomAt`). Enhanced ships its Bloom Intensity at the maximum;
+(`fxaa.frag` `bloomAt`). The reference client ships its Bloom Intensity at the maximum;
 its bloom shader was not read, so the knee and spread were set by eye
 against its capture. These four rows live on their own settings page,
 "Enhancements: Enhanced".
@@ -1744,23 +1744,23 @@ against its capture. These four rows live on their own settings page,
   lights and sampling the shadow map - so it was taken out again. Longer
   shafts need the inject cost per cell cut first (a coarser far half, or
   the light gather skipped past 200 yd).
-- **Long view (the reference client)** row (`longView`, on the Enhanced page):
-  Enhanced's outdoor fog ends at 18000 yd over a 7000-yard far clip; here the
+- **Long view (enhanced)** row (`longView`, on the Enhanced page):
+  The reference client's outdoor fog ends at 18000 yd over a 7000-yard far clip; here the
   frame fog may end at 18/7 of the view distance instead of at it (maps
   below 530, not under water), so the land at the edge of the 2400-yard
   view is hazy rather than gone, and the WDL horizon and the sun haze carry
   the distance past it. The view distance itself stays at 2400, Wowee's
-  maximum: Enhanced's 1900-yard horizonStart is the range it draws in full
+  maximum: the reference client's 1900-yard horizonStart is the range it draws in full
   detail, which 2400 already covers, and past that both clients draw the
   low-detail horizon. Raising the detailed range past 2400 means a terrain
   load radius of seven or more tiles (225 tiles resident against 169) and
   was not measured here. The far field (below) replaced that plan.
-- **Far field (the reference client)** row (`farfield`, on the Enhanced page, E39 in
-  `docs/enhancements-plan.md`): Enhanced's distance as it is built - full
+- **Far field (enhanced)** row (`farfield`, on the Enhanced page, E39 in
+  `docs/enhancements-plan.md`): the reference client's distance as it is built - full
   detail to 1900 yd (the preset's view distance now), then the WDL heights
   in the minimap's colours, lit and fogged as the ground, to 7000 yd, with
   the loaded buildings' big outdoor groups to 3000; with the long view the
-  fog ends at 18/7 of 7000, Enhanced's 18000. Within the noise on the GPU
+  fog ends at 18/7 of 7000, the reference client's 18000. Within the noise on the GPU
   and the CPU in A/B; see E39.
 
 ## 8c. Too foggy in play (round 2 as Jered first played it)
@@ -1781,12 +1781,12 @@ Four things stacked, all fixed:
    than what the sun reaches.
 4. The daylight trend brightening the fog colour by 30%: the fog colour
    now keeps Light.dbc's value (the sky bands keep the trend). And the
-   colour grade lays at most 0.6 of Enhanced's curve: Enhanced grades a
+   colour grade lays at most 0.6 of the reference client's curve: the reference client grades a
    tone-mapped linear picture, and on 3.3.5's already bright mid-tones the
    full lift washed them out.
 
 Checked at 8:00, 12:00, 15:00, 17:48, 19:00, 22:30 and in previewed rain
-(`enhanced/lab/shots/tod_sheet.png`): clear and contrasty by day, gold
+(`reference/lab/shots/tod_sheet.png`): clear and contrasty by day, gold
 toward the evening sun, dark at night, and rain no greyer than Ultra's.
 
 ## 9. Measured cost and the remaining gap
@@ -1804,42 +1804,42 @@ Lab server, Goldshire at 13:00-15:30, 1280x540 window on Jered's laptop,
 | volumetric fog inject, Medium | 0.3-0.5 | High was 3.0 (why the preset stays at Medium) |
 | HD water + reflections | 1.6 + 0.3 | where water is on screen |
 
-Screenshots (session scratchpad, `enhanced/lab/shots/`): `side_by_side.png`
-(Enhanced's own Goldshire capture beside Wowee's Enhanced preset and Ultra at
+Screenshots (session scratchpad, `reference/lab/shots/`): `side_by_side.png`
+(the reference client's own Goldshire capture beside Wowee's Enhanced preset and Ultra at
 15:23, toward the sun and across it), `attr_1ultra.png`,
-`attr_2enhanced.png`, `attr_3noao.png`, `attr_5nograde.png` (one view, a piece
+`attr_2reference.png`, `attr_3noao.png`, `attr_5nograde.png` (one view, a piece
 off at a time), `aodbg_v2.png` (the occlusion alone), `final_sheet.png`;
-Enhanced itself: `enhanced/shots/enhanced_01.png` (Northshire 14:15),
-`enhanced_02.png` (Goldshire 15:23).
+the reference client itself: `reference/shots/reference_01.png` (Northshire 14:15),
+`reference_02.png` (Goldshire 15:23).
 
 What still separates the two pictures, largest first:
 
 1. Indirect light. The bounce light (section 6b) now darkens and cools
    the shade under canopies and warms it by sunlit ground and walls, from a
-   grid baked round the camera, and the shade's hue is Enhanced's (section
+   grid baked round the camera, and the shade's hue is the reference client's (section
    6c); the ground's shade takes the sky it sees from a height field round
    the camera and a fill in the open (6e), but stays 13% brighter than
-   Enhanced's, held up by the views it was not captured in; its crisper
+   the reference client's, held up by the views it was not captured in; its crisper
    dappling through the canopy (its sun shadows) is not matched.
 2. Light toward the sun. The haze and stronger shafts now give the golden
-   glow looking into an afternoon sun, but Enhanced's shafts through the
+   glow looking into an afternoon sun, but the reference client's shafts through the
    canopy are crisper and longer (its fog is shadowed by the cascades
    across the whole depth, Wowee's only in the first 400 yd). Its linear
    HDR sun is now approximated by the HDR lighting row (9b).
-3. Ground cover. Enhanced's clutter (same placement data, its own models,
+3. Ground cover. The reference client's clutter (same placement data, its own models,
    groundEffectDist 200) is denser and taller than Wowee's at 150%.
 4. Per-zone light keyframes: ported for 198 of 209 lights (section 2b);
    ZoneLight polygons where 3.3.5 has no light of its own are not.
-5. Draw distance: Enhanced draws terrain to 7000 yd with fog ending at 18000.
+5. Draw distance: the reference client draws terrain to 7000 yd with fog ending at 18000.
    With the far field the Enhanced preset does too (low detail past 1900);
    what is left is the light data's own fog, which in 3.3.5 ends short of
-   1900 in most zones (Enhanced's own keyframes, section 2b, are thinner).
-6. The mid-distance veil: ported as the air (section 5b), Enhanced's global
+   1900 in most zones (the reference client's own keyframes, section 2b, are thinner).
+6. The mid-distance veil: ported as the air (section 5b), the reference client's global
    fog layer at its own density, scattering the fog colour. The floor's
    gap is -18% (was -24%); what is left of the veil's blue in the near
    crowns is the leaves' light, not air.
 
-## 9b. The HDR/linear path ("HDR lighting (the reference client)")
+## 9b. The HDR/linear path ("HDR lighting (enhanced)")
 
 Built as one row (`hdrScene`, Enhanced page, on in the Enhanced preset only),
 in four steps, each with the row off drawing exactly what it drew before:
@@ -1879,7 +1879,7 @@ in four steps, each with the row off drawing exactly what it drew before:
    blooms (`kHdrBloomFloor`: the sun's disc and glare, lamps, fire, spells),
    its taps are a texel and a half apart, it adds at most 0.3 a channel
    (`kHdrBloomMax`), and the 8-bit halo is left to the 8-bit scene. A
-   candle or a torch keeps a small local glow, as in Enhanced's capture.
+   candle or a torch keeps a small local glow, as in the reference capture.
 3. **Cost** (Iris Xe, 1280x540, Goldshire 15:24, row off and on in turn,
    five 10 s windows each): the final composite +0.49 ms (1.93 -> 2.42), the
    scene pass +0.43 ms (the 16F writes), the frame's GPU time 15.2 -> 16.3
@@ -1896,7 +1896,7 @@ in four steps, each with the row off drawing exactly what it drew before:
    longer stops there, leaning the hue toward the other channels (the
    yellow-green cast of 3.3.5's noon ground) - it keeps its hue and goes to
    the tone map. The sun's light is 1.25x Light.dbc's by day
-   (`kSunLight`, Enhanced's F052 is 1.35-1.5), eased in by the sun sprite's
+   (`kSunLight`, the reference client's F052 is 1.35-1.5), eased in by the sun sprite's
    height so the night keeps its moonlight.
 
 Side by side (Goldshire 08:00-22:30, rain, Crystal Lake above and under the
@@ -1907,12 +1907,12 @@ a clipped white disc, pixels at 250+ down from 0.2-3.6% of the frame to
 0.03-3.2%; night within 2%, rain 6% brighter. `WOWEE_HDR_TUNE="knee,bloom,
 sunGain,sunLight"` overrides the four for tuning.
 
-**Outside Enhanced's daylight** (Outland, Northrend, instances; maps 0 and 1
+**Outside enhanced daylight** (Outland, Northrend, instances; maps 0 and 1
 with the Daylight row off) the HDR scene no longer brightens the sun: the
-2x of `kSunLight` was set with Enhanced's sun table, its flat-ground
+2x of `kSunLight` was set with the reference client's sun table, its flat-ground
 irradiance scale and the 0.5 knee, none of which run there, and under the
 0.8 knee it only lifted and saturated the picture. The composite's
-exposure and chroma terms were already off there (and are 1 under Enhanced's
+exposure and chroma terms were already off there (and are 1 under the reference client's
 daylight since section 2d); the sun's 2x was what remained. Now the HDR
 scene keeps Light.dbc's sun there and only rolls off what passes 1 - the
 8-bit scene's picture, with a shoulder. Maps 0 and 1 under the row are
@@ -1932,14 +1932,14 @@ At night (Hellfire 23:00, Grizzly Hills 23:00), in the Deadmines' mine
 and in Utgarde Keep the mean moves by under 0.015: the 2x was day-only, and
 the sun barely reaches inside. Nothing goes darker than the 8-bit scene.
 
-## 9c. Sun through leaves ("Sun through leaves (the reference client)")
+## 9c. Sun through leaves ("Sun through leaves (enhanced)")
 
-In Enhanced's Goldshire at 9:22, looking toward the low sun, the canopy in
+In the reference client's Goldshire at 9:22, looking toward the low sun, the canopy in
 front of it glows warm yellow-green: light coming through the leaves. 3.3.5
 lights a leaf's back with the ambient alone, so the same canopy read as a
 dark mass against a white sky.
 
-**What Enhanced's shader does.** `material3_mesh_ps` (5446721; 20 of its 40
+**What the reference client's shader does.** `material3_mesh_ps` (5446721; 20 of its 40
 permutations disassemble) lights M2s with the sun (`N.L` saturated, a
 half-Lambert lerp of the hemisphere ambient) and with one more directional
 light from a 32-byte cbuffer: `(dir.xyz, w)`, `(colour.rgb, a)`. With `w`
@@ -1958,11 +1958,11 @@ and there is no view-dependent lobe in either shader - no `V.L` term at all.
 **What Wowee does** (`leafLight`, m2.frag, on in the Enhanced preset only):
 for the foliage cutout batches (`alphaTest == 2`: a foliage-classified
 model's alpha-keyed batch, m2_renderer_render.cpp `foliageCutout`; trunks
-are opaque batches and ground clutter is `alphaTest == 3`), Enhanced's form
+are opaque batches and ground clutter is `alphaTest == 3`), the reference client's form
 with the sun as the light, `albedo * sunColour * sat(-N.L)`, where `N` is
 the normal turned toward the eye (a card's authored normal says little
 about which side the eye is on) and a quarter of it whatever the angle (a
-thin leaf passes some light either way), and three weights Enhanced does not
+thin leaf passes some light either way), and three weights the reference client does not
 have in this shader:
 
 - a forward lobe toward the **sun sprite**, `x^4` and `x^8` mixed (x the
@@ -2018,9 +2018,9 @@ noon looking up: mean 0.517 -> 0.199, white 6.2% -> 0%; its ground view
 0.442 -> 0.429; Nagrand 0.526 -> 0.275, white 2.5% -> 0%. Azeroth and
 Northrend (no such model) are unchanged: Goldshire's sky view 0.301 / 0.300,
 Grizzly Hills 0.460 / 0.459, the Goldshire and Barrens views within run
-noise. The HDR row's mid-tone lift outside Enhanced's daylight is untouched.
+noise. The HDR row's mid-tone lift outside the enhanced daylight is untouched.
 
-## 9e. Sun shadows ("Sun shadows (the reference client)")
+## 9e. Sun shadows ("Sun shadows (enhanced)")
 
 **What Wowee had.** Two maps (`shadow_cache.hpp`): the world map, every
 static caster over the shadow distance round the player (500 yd in the
@@ -2039,8 +2039,8 @@ wide. Ground clutter cast nothing (`M2Renderer::renderShadow` skips
 the grass field's blades (`grass.frag`) received no sun shadow at all: under
 the Enhanced preset a meadow in tree shade was lit as if in full sun.
 
-**What Enhanced does** (decoded from 1.60.1's DXIL in the session scratchpad,
-`fgap/dis`, `enhanced/dis`):
+**What the reference client does** (decoded from 1.60.1's DXIL in the session scratchpad,
+`fgap/dis`, `reference/dis`):
 
 - Cascades. Every shader that reads the sun shadow carries
   `CSMInfo { ShadowMapCascade[5]; float4[16]; int4 }`, a cascade being a
@@ -2085,7 +2085,7 @@ the Enhanced preset a meadow in tree shade was lit as if in full sun.
   Foliage goes in without its wind, so one redraw's leaves lie where the
   next one's do.
 - Read first: where it covers a pixel the world map is not read; over its
-  outer 8% it is mixed into the world map (Enhanced's cascade blend). Its
+  outer 8% it is mixed into the world map (the reference client's cascade blend). Its
   filter is four bilinear compares at plus or minus `spread` texels,
   `spread` the pixel's footprint on the map, 0.5 to 1.5 texels: a hard edge
   under the camera, softer further off, and past the square the world map's
@@ -2095,15 +2095,15 @@ the Enhanced preset a meadow in tree shade was lit as if in full sun.
   a tuft's own card is lit with the ground's normal, which lies in the card,
   so `m2.frag` reads its shadow a quarter yard toward the sun.
 - Leaves read the world map alone (`sunShadow(..., worldOnly)`): the crowns'
-  light, and the light through them (9c), were matched to Enhanced's with it;
+  light, and the light through them (9c), were matched to the reference client's with it;
   read through the detail map the 15:23 inn view's crown chroma went from
-  0.468 to 0.538 (Enhanced 0.383). The detail map is for what the crowns
+  0.468 to 0.538 (reference 0.383). The detail map is for what the crowns
   throw on the ground.
 - The grass blades take one bilinear compare a map (`sunShadowCheap`: the
   detail map where it covers them, else the world map, and the unit map in
   its mask, lifted by the up-normal rule) on their sun term, as deep as the
   ground under them takes it (all of the sun under the sky shade), as
-  Enhanced's clutter does.
+  the reference client's clutter does.
 
 Measured (WPTEST14 on the lab, 1280x540, the Iris Xe, the Enhanced preset;
 session scratchpad `shadows/`):
@@ -2114,7 +2114,7 @@ session scratchpad `shadows/`):
   Hill at 16:30-17:20 (crisper tent and tree shadows; at 18:00 and later the
   canyon's own shadow covers the camp in both). Sheets: `shadows/cmp_v5_*.png`.
   Wowee's Valley of Trials has no M2 clutter at the spots used, so the
-  Durotar frame's plants (Enhanced's denser ground cover) are not matched.
+  Durotar frame's plants (the reference client's denser ground cover) are not matched.
 - Bars (`fgap/bars2.py`, off / on, three runs each): Barrens ground
   0.536/0.690/0.715 / 0.537/0.690/0.715; into the sun 1.23-1.32% /
   1.29-1.30% (bar 1.315); eve, forest, away within 1 point; crown chroma
@@ -2131,7 +2131,7 @@ session scratchpad `shadows/`):
   gives the same shadows to the pixel on the road (the frame difference is
   the swaying crowns and the walking NPCs); a pan does not touch it, and
   foliage is drawn without wind, so redraws do not move the dapples.
-- Not done: Enhanced's opaque filter (its screen-space `shadowmask.bls`, not
+- Not done: the reference client's opaque filter (its screen-space `shadowmask.bls`, not
   fetched); contact hardening (PCSS) - the detail map's pixel-footprint
   widening stands in for it.
 - The sky shade's ground fill (`groundSunlit` in the ambient pass's sky
@@ -2146,14 +2146,14 @@ session scratchpad `shadows/`):
   -0.06 to +0.09 ms on the perf views.
 - Durotar after 3024a23 (the clutter's .mdx models load): the Valley of
   Trials has its plants again, sparse (26 within 32 yd of the camp's middle,
-  1156 round Razor Hill's edge) next to Enhanced's cover. They cast into the
+  1156 round Razor Hill's edge) next to the reference client's cover. They cast into the
   detail map - a crisp twig shadow beside each at 16:30, none with the row
   off - and receive like the ground under them
   (`shadows/cmp_pl6_plants.png`).
 
 ## 9f. The sky round the sun (dnsky)
 
-Enhanced's dome is drawn by `dnsky.bls` (pixel 2990767, vertex 2990994):
+The reference client's dome is drawn by `dnsky.bls` (pixel 2990767, vertex 2990994):
 the ring colours come in per vertex as 3.3.5's do (raised to 2.2 when the
 pipeline is linear), and the pixel shader then draws them toward a glow
 colour round the sun:
@@ -2169,7 +2169,7 @@ glow colour are filled on the CPU and were not read; LightData's SunColor is
 `#ffffff` on every key of the profiles looked at, and the sky bands
 themselves (Barrens 7626 at 17-18h: top `#213656`, middle `#7492c5`, band 1
 `#b2b1ad`, band 2 `#dbb68e`, smog `#f8bd72`, fog `#70697f`) are no paler than
-3.3.5's - the pale gold round Enhanced's low sun is this halo.
+3.3.5's - the pale gold round the reference client's low sun is this halo.
 
 **Ported** (Enhanced preset, `Enhancements::enhancedDaylight`, times
 `LightingParams::sunDisc` so Outland's planets keep none): `skybox.frag`
@@ -2177,17 +2177,17 @@ does the same lerp, the glow colour the smog's hue at full brightness (1.6x
 in the HDR scene, where the tone map rolls it off; the frame's sky by the sun
 is gold, b/r 0.67, and a white glow took ours to 0.81), c 0, strength 0.8
 on the horizon and above, up with the day - and only toward a low sun: full
-under 12 degrees, gone by 30. That last is a fit, not Enhanced's: Jered's
+under 12 degrees, gone by 30. That last is a fit, not the reference client's: Jered's
 frames are low suns, and toward Goldshire's 9:22 sun (38 degrees) any halo
 only added near-white round the disc (1.20% -> 2.24% with a white one).
 Measured against the Barrens frame at 17:45 (sky by the sun / 30-40
-degrees off it, median luminance): Enhanced 234 / 220, before 208 / 162,
+degrees off it, median luminance): reference 234 / 220, before 208 / 162,
 after 216 / 172, blue/red 0.70 -> 0.74 (frame 0.67). Stronger settings do
 not close the rest: at full strength toward a 2.2x glow the sky by the sun
 reached 218 with its red at 233 and its brightest pixel at 237 against the
 frame's 255 and 248 - the ceiling is the final pass's tone curve, not the
 dome. The dusk frame (`yt_dusk_055028`, twisted trees and a lamp, an orange
-sun through them) is not Duskwood: Enhanced's Duskwood profile (7791) is teal
+sun through them) is not Duskwood: the reference client's Duskwood profile (7791) is teal
 on every key; its gold matches Elwynn's dusk (smog `#fea83c` at 20:40), where
 the halo now applies.
 
@@ -2196,7 +2196,7 @@ before the tone curve, on the sky alone: the sun haze pass
 (`enhanced_haze.frag`), which already reads the depth and runs over every
 pixel once the opaque scene is done, adds the sun's light to pixels at the
 far plane, by the halo's weight (the cube of the cosine toward the sun, full
-under a 12 degree sun, gone by 30), in Enhanced's daylight with the sun shown
+under a 12 degree sun, gone by 30), in the enhanced daylight with the sun shown
 and only in the HDR scene (`kEnhancedLowSunSkyLight` 3). The tone pass itself
 (`fxaa.frag`) has no depth to tell the sky by and its push block is full;
 the result is the same curve on a brighter sky. A gain on the sky instead
@@ -2210,7 +2210,7 @@ trunks dark against it: the gap round the sun luminance 202, the air between
 the trunks 43, the trunks 20-35, every band hue 24-34. The froxel mist
 cannot give it: at a 3 degree sun its shadow map is still cast mostly from
 3.3.5's 17.5 degree direction, so the air toward the sun sits in the trees'
-shadow. It reads as unshadowed air - Enhanced's global fog layer and its sun
+shadow. It reads as unshadowed air - the reference client's global fog layer and its sun
 haze - so `enhanced_haze.frag` adds it: the sun's light through a forward HG
 lobe (g 0.75) times the cosine, no extinction, soft-capped, and only where
 the view ray travels far: none nearer than 130 yards, whole from 400, so the
@@ -2218,10 +2218,10 @@ glow is in the far air and the sky and the trunks, lamps and the player stay
 silhouettes against it (filled in from the camera, the first version lay as
 an orange disc on the near trunk and washed the inn 30 yards off); under a 15
 degree sun (full under 8, gone a little below the horizon), outdoors, the
-sun shown, under the Enhanced daylight (`kEnhancedDuskGlow` 0.3). Its gate is
-not the air's density, which is 0 once Enhanced's daylight keys end - before
+sun shown, under the enhanced daylight (`kEnhancedDuskGlow` 0.3). Its gate is
+not the air's density, which is 0 once enhanced daylight keys end - before
 the sun is down. In Wowee's clock the frame's light is about 19:00: by 19:30
-Enhanced's sun has no light left to scatter and nothing is added. Filled in
+the reference client's sun has no light left to scatter and nothing is added. Filled in
 from the camera at 0.1 the character 30 yards from the inn went 41.5 -> 112.6
 in luminance and the trunk in front of the camera 27.7 -> 31.4; from 130
 yards out at 0.3 they are 41.2 and 27.6 (as without the glow) and the warm
@@ -2229,8 +2229,8 @@ light is in the far gaps between the trees.
 
 ## 10. Not done, and why
 
-- Enhanced's ZoneLight polygons (section 2b), and its keyframes for the 11
-  3.3.5 lights with no Enhanced match. The keyframe table itself is generated
+- The reference client's ZoneLight polygons (section 2b), and its keyframes for the 11
+  3.3.5 lights with no reference match. The keyframe table itself is generated
   locally (section 2b), never committed.
 - Fully linear colour: the HDR row (9b) keeps 3.3.5's display-encoded
   textures and Light.dbc colours and lifts only the clamp; textures are not

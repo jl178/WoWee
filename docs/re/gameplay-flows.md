@@ -315,7 +315,7 @@ complete).
 
 | Bug | Fixed |
 |---|---|
-| Declining a request sent nothing (the other player waited enhanced) | yes |
+| Declining a request sent nothing (the other player waited indefinitely) | yes |
 | Items/gold locked after the partner accepted | yes |
 | Status 12 (CLOSE_WINDOW) / 10 treated as the end of the trade | yes |
 | Old contents shown in the next trade | yes |

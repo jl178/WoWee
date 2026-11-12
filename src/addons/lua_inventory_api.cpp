@@ -2966,7 +2966,7 @@ static int lua_GetInventoryItemLink(lua_State* L) {
     //
     //     local equipSlot = bag > 0 and ContainerIDToInventoryID(bag)
     //
-    // which hands this `false` for the backpack. Bagnon_Enhanced's SaveBag does
+    // which hands this `false` for the backpack. Bagnon's offline-bag module's SaveBag does
     // exactly that, and luaL_checknumber raised inside its event handler - so
     // the cache that feeds every bag frame it draws never ran.
     if (!lua_isnumber(L, 2)) return luaReturnNil(L);
@@ -3037,7 +3037,7 @@ static int lua_GetInventoryItemTexture(lua_State* L) {
     //
     //     local equipSlot = bag > 0 and ContainerIDToInventoryID(bag)
     //
-    // which hands this `false` for the backpack. Bagnon_Enhanced's SaveBag does
+    // which hands this `false` for the backpack. Bagnon's offline-bag module's SaveBag does
     // exactly that, and luaL_checknumber raised inside its event handler - so
     // the cache that feeds every bag frame it draws never ran.
     if (!lua_isnumber(L, 2)) return luaReturnNil(L);
@@ -4052,7 +4052,7 @@ void registerInventoryLuaAPI(lua_State* L) {
                 // you", raised from LOOT_BIND_CONFIRM.
                 //
                 // Not LootSlot again: LootSlot is what raises the prompt, so
-                // answering it that way asks the same question enhanced. The
+                // answering it that way asks the same question indefinitely. The
                 // held request is sent instead, and the slot the dialog passes
                 // is not read - only one can be waiting.
                 {"ConfirmLootSlot", [](lua_State* L) -> int {

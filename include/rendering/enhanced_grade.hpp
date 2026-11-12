@@ -3,7 +3,7 @@
 /// The daytime colour grade of the reference client (1.60.1.70862), for the "Colour
 /// grade" enhancement (docs/re/enhanced-lighting.md section 3).
 ///
-/// Enhanced's LightData carries a ColorGradingFileDataID per keyframe. On the
+/// The reference client's LightData carries a ColorGradingFileDataID per keyframe. On the
 /// two continents the outdoor lights set it on the 12:00 keyframe only (Time
 /// 1440 in half-minutes) and leave the 8:00 and 15:00 keyframes either side of
 /// it at 0, no grade; Eastern Kingdoms' lights use file 8286666 (70 of its 83
@@ -41,13 +41,13 @@ inline constexpr float kKalimdor[kCurveSize] = {
     0.553f, 0.588f, 0.631f, 0.667f, 0.706f, 0.741f, 0.780f, 0.824f,
     0.863f, 0.902f, 0.937f, 0.969f, 0.988f, 0.996f, 0.996f, 1.000f};
 
-/// How much of the curve is laid on at noon. Enhanced grades a picture lit in
+/// How much of the curve is laid on at noon. The reference client grades a picture lit in
 /// linear light and tone-mapped; Wowee's 3.3.5 light is already bright in
 /// the mid-tones, and the full lift washed them out in Jered's first play.
 inline constexpr float kMaxWeight = 0.6f;
 
-/// The curve for a map, or null where Enhanced draws no grade (instances,
-/// Outland and Northrend have no graded light in Enhanced's data).
+/// The curve for a map, or null where the reference client draws no grade (instances,
+/// Outland and Northrend have no graded light in the reference client's data).
 inline const float* curveForMap(int mapId) {
     if (mapId == 0) return kEasternKingdoms;
     if (mapId == 1) return kKalimdor;

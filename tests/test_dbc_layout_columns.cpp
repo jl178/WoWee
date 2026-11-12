@@ -2,7 +2,7 @@
 //
 // The layouts in Data/expansions/*/dbc_layouts.json say which field of a DBC
 // holds what. A DBCFile asked for a field past the end of a record does not
-// fail: it answers zero, for every row, forever. A layout that names column 19
+// fail: it answers zero, for every row, indefinitely. A layout that names column 19
 // of an 18-column file is a value that is always zero and a feature that never
 // works, with nothing anywhere to say so.
 //

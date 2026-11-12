@@ -538,7 +538,7 @@ void CharacterPreview::createFBO() {
         nearWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         nearWrite.pImageInfo = &shadowImg;
 
-        // Binding 6 the detail map of Enhanced's sun shadows: the same, with
+        // Binding 6 the detail map of the reference client's sun shadows: the same, with
         // detailShadowParams.x at zero.
         VkWriteDescriptorSet detailWrite = nearWrite;
         detailWrite.dstBinding = 6;

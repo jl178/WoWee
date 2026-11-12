@@ -9,7 +9,7 @@
 ///
 /// The columns matter more than the count of copies. A DBCFile asked for a
 /// column the file does not have, or the wrong one, does not fail: it answers
-/// zero or an empty string for every row, forever. Icons then do not appear
+/// zero or an empty string for every row, indefinitely. Icons then do not appear
 /// and nothing says why, so the fallbacks are named here and pinned by
 /// test_spell_icon_columns against the shipped file.
 

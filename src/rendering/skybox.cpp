@@ -14,7 +14,7 @@ namespace wowee {
 namespace rendering {
 
 namespace {
-// Enhanced's sun glow (dnsky), fitted against Jered's Barrens frame at 17:45:
+// The reference client's sun glow (dnsky), fitted against Jered's Barrens frame at 17:45:
 // the strength above and on the horizon, the cone's start (cosine to the
 // sun), the share left once the sun is 30 degrees up, and the glow colour's
 // brightness in the HDR scene.
@@ -39,7 +39,7 @@ struct SkyPushConstants {
     glm::vec4 smogColor;      // 6
     glm::vec4 fogColor;       // 7
     glm::vec4 params;         // x = dawn/dusk highlight (stock_sky::highlight),
-                              // y = Enhanced's sun glow above the horizon,
+                              // y = the reference client's sun glow above the horizon,
                               // z = its start (cosine from the sun), w = on the horizon
     glm::vec4 sunGlowColor;   // rgb: the colour the dome is drawn toward round the sun
 };
@@ -160,7 +160,7 @@ void Skybox::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const SkyP
     // for LightParams with HighlightSky set.
     const float dayFraction = glm::fract(params.timeOfDay / 24.0f);
     push.params = glm::vec4(stock_sky::highlight(dayFraction, params.highlightSky), 0.0f, 0.0f, 0.0f);
-    // the reference client's dome (dnsky.bls, pixel shader 2990767): within the cone
+    // The reference client's dome (dnsky.bls, pixel shader 2990767): within the cone
     // where the cosine to the sun passes a start c, the dome's colour is
     // drawn toward a glow colour by ((cos - c) / (1 - c))^3 times a strength,
     // one strength on the horizon and another from a little above it (its

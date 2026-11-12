@@ -1866,7 +1866,7 @@ bool PostProcessPipeline::initFXAAResources() {
     VkPushConstantRange pc{};
     pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     pc.offset = 0;
-    pc.size = 128;  // eight vec4 (the seventh the Enhanced shade's chroma and tint, the last the corner blur's)
+    pc.size = 128;  // eight vec4 (the seventh the enhanced shade's chroma and tint, the last the corner blur's)
     VkPipelineLayoutCreateInfo plCI{};
     plCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     plCI.setLayoutCount = 1;
@@ -2246,9 +2246,9 @@ void PostProcessPipeline::renderFXAAPass() {
         // The HDR scene's tone curve and how much light above 1 the bloom
         // spreads (enhanced_tonemap.hpp).
         toneKnee_ > 0.0f ? toneKnee_ : enhanced_tonemap::tuning().knee, enhanced_tonemap::tuning().hdrBloom,
-        // The Enhanced daylight's low-end lift and saturation (0 off).
+        // The enhanced daylight's low-end lift and saturation (0 off).
         hdrScene() ? enhancedExposure_ : 0.0f, hdrScene() ? enhancedSat_ : 0.0f,
-        // The Enhanced shade's grey and chroma (1, 1, 1, 1 off).
+        // The enhanced shade's grey and chroma (1, 1, 1, 1 off).
         enhancedShadeTint_.r, enhancedShadeTint_.g, enhancedShadeTint_.b, enhancedShade_,
         // Whether the corner blur holds this frame's sums (fxaa_blur.frag).
         fxaa_.blurReady ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f

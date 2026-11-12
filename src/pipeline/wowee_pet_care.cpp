@@ -187,7 +187,7 @@ WoweePetCare WoweePetCareLoader::makeStableActions(
         0,
         "Permanently release the active pet (back to "
         "the wild). Free, instant - but PERMANENT. The "
-        "pet is gone forever; cannot be re-tamed without "
+        "pet is gone for good; cannot be re-tamed without "
         "finding the same beast in the world. UI "
         "confirmation prompt highly recommended.");
     return c;

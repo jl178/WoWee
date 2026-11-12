@@ -232,7 +232,7 @@ struct Widget {
     double modelSequenceStart = 0.0;
     /// A label whose size came from measuring its own text, and the text that
     /// was measured. Without the second, a label sized once keeps that size
-    /// enhanced - the character sheet's level line stayed the width of the
+    /// indefinitely - the character sheet's level line stayed the width of the
     /// placeholder its XML shipped with, long after it read something else.
     bool autoSized = false;
     std::string measuredText;

@@ -350,10 +350,10 @@ void main() {
     // With the HDR scene (localLightMeta.z bit 32) the clamp lifts: a face
     // the sun and the sky together light past one keeps its hue and goes to
     // the tone map, instead of stopping flat in the brightest channel.
-    // "Sky shade (the reference client)" under Enhanced's daylight (kSkyShade, 256,
+    // "Sky shade (enhanced)" under the enhanced daylight (kSkyShade, 256,
     // set by the renderer only with kEnhancedAmbient): the ground lit as its
     // terrain shader lights it (docs/re/enhanced-lighting.md 6e) - the sky's
-    // ambient by Enhanced's half-Lambert ramp toward the sun, and the shadow
+    // ambient by the reference client's half-Lambert ramp toward the sun, and the shadow
     // on the sun's light alone, where stock darkens ambient and sun together
     // to 70% in shade. The ramp is held to flat ground's: level ground keeps
     // the ambient it had (the Barrens' noon road would take x1.08 of it), a
@@ -367,7 +367,7 @@ void main() {
         float rampFlat = mix(0.7, 1.1, 0.5 + 0.5 * clamp(lightDir2.z, -1.0, 1.0));
         groundAmbient *= ramp / rampFlat;
     }
-    // The sun in shade keeps the Enhanced floor's share (1 - shadowParams.y)
+    // The sun in shade keeps the enhanced floor's share (1 - shadowParams.y)
     // here; the bounce pass, which knows what of the sky and the sunlit
     // ground a point has, takes it out in the open shade it fills and keeps
     // it in deep shade (ambient_occlusion.frag). Out past its field the
@@ -392,8 +392,8 @@ void main() {
         vec3 s3 = (layerFlags.w & 0x80) != 0 ? t3.rgb : t3.rgb * lit;
         result = s0 * w.x + s1 * w.y + s2 * w.z + s3 * w.w;
     }
-    // Under Enhanced's daylight (kEnhancedAmbient, 128) the floor is
-    // 1 - shadowParams.y (enhanced_palette::shadowOpacity; Enhanced's shaded
+    // Under enhanced daylight (kEnhancedAmbient, 128) the floor is
+    // 1 - shadowParams.y (enhanced_palette::shadowOpacity; the reference client's shaded
     // road keeps 54% of the sunlit road's colour, the default stays at
     // stock's 70% for now), where stock holds it at 70% whatever the sky.
     // With the sky shade the shadow is on the sun alone (above).

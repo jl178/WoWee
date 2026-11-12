@@ -33,7 +33,7 @@ class Camera;
 /// under the fog colour, through pipelines and a normal buffer made on first
 /// use; off, those are never made and the pass is the stock one.
 ///
-/// With setFarField ("Far field (the reference client)", far_field.hpp) and a colour
+/// With setFarField ("Far field (enhanced)", far_field.hpp) and a colour
 /// atlas from setAtlas, the same tiles are drawn in the land's own colours,
 /// lit and fogged as the ground, from where the chunks stop out to
 /// far_field::kReach; until the atlas arrives the pass is as before.

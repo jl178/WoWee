@@ -1,35 +1,35 @@
 #!/usr/bin/env python3
-"""Generate enhanced_lights.bin: the reference client's per-zone light keyframes,
+"""Generate enhanced_lighting_table.bin: the reference client's per-zone light keyframes,
 re-keyed to 3.3.5's Light.dbc (docs/re/enhanced-lighting.md section 2b).
 
 The output is Blizzard's data, converted: it is written to the local client
 data, never committed. Wowee reads it from
-<data>/override/wowee/enhanced_lights.bin (format in
-include/rendering/enhanced_lights.hpp); without it the Enhanced daylight row
+<data>/override/wowee/enhanced_lighting_table.bin (format in
+include/rendering/enhanced_lighting_table.hpp); without it the enhanced daylight row
 uses the averaged trend everywhere.
 
 Inputs:
   --dbc DIR       3.3.5 DBFilesClient (light.dbc, lightparams.dbc,
                   lightintband.dbc, lightfloatband.dbc)
-  --enhanced DIR   Enhanced 1.60.1 Light.csv, LightData.csv, ZoneLight.csv and
+  --reference DIR reference client 1.60.1 Light.csv, LightData.csv, ZoneLight.csv and
                   ZoneLightPoint.csv (wago.tools exports)
   --out FILE      the table to write (omit to only print the report)
 
 Example:
-  tools/enhanced_light_gen.py --dbc <data>/dbfilesclient --enhanced <csv dir> \\
-      --out <data>/override/wowee/enhanced_lights.bin
+  tools/enhanced_lighting_gen.py --dbc <data>/dbfilesclient --reference <csv dir> \\
+      --out <data>/override/wowee/enhanced_lighting_table.bin
 
-Which Enhanced light a 3.3.5 light gets: the one that lights the same ground
-in Enhanced. Each 3.3.5 light on maps 0 and 1 is sampled on a 32 x 32 grid over
+Which reference light a 3.3.5 light gets: the one that lights the same ground
+in the reference client. Each 3.3.5 light on maps 0 and 1 is sampled on a 32 x 32 grid over
 its outer radius, each point weighted by the 3.3.5 light's own weight there;
-at each point Enhanced's lights are painted as the stock client paints them
-(the map default first - or, inside one of Enhanced's ZoneLight polygons,
+at each point the reference client's lights are painted as the stock client paints them
+(the map default first - or, inside one of the reference client's ZoneLight polygons,
 that zone's light - then the rest farthest first, each at its linear falloff
-weight, the nearest on top), and each Enhanced light's share of the final mix
-is summed. The Enhanced light with the largest share is the match. A 3.3.5
-map default takes Enhanced's map default; any other 3.3.5 light takes only a
-Enhanced light that holds at least half of its area - Enhanced's map default
-only if the 3.3.5 light is a 1.12 one (its id is in Enhanced too) that Enhanced
+weight, the nearest on top), and each reference light's share of the final mix
+is summed. The reference light with the largest share is the match. A 3.3.5
+map default takes the reference client's map default; any other 3.3.5 light takes only a
+reference light that holds at least half of its area - the reference client's map default
+only if the 3.3.5 light is a 1.12 one (its id is in the reference client too) that the reference client
 shrank or moved, leaving that ground to the default. Otherwise it has no
 match and Wowee keeps the averaged trend there.
 
@@ -44,10 +44,10 @@ What is copied, per matched light and slot (clear and storm):
   and the floats in LightFloatBand order: 0 FogEnd, 1 FogScaler,
   2 SunFogAngle (celestial glow through), 3 CloudDensity. Same units as
   3.3.5 (FogEnd 18000 is Light 1's noon in both), times in half-minutes.
-A column a Enhanced profile leaves at zero on every key is one Enhanced does
+A column a reference profile leaves at zero on every key is one the reference client does
 not use (its water colours, the shadow grey, the second cloud layer); it is
 marked absent and Wowee keeps 3.3.5's band for it. A FogEnd of zero on a
-single key is a key without a fog end (Enhanced sets it on 277 of 1455 keys);
+single key is a key without a fog end (the reference client sets it on 277 of 1455 keys);
 those keys are left out of the fog end band.
 """
 
@@ -98,7 +98,7 @@ def wotlk_lights(dbc_dir):
     return lights
 
 
-def enhanced_lights(fdir):
+def reference_lights(fdir):
     lights = []
     for r in csv.DictReader(open(f"{fdir}/Light.csv")):
         m = int(r["ContinentID"])
@@ -114,7 +114,7 @@ def enhanced_lights(fdir):
 
 
 def zone_lights(fdir, flights):
-    """Enhanced's ZoneLight polygons on maps 0 and 1: inside one, its Light is
+    """The reference client's ZoneLight polygons on maps 0 and 1: inside one, its Light is
     the canvas instead of the map default. Those limited to a height band
     (only "EK High Light", z >= 50, whose light has the default's colours)
     are left out: the vote is in two dimensions."""
@@ -200,15 +200,15 @@ def match(w, flights, zones):
     share = acc[best] / total
     if share < 0.5:
         return None, share
-    # Enhanced's map default only for a 1.12 light Enhanced shrank or moved
+    # The reference client's map default only for a 1.12 light the reference client shrank or moved
     # away, leaving its ground to the default; a light 3.3.5 added has no
-    # Enhanced counterpart.
+    # reference counterpart.
     if best == fdef["id"] and not any(l["id"] == w["id"] for l in same_map):
         return None, share
     return next(l for l in same_map if l["id"] == best), share
 
 
-# Enhanced's global fog layer (docs/re/enhanced-lighting.md section 5b): the
+# The reference client's global fog layer (docs/re/enhanced-lighting.md section 5b): the
 # density per yard in LightParams field 031 where field 035 turns the layer
 # on. It scatters the light's fog colour (SkyFogColor, already channel 7).
 AIR_ON = "Field_1_60_1_69876_035"
@@ -223,7 +223,7 @@ def air_densities(fdir):
     return out
 
 
-def enhanced_profiles(fdir, wanted):
+def reference_profiles(fdir, wanted):
     density = air_densities(fdir)
     keys = {}
     for r in csv.DictReader(open(f"{fdir}/LightData.csv")):
@@ -282,9 +282,9 @@ def percentile(xs, p):
 
 
 def bound_ambient(profiles):
-    """Keep every key's ambient within what Enhanced's zones use at that hour.
+    """Keep every key's ambient within what the reference client's zones use at that hour.
 
-    Enhanced runs a linear-light pipeline and scales its colours by
+    The reference client runs a linear-light pipeline and scales its colours by
     intensities this data does not explain; a few profiles carry ambients far
     outside the rest (Mulgore's LightParams 7567: #bae6ff by day, #cb84ff at
     19:30, #1d9eff at night) that on 3.3.5's clamped 8-bit lighting read as a
@@ -318,7 +318,7 @@ def bound_ambient(profiles):
     return changed
 
 
-# The file: little-endian 32-bit words (see include/rendering/enhanced_lights.hpp).
+# The file: little-endian 32-bit words (see include/rendering/enhanced_lighting_table.hpp).
 MAGIC = b"WFL2"
 
 
@@ -346,13 +346,13 @@ def write_table(path, order, profiles, links):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dbc", required=True)
-    ap.add_argument("--enhanced", required=True)
+    ap.add_argument("--reference", required=True)
     ap.add_argument("--out")
     a = ap.parse_args()
 
     wl = wotlk_lights(a.dbc)
-    fl = enhanced_lights(a.enhanced)
-    zones = zone_lights(a.enhanced, fl)
+    fl = reference_lights(a.reference)
+    zones = zone_lights(a.reference, fl)
     links, report = [], []
     for w in sorted(wl, key=lambda l: l["id"]):
         f, share = match(w, fl, zones)
@@ -362,17 +362,17 @@ def main():
         for slot, fparams in f["slots"].items():
             if fparams:
                 links.append((w["id"], slot, fparams))
-        tag = "" if f["id"] == w["id"] else f"  <- Enhanced light {f['id']}"
-        report.append(f"  {w['id']:5d} map {w['map']}: Enhanced {f['id']} share {share:.2f}{tag}")
+        tag = "" if f["id"] == w["id"] else f"  <- reference light {f['id']}"
+        report.append(f"  {w['id']:5d} map {w['map']}: the reference client {f['id']} share {share:.2f}{tag}")
 
-    profiles = enhanced_profiles(a.enhanced, {p for _, _, p in links})
+    profiles = reference_profiles(a.reference, {p for _, _, p in links})
     links = [l for l in links if l[2] in profiles and profiles[l[2]]["keys"]]
     order = sorted(profiles)
     bounded = bound_ambient(profiles)
 
     matched = len({l[0] for l in links})
     print(f"{matched} of {len(wl)} 3.3.5 lights on maps 0 and 1 matched; "
-          f"{len(links)} slots, {len(order)} Enhanced profiles, "
+          f"{len(links)} slots, {len(order)} reference profiles, "
           f"{sum(len(profiles[p]['keys']) for p in order)} keys; "
           f"{len(bounded)} ambient keys bounded")
     print("\n".join(report))

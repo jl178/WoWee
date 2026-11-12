@@ -82,7 +82,7 @@ None of this is interesting, and all of it is real.
 |---|---|---|
 | Split ADTs: `_tex0`, `_obj1`, `_tex1` | `src/rendering/terrain_manager.cpp:426`, `src/core/world_loader.cpp:1337` | Only `_obj0` is read today, and through the same monolithic `ADTLoader::load`. Cata splits terrain properly, so the loader has to learn that a tile is several files with different chunk sets |
 | New ADT chunks | `src/pipeline/adt_loader.cpp:61-80` (top level), `:363-408` (MCNK sub-chunks) | Reads MTEX, MMDX, MWMO, MDDF, MODF, MH2O, MCNK, and MCVT/MCNR/MCLY/MCAL/MCLQ under it. MCCV, MTXP and MAMP are absent |
-| Re-derive 40 DBC layouts for 4.3.4 columns | `Data/expansions/cata/dbc_layouts.json` | Tedious and unavoidable. See `dbc_layout_traps`: a named index is not a checked one, and a wrong column reads as zero forever |
+| Re-derive 40 DBC layouts for 4.3.4 columns | `Data/expansions/cata/dbc_layouts.json` | Tedious and unavoidable. See `dbc_layout_traps`: a named index is not a checked one, and a wrong column reads as zero indefinitely |
 | A WDB2 reader | `src/pipeline/dbc_loader.cpp:61` rejects anything whose magic is not `WDBC` | 4.3.4 moved `Item` and `Item-sparse` to `.db2`. WDB2 is a fixed-width format with a larger header, so this is small |
 | `update_fields.json` for 4.3.4 | data only | 79 keys to re-derive |
 | Extractor archive list | `tools/asset_extract/extractor.cpp:487` | 4.3.4's patch chain is not the `patch-N` scheme the other three use. The base and locale archives and their update chain have to be enumerated and ordered |

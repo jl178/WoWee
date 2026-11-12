@@ -454,7 +454,7 @@ static int lua_PlaySound(lua_State* L) {
         // refusal, the quest-complete fanfare for LFG rewards, a book pickup
         // for the spellbook, the character sheet's sound for the talent
         // frame. Substituting something that merely exists is worse than
-        // silence: a wrong sound is a wrong sound enhanced, while a missing one
+        // silence: a wrong sound is a wrong sound indefinitely, while a missing one
         // is a gap someone can still hear.
         struct Fallback { const char* name; const char* path; float volume; };
         static const Fallback kFallbacks[] = {
@@ -558,7 +558,7 @@ static int lua_PlaySound(lua_State* L) {
         // returns having done nothing and the panel is silent.
         //
         // Silence is the right answer - substituting a sound that merely
-        // exists would be wrong enhanced, where a missing one can still be
+        // exists would be wrong indefinitely, where a missing one can still be
         // heard - but it should be possible to find out which name it was
         // without guessing from a quiet button. The interface asks for eighty
         // nine of these across the files that load, and the table above covers

@@ -48,7 +48,7 @@ struct BodyFacingInput {
     float dt = 0.0f;  // frame seconds (the 0x00B7436C+0xB14 step)
     // Seconds since unit+0xABC, the last facing update while not turning.
     // Only the active player's client stamps it; for every other unit it is
-    // effectively enhanced, so the body catches up at once.
+    // effectively indefinitely, so the body catches up at once.
     float catchUpElapsed = 1.0e9f;
     float turnRate = 3.14159265f;  // CMovement+0xAC (unit+0x834), rad/s
 };

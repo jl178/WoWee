@@ -96,47 +96,47 @@ constexpr rendering::Enhancements presetEnhancements(int level /* 0 Low .. 3 Ult
     return e;
 }
 
-/// The Enhanced look: Ultra plus what the reference client (1.60.1) draws that the
-/// ladder leaves out, at Enhanced's own values where they are known
+/// The enhanced look: Ultra plus what the reference client (1.60.1) draws that the
+/// ladder leaves out, at the reference client's own values where they are known
 /// (docs/re/enhanced-lighting.md section 8). Its ambient occlusion (ASSAO,
 /// SSAOSettings 116), its noon colour grade and its daylight are rows of
 /// their own; its "Compute Effects 3" volumetric fog is the light volume
 /// at the stock mist; its
 /// "Depth Based Opacity" is the soft particles; its PBR water and screen-space
 /// reflections are the HD water and the sky in it.
-constexpr rendering::Enhancements enhancedEnhancements() {
+constexpr rendering::Enhancements enhancedLookEnhancements() {
     rendering::Enhancements e = presetEnhancements(3);
     // Ambient occlusion stays off: the screen-space version darkens rims
     // around everything (Jered, 2026-11-09); on again only once it is subtle
-    // and clean against Enhanced's captures.
+    // and clean against the reference captures.
     e.colorGrade = true;
     e.enhancedDaylight = true;
     e.fillLight = true;
     e.sunHaze = true;
     e.bloom = 0.6f;
     e.longView = true;
-    // Enhanced's distance: full detail to its 1900-yard horizonStart (the
+    // The reference client's distance: full detail to its 1900-yard horizonStart (the
     // view distance below), the far field to its 7000-yard horizonClip.
     e.farField = true;
-    // Enhanced's linear HDR light (its `linear` CVar, RGBA16F): the scene in
+    // The reference client's linear HDR light (its `linear` CVar, RGBA16F): the scene in
     // 16-bit float, tone mapped, the sun 1.25x by day and the lit shaders'
     // clamp at 1 lifted, so sunlit faces keep their hue and highlights glow
     // instead of clipping (enhanced_tonemap.hpp; ~+1 ms GPU at 1280x540).
     e.hdrScene = true;
-    // Sunlight through the leaves toward a low sun (m2.frag; Enhanced's mesh
+    // Sunlight through the leaves toward a low sun (m2.frag; the reference client's mesh
     // shader back light with a forward lobe), in the shadow already read.
     e.leafLight = true;
-    // Enhanced's probe GI, by place (bounce_grid.hpp): the shade under the
+    // The reference client's probe GI, by place (bounce_grid.hpp): the shade under the
     // trees green and dimmer, beside sunlit ground and walls warm.
     e.bounceLight = true;
-    // The shade by the sky each point sees (sky_height_field.hpp): Enhanced's
+    // The shade by the sky each point sees (sky_height_field.hpp): the reference client's
     // terrain light, the ambient scaled by the open sky and a fill in open
     // shade (docs/re/enhanced-lighting.md 6e).
     e.skyShade = true;
-    // Enhanced's cascaded sun shadows (shadowNumCascades 3, 2048): crisp
+    // The reference client's cascaded sun shadows (shadowNumCascades 3, 2048): crisp
     // near the player, leaves cut out, clutter shaded (and casting near).
     e.enhancedShadows = true;
-    // Enhanced's ground is covered where 3.3.5's shows bare texture between
+    // The reference client's ground is covered where 3.3.5's shows bare texture between
     // tufts. Its clutter data is 1.12's; the cover comes from its settings
     // (groundEffectDist 200) and models. Wowee's grass field stands in for
     // it, out to the same 200 yards, at the density and height the terrain
@@ -188,11 +188,11 @@ constexpr GraphicsPresetValues kGraphicsPresets[] = {
     /* High   */ {.viewDistance = 1600.0f, .shadowDistance = 350.0f, .antiAliasing = 2, .fxaa = false, .groundClutter = 100, .enh = presetEnhancements(2)},
     /* Ultra  */ {.viewDistance = 2400.0f, .shadowDistance = 500.0f, .antiAliasing = 3, .fxaa = false, .groundClutter = 150, .enh = presetEnhancements(3)},
     /* Classic */ {.viewDistance = kDefaultViewDistance, .shadowDistance = 350.0f, .antiAliasing = 2, .fxaa = false, .groundClutter = 100, .enh = rendering::Enhancements{}},
-    // Enhanced: Ultra's shadows and clutter, Enhanced's 1900-yard detailed
+    // Enhanced: Ultra's shadows and clutter, the reference client's 1900-yard detailed
     // range (horizonStart; the far field carries on), and FXAA in place of
-    // multisampling, as Enhanced's own edge filter (CMAA2) is a post pass -
+    // multisampling, as the reference client's own edge filter (CMAA2) is a post pass -
     // which also leaves a one-sample depth for the occlusion pass to read.
-    /* Enhanced */ {.viewDistance = 1900.0f, .shadowDistance = 500.0f, .antiAliasing = 0, .fxaa = true, .groundClutter = 150, .enh = enhancedEnhancements()},
+    /* Enhanced */ {.viewDistance = 1900.0f, .shadowDistance = 500.0f, .antiAliasing = 0, .fxaa = true, .groundClutter = 150, .enh = enhancedLookEnhancements()},
 };
 
 /// The number of presets, not counting Custom - which is not a set of values
@@ -203,7 +203,7 @@ inline constexpr int kGraphicsPresetCount =
 /// Classic's row. The ones before it are the Low-to-Ultra ladder, each asking
 /// for more than the last; Classic stands beside it, and Enhanced after it.
 inline constexpr int kClassicPresetIndex = 4;
-/// The Enhanced look's row: the whole set of Enhanced-matched enhancements.
+/// The enhanced look's row: the whole set of reference-matched enhancements.
 inline constexpr int kEnhancedPresetIndex = 5;
 static_assert(kEnhancedPresetIndex == kGraphicsPresetCount - 1, "Enhanced is the last row");
 

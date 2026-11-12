@@ -34,18 +34,18 @@ layout(push_constant) uniform PC {
     float glowAmount;   // LightParams.Glow: the blur, squared, added at this strength
     float glowBlend;    // how far the picture is swapped for its blur (water, drink)
     float glowSource;   // 1 when uGlow holds this frame's boxed-down scene
-    float gradeWeight;  // Enhanced's colour grade (enhanced_grade.hpp): 0 = off
+    float gradeWeight;  // the reference client's colour grade (enhanced_grade.hpp): 0 = off
     float netherFade;   // ScreenEffect type 2: ffxnethercombine's c0.w, 0 = off
     float waveOn;       // 1 under liquid: the glow's last pass is ffxglowwave
     float waveU;        // the wave map's scroll, (t mod 3.174 s) / 3.174
     float waveV;        //                        (t mod 2.805 s) / 2.805
     float effectTime;   // seconds, for the nether blur's moving taps
     float gradeCurve;   // 0 the Eastern Kingdoms curve, 1 Kalimdor's
-    float bloom;        // Enhanced bloom (not stock): strength, 0 = off
+    float bloom;        // enhanced bloom (not stock): strength, 0 = off
     float hdr;          // 1 when uScene is the RGBA16F HDR scene (hdrScene row)
     float toneKnee;     // HDR: where the tone curve leaves the identity
     float hdrBloom;     // HDR: how much light above 1 the bloom spreads
-    float enhancedExposure;  // HDR + Enhanced daylight: the scene's light x this before
+    float enhancedExposure;  // HDR + enhanced daylight: the scene's light x this before
                             // the tone curve (enhanced_palette::kHdrExposure); 0 = off
     float enhancedSat;       // and the chroma scale below the shoulder (0 = off)
     vec4  enhancedShade;     // and the shade's: rgb the hue of the grey it keeps (the
@@ -79,7 +79,7 @@ float luma(vec3 c) {
 // scaled to the headroom left - slope 1 at the knee, 1 approached and never
 // reached, so a highlight keeps its hue and gradient instead of clipping.
 // Per channel: the brightest channel saturates first and a hot highlight
-// bleaches toward white, as film and Enhanced's sun do.
+// bleaches toward white, as film and the reference client's sun do.
 //
 // k + (1 - k) u / (1 + u) with u = (x - k) / (1 - k) is k + d h / (h + d),
 // d = x - k and h = 1 - k: written that way it is one division and no
@@ -279,7 +279,7 @@ vec3 highlightRollOff(vec3 x) {
     return mix(x, knee + (1.0 - knee) * s, greaterThan(x, vec3(knee)));
 }
 
-// the reference client's daytime colour grade (not stock; enhanced_grade.hpp has the
+// The reference client's daytime colour grade (not stock; enhanced_grade.hpp has the
 // values and where they come from): one curve per channel, read from its LUTs
 // 8286666 (Eastern Kingdoms) and 8286665 (Kalimdor), over the finished
 // picture clamped to 0..1 as ffxcolorgrading.bls reads it. The weight is the
@@ -340,7 +340,7 @@ float gradeKal(float x) {
 }
 
 vec3 enhancedGrade(vec3 c) {
-    // Mid-tones only. Enhanced's curve lifts the upper mid-tones most (0.77 ->
+    // Mid-tones only. The reference client's curve lifts the upper mid-tones most (0.77 ->
     // 0.89) of a tone-mapped picture whose highlights are already rolled
     // off; here the sunlit ground and leaves sit at 0.7-0.9 and the lift
     // drove them to white. Fades out from 0.6 to 0.9 of the brightest
@@ -358,7 +358,7 @@ vec3 enhancedGrade(vec3 c) {
     return mix(c, g, w);
 }
 
-// Bloom (not stock; the Enhanced preset's "Bloom Intensity", which Enhanced
+// Bloom (not stock; the Enhanced preset's "Bloom Intensity", which the reference client
 // ships at its maximum): what is brighter than kBloomKnee in a wide tent of
 // the quarter-size scene (nine bilinear taps four texels apart), spread a
 // few dozen pixels and added on. The stock
@@ -446,7 +446,7 @@ vec3 stockScreenEffect(vec3 c, vec2 uv) {
         // each at 1, and their bloom grew into a large halo round the player.
         // Held, a bright effect keeps a small, tight glow at most.
         vec3 lin = displayToHdr(c) + (r - c) + min(hdr * (pc.bloom * pc.hdrBloom), vec3(kHdrBloomMax));
-        // Enhanced's lift of the lit mid-tones: its sunlit ground reads
+        // The reference client's lift of the lit mid-tones: its sunlit ground reads
         // brighter against the same shade (lit/shade 2.1-2.3 at Goldshire
         // 9:22). A band from 0.2 to 0.8 of the light's luminance - the shade
         // keeps its depth and the top its value, so a sunlit Barrens road
@@ -466,25 +466,25 @@ vec3 stockScreenEffect(vec3 c, vec2 uv) {
         // saturated sky keeps its full chroma up to the top (Duskwood's
         // noon cyan). A highlight's colour eases toward its grey instead,
         // as a film shoulder does, by how far into the shoulder it is.
-        // And Enhanced's palette: its sunlit ground and fences warm and
+        // And the reference client's palette: its sunlit ground and fences warm and
         // saturated (Goldshire 9:22), its shade a deeper, near-neutral green -
         // more chroma on lit surfaces, easing to less at the very top.
         if (pc.enhancedSat > 0.0) {
             float top = max(r.r, max(r.g, r.b));
             float y = dot(r, vec3(0.2126, 0.7152, 0.0722));
-            // Lit surfaces only: Enhanced's shade is a near-neutral green
+            // Lit surfaces only: the reference client's shade is a near-neutral green
             // (chroma 0.46-0.57) under its saturated sunlit ground (0.62-0.65).
             float k = mix(1.0, pc.enhancedSat, smoothstep(0.25, 0.45, y));
             // And the shade less (enhanced_palette::kHdrShadeChroma): 3.3.5's
             // leaf, grass and dirt textures carry almost no blue, so under a
             // sky-blue ambient the shade stays a saturated yellow-green
-            // (shade b/luminance 0.41-0.52) where Enhanced's, under the same
+            // (shade b/luminance 0.41-0.52) where the reference client's, under the same
             // light data, is a near-neutral warm grey (0.71-0.73). By day,
             // outdoors; full below 0.18 luminance, none from 0.38, and only
             // where the shade is warm (blue short of red and green): a shade
             // that already has its blue - Duskwood's teal - keeps its colour.
             // The grey it keeps is cooler: the ambient's blue against its red
-            // and green (enhanced_palette::shadeTint) - Enhanced's sky light.
+            // and green (enhanced_palette::shadeTint) - the reference client's sky light.
             float shadeW = (1.0 - smoothstep(0.18, 0.38, y)) *
                            smoothstep(0.0, 0.1, 0.5 * (r.r + r.g) - r.b);
             k *= mix(1.0, pc.enhancedShade.a, shadeW);
@@ -498,7 +498,7 @@ vec3 stockScreenEffect(vec3 c, vec2 uv) {
         r = highlightRollOff(r);
     }
     if (pc.gradeWeight > 0.0) r = enhancedGrade(r);
-    // Dithered before the 8-bit write (the Enhanced rows only): the tone
+    // Dithered before the 8-bit write (the enhanced rows only): the tone
     // curve's shoulder and the grade spread a sky's smooth gradient over a
     // few levels, which showed as rings round the sun. A triangular dither
     // of one level, from interleaved gradient noise, breaks the steps up.

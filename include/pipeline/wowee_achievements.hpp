@@ -76,7 +76,7 @@ struct WoweeAchievement {
         ServerFirst       = 0x02,    // first-on-server rewards a global tag
         RealmFirst        = 0x04,
         Tracking          = 0x08,    // shows progress UI in the panel
-        Counter           = 0x10,    // counts up forever (Pet Battles wins)
+        Counter           = 0x10,    // counts up indefinitely (Pet Battles wins)
         Account           = 0x20,    // account-wide, not per-character
     };
 

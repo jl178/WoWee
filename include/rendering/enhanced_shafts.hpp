@@ -1,12 +1,12 @@
 #pragma once
 
-// Enhanced's canopy shafts: beams of sunlit (or moonlit) air from the gaps in
+// The reference client's canopy shafts: beams of sunlit (or moonlit) air from the gaps in
 // a canopy down to the ground, bright against the shaded air beside them
 // (docs/re/enhanced-lighting.md section 5c). The froxel mist ("Light shafts")
-// already reads the shadow map once per cell; under Enhanced's light a lit
+// already reads the shadow map once per cell; under the enhanced light a lit
 // cell with shade round it scatters this much more (VolumetricFog::
 // FrameInputs::shaftStrength, volumetric_fog_inject.comp.glsl). Nothing
-// changes in the open, and with Enhanced's light off the mist is stock.
+// changes in the open, and with the reference client's light off the mist is stock.
 
 #include <cstdlib>
 
@@ -16,8 +16,8 @@ namespace enhanced_shafts {
 
 /// How much more a sunlit cell beside shade scatters, against the mist's own
 /// sun scatter (0.8). 9 laid a gold veil over Goldshire's crowns facing the
-/// 9:22 sun (top third saturation 0.46 against Enhanced's 0.36); at 3.5, with
-/// the beams paler by day, it is 0.38 and the 15:23 gold still Enhanced's.
+/// 9:22 sun (top third saturation 0.46 against the reference client's 0.36); at 3.5, with
+/// the beams paler by day, it is 0.38 and the 15:23 gold still the reference client's.
 inline constexpr float kStrength = 3.5f;
 
 /// The moonlight's shafts against the sun's, before its own (dim, blue)

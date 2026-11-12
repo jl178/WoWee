@@ -362,7 +362,7 @@ bool Renderer::createPerFrameResources() {
     bindings[5].descriptorCount = 1;
     bindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     bindings[5].pImmutableSamplers = &shadowSampler;
-    // The detail map of Enhanced's sun shadows (shadow_filter.glsli), compared
+    // The detail map of the reference client's sun shadows (shadow_filter.glsli), compared
     // like binding 1; the unit map's view until it exists (bindDetailShadowMap).
     bindings[6].binding = 6;
     bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -695,12 +695,12 @@ void Renderer::updatePerFrameUBO() {
         currentFrameData.lightColor = glm::vec4(lp.diffuseColor * lp.sunScale, unitIndoorAmbient.g);
         currentFrameData.ambientColor = glm::vec4(lp.ambientColor, unitIndoorAmbient.b);
         // The HDR scene's sun is brighter by day (enhanced_tonemap::kSunLight,
-        // Enhanced's F052), on everything the sun lights; the tone map takes
+        // the reference client's F052), on everything the sun lights; the tone map takes
         // what passes 1. Nothing at night, nothing without the HDR scene.
         // The stock light itself stays 20-37 degrees up all night, so the
         // sun sprite's height (sunDir, toward the sun) says whether it is day.
-        // Only where Enhanced's daylight is (its row on, maps 0 and 1): the 2x
-        // was set with Enhanced's sun table, its flat-ground irradiance scale
+        // Only where enhanced daylight is (its row on, maps 0 and 1): the 2x
+        // was set with the reference client's sun table, its flat-ground irradiance scale
         // and the softer 0.5 knee, none of which run elsewhere. On Outland's
         // and Northrend's light, under the 0.8 knee, it only brightened and
         // saturated the picture (Hellfire's noon ground 0.27 -> 0.44 mean
@@ -738,7 +738,7 @@ void Renderer::updatePerFrameUBO() {
     } else {
         currentFrameData.nearShadowParams = glm::vec4(0.0f);
     }
-    // The detail map (Enhanced's sun shadows), when it serves this frame.
+    // The detail map (the reference client's sun shadows), when it serves this frame.
     if (shadowDetailReadable_ && shadowsEnabled && enh_.enhancedShadows) {
         currentFrameData.detailLightSpaceMatrix = shadowDetailProj_.matrix;
         currentFrameData.detailShadowParams = glm::vec4(
@@ -754,8 +754,8 @@ void Renderer::updatePerFrameUBO() {
     // yards, a tenth of that at 40 - so shortening the distance for sharper
     // shadows also all but erased them. The depth bias is the shaders' own,
     // from the surface's angle to the light and one texel of the map (z).
-    // Under Enhanced's daylight its own shadow opacity
-    // (enhanced_palette::shadowOpacity: held at 3.3.5's 0.3 for now, Enhanced's
+    // Under enhanced daylight its own shadow opacity
+    // (enhanced_palette::shadowOpacity: held at 3.3.5's 0.3 for now, the reference client's
     // measured 0.46 darkened the evening and forest views;
     // docs/re/enhanced-lighting.md 2e).
     const float skyShadowOpacity =
@@ -809,14 +809,14 @@ void Renderer::updatePerFrameUBO() {
     // The HDR scene's lifted light clamp goes with the target actually being
     // in RGBA16F, not with the row alone (it stands down under FSR).
     const uint32_t hdrLightBit = vkCtx && vkCtx->isHdrScene() ? enh_bits::kHdrLight : 0u;
-    // Enhanced's ambient goes with its daylight actually lighting the frame
+    // The reference client's ambient goes with its daylight actually lighting the frame
     // (maps 0 and 1, above water), not with the row alone.
     const uint32_t enhancedAmbientBit =
         lightingManager && lightingManager->isEnhancedActive() && enhanced_palette::ambientRampOn()
             ? enh_bits::kEnhancedAmbient
             : 0u;
     // The sky shade's ground light (terrain.frag) goes with its pass being
-    // the sky build this frame, under Enhanced's daylight.
+    // the sky build this frame, under the enhanced daylight.
     const uint32_t skyShadeBit = enhancedAmbientBit != 0u && skyFrame_ ? enh_bits::kSkyShade : 0u;
     currentFrameData.localLightMeta = glm::ivec4(
         static_cast<int32_t>(localLightCount), std::bit_cast<int32_t>(fogExponent),
@@ -1795,7 +1795,7 @@ void Renderer::setMsaaSamples(VkSampleCountFlagBits samples) {
     msaaChangePending_ = true;
 }
 
-// The "HDR lighting (the reference client)" row: the scene in RGBA16F. Only with the
+// The "HDR lighting (enhanced)" row: the scene in RGBA16F. Only with the
 // post-process pass as the way to the screen and neither upscaler (their
 // scene targets are made in the swapchain's format), and given up for the
 // session if its target could not be made. A change is queued on the MSAA
@@ -4175,7 +4175,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             // enhancement Wowee's own blur stands in for it, as before.
             stock_screen_fx::glowBlend(cameraUnderwater_, enh_.drunkWobble ? 0.0f : drunkLevel_));
         postProcessPipeline_->setUnderwaterWave(cameraUnderwater_);
-        // the reference client's colour grade: the noon keyframe's curve for this
+        // The reference client's colour grade: the noon keyframe's curve for this
         // continent, weighted by the hour, outdoors and above water only.
         const float* curve = enhanced_grade::curveForMap(static_cast<int>(lightMapId_));
         const float gradeWeight = (enh_.colorGrade && curve && !cameraUnderwater_)
@@ -4183,7 +4183,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                   (1.0f - glm::clamp(indoorFactor_, 0.0f, 1.0f))
             : 0.0f;
         postProcessPipeline_->setColorGrade(enh_.colorGrade, gradeWeight, curve == enhanced_grade::kKalimdor);
-        // Enhanced's exposure in the HDR scene's tone map, where its daylight
+        // The reference client's exposure in the HDR scene's tone map, where its daylight
         // is (enhanced_palette::kHdrExposure); outdoors and above water only.
         const bool enhancedTone = enh_.enhancedDaylight && !cameraUnderwater_ &&
                                  enhanced_palette::appliesToMap(lightMapId_);
@@ -4197,7 +4197,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
             glm::mix(1.0f, enhanced_palette::hdrShadeChroma(), shadeOn),
             enhanced_palette::shadeTint(tonelp.ambientColor, shadeOn),
             // The softer shoulder goes with the stronger sun: outdoors, by
-            // day, under Enhanced's daylight (enhanced_tonemap::kEnhancedKnee).
+            // day, under the enhanced daylight (enhanced_tonemap::kEnhancedKnee).
             enhancedTone ? glm::mix(enhanced_tonemap::tuning().knee, enhanced_tonemap::enhancedKnee(),
                                    outdoor * enhanced_palette::dayShare(tonelp.sunDir.z))
                         : 0.0f);
@@ -6894,7 +6894,7 @@ float Renderer::volumetricFogExtinction() const {
 namespace {
 void enhancedShaftInputs(const LightingManager* lightingManager, const Weather* weather,
                         float indoorFactor, VolumetricFog::FrameInputs& in) {
-    // Enhanced's canopy shafts (docs/re/enhanced-lighting.md 5c): under its
+    // The reference client's canopy shafts (docs/re/enhanced-lighting.md 5c): under its
     // light only (maps 0 and 1, above water), outdoors, and with the sky's
     // sun or moon showing through the cloud. Off, the mist is the stock one.
     if (!lightingManager || !lightingManager->isEnhancedActive()) return;
@@ -6975,7 +6975,7 @@ void Renderer::renderVolumetricFog() {
 }
 
 namespace {
-// The most the sun shafts add per channel under the Enhanced haze
+// The most the sun shafts add per channel under the enhanced haze
 // (SunShafts::FrameInputs::cap).
 constexpr float kEnhancedShaftCap = 0.3f;
 }  // namespace
@@ -7025,8 +7025,8 @@ void Renderer::recordSunShafts() {
             const float peak = std::max({c.r, c.g, c.b, 1e-3f});
             in.tint = glm::mix(glm::vec3(1.0f), c / peak, 0.5f);
             if (enh_.sunHaze) {
-                // With the Enhanced haze the rays keep more of the sun's gold, as
-                // Enhanced's do through the Goldshire canopy in the afternoon.
+                // With the enhanced haze the rays keep more of the sun's gold, as
+                // the reference client's do through the Goldshire canopy in the afternoon.
                 // Not stronger: 1.6x, then 1.25x, blew a sunlit trunk beside
                 // an off-screen sun toward white with the haze and the bloom
                 // on top of it. The haze's longer shadowed mist (800 yd)

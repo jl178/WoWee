@@ -1,33 +1,33 @@
 #pragma once
 
-/// the reference client's per-zone light keyframes, re-keyed to 3.3.5's Light.dbc: the
-/// "Daylight (the reference client)" row on maps 0 and 1 (docs/re/enhanced-lighting.md
+/// The reference client's per-zone light keyframes, re-keyed to 3.3.5's Light.dbc: the
+/// "Enhanced daylight" row on maps 0 and 1 (docs/re/enhanced-lighting.md
 /// section 2b).
 ///
 /// The table is Blizzard's data, converted, so it is not in the source tree.
-/// tools/enhanced_light_gen.py writes it from a 3.3.5 install and Enhanced's
+/// tools/enhanced_lighting_gen.py writes it from a 3.3.5 install and the reference client's
 /// DB2 exports to the client data's override folder, where LightingManager
-/// reads it as `wowee\enhanced_lights.bin`
-/// (<data>/override/wowee/enhanced_lights.bin). Without it the row uses the
+/// reads it as `wowee\enhanced_lighting_table.bin`
+/// (<data>/override/wowee/enhanced_lighting_table.bin). Without it the row uses the
 /// averaged trend (enhanced_palette.hpp) everywhere.
 ///
 /// Each link names a 3.3.5 light and one of its LightParams slots (clear or
 /// storm) and the profile that replaces that slot's bands: up to 16 keys
-/// (Enhanced has 12 a day), each with the 18 LightIntBand colours and the
+/// (the reference client has 12 a day), each with the 18 LightIntBand colours and the
 /// first four LightFloatBand values in 3.3.5's channel order and units. A
-/// channel whose bit is clear in a profile's mask is one Enhanced leaves
+/// channel whose bit is clear in a profile's mask is one the reference client leaves
 /// empty; 3.3.5's band stays. A fog end of 0 on a key means that key has
 /// none.
 ///
 /// File layout, all little-endian 32-bit words:
 ///   "WFL2", keyCount, profileCount, linkCount
 ///   keyCount     x { time, color[18] (0x00RRGGBB), value[4] (float) }
-///   profileCount x { enhancedParamsId, firstKey, keyCount, colorMask, floatMask,
+///   profileCount x { referenceParamsId, firstKey, keyCount, colorMask, floatMask,
 ///                    airDensity (float) }
 ///   linkCount    x { lightId, slot, profile }
 /// "WFL1" is the same without airDensity (no air: 0).
 ///
-/// The air is Enhanced's global fog layer (docs/re/enhanced-lighting.md
+/// The air is the reference client's global fog layer (docs/re/enhanced-lighting.md
 /// section 5b): its density per yard is LightParams field 031 where the
 /// profile turns the layer on (field 035).
 /// No renderer includes.
@@ -39,14 +39,14 @@
 
 namespace wowee {
 namespace rendering {
-namespace enhanced_lights {
+namespace enhanced_lighting_table {
 
 inline constexpr uint32_t kColorChannels = 18;
 inline constexpr uint32_t kFloatChannels = 4;  ///< fog end, fog scaler, glow through, cloud density
 inline constexpr uint32_t kMaxKeys = 16;       ///< a ColorBand's capacity
-inline constexpr const char* kFileName = "wowee\\enhanced_lights.bin";
+inline constexpr const char* kFileName = "wowee\\enhanced_lighting_table.bin";
 
-/// Enhanced's sky colours carry an exposure its linear pipeline takes back.
+/// The reference client's sky colours carry an exposure its linear pipeline takes back.
 /// Over every linked light, 8:00 to 17:00, the sky bands' luminance against
 /// 3.3.5's for the same light is x1.26-1.30 (SkyMiddle 1.26, Band1 1.30,
 /// Band2 1.29, Smog 1.29, Fog 1.29, CloudSun 1.27, cloud layer 1.29; median
@@ -62,7 +62,7 @@ inline constexpr float kSkyExposure = 1.3f;
 /// CloudSun (10) and the first cloud layer (11).
 inline constexpr bool isSkyChannel(uint32_t c) { return (c >= 2 && c <= 7) || c == 10 || c == 11; }
 
-/// A 0x00RRGGBB colour with Enhanced's sky exposure taken out.
+/// A 0x00RRGGBB colour with the reference client's sky exposure taken out.
 inline constexpr uint32_t withoutSkyExposure(uint32_t rgb) {
     uint32_t out = 0;
     for (uint32_t shift = 0; shift <= 16; shift += 8) {
@@ -79,11 +79,11 @@ struct Key {
 };
 
 struct Profile {
-    uint32_t enhancedParamsId = 0;  ///< Enhanced's LightParams id, for logs
+    uint32_t referenceParamsId = 0;  ///< the reference client's LightParams id, for logs
     uint32_t firstKey = 0;         ///< into Table::keys
     uint32_t keyCount = 0;
-    uint32_t colorMask = 0;        ///< bit c: Enhanced authors colour channel c
-    uint32_t floatMask = 0;        ///< bit f: Enhanced authors float channel f
+    uint32_t colorMask = 0;        ///< bit c: the reference client authors colour channel c
+    uint32_t floatMask = 0;        ///< bit f: the reference client authors float channel f
     float airDensity = 0.0f;       ///< the global fog layer's density per yard, 0 = off
 };
 
@@ -135,7 +135,7 @@ inline bool parse(const std::vector<uint8_t>& data, Table& out) {
     }
     t.profiles.resize(nProfiles);
     for (Profile& p : t.profiles) {
-        word(p.enhancedParamsId);
+        word(p.referenceParamsId);
         word(p.firstKey);
         word(p.keyCount);
         word(p.colorMask);
@@ -165,6 +165,6 @@ inline bool parse(const std::vector<uint8_t>& data, Table& out) {
     return true;
 }
 
-}  // namespace enhanced_lights
+}  // namespace enhanced_lighting_table
 }  // namespace rendering
 }  // namespace wowee

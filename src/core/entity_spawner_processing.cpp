@@ -113,7 +113,7 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
             // The replacement request is already queued; never instantiate stale
             // geometry (notably the lumberjack's log-carrying model while chopping).
             // Release the pending marker unless a replacement queue entry still
-            // holds it - a stranded marker blocks the resync sweep enhanced.
+            // holds it - a stranded marker blocks the resync sweep indefinitely.
             erasePendingGuidIfUnqueued(result.guid);
             continue;
         }
@@ -1093,7 +1093,7 @@ void EntitySpawner::finishWmoSpawn(const PreparedGameObjectWMO& result, uint32_t
     // The synchronous WMO path notifies TransportManager after creating the
     // render instance. Do the same here: unique/uncached transport WMOs (notably
     // the Kraken icebreaker) otherwise become visible but remain unregistered
-    // and stationary enhanced.
+    // and stationary indefinitely.
     if (gameHandler_ && gameHandler_->isTransportGuid(result.guid)) {
         gameHandler_->notifyTransportSpawned(
             result.guid, result.entry, result.displayId,

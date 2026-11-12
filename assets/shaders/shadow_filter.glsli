@@ -16,7 +16,7 @@
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
 layout(set = 0, binding = 5) uniform sampler2DShadow uNearShadowMap;
-// The detail map of Enhanced's sun shadows (shadow_cache.hpp): the world's
+// The detail map of the reference client's sun shadows (shadow_cache.hpp): the world's
 // casters over a short square round the player at a fine texel. Read only
 // while detailShadowParams.x is set.
 layout(set = 0, binding = 6) uniform sampler2DShadow uDetailShadowMap;
@@ -88,7 +88,7 @@ float shadowReceiverOffset(vec3 norm, vec3 ldir) {
 
 // The detail map at `pos`: its shadow, and in `w` how much of the answer it
 // gives - 1 well inside its square, easing to 0 over the outer tenth (the
-// world map takes over there, as Enhanced blends its cascades), 0 outside.
+// world map takes over there, as the reference client blends its cascades), 0 outside.
 // `spread` is the filter's half-width in texels: four bilinear compares at
 // the corners of a square that wide, from half a texel at the camera (a
 // hard edge, the dapples of cut-out leaves kept) to a texel and a half where
@@ -192,7 +192,7 @@ float sunShadow(vec3 pos, vec3 norm, vec3 ldir) {
 // small on screen - the grass field's blades (grass.frag), lit from straight
 // up as the ground under them is: the detail map where it covers the blade,
 // else the world map, and the unit map where its mask says a unit's shade
-// can fall. the reference client's clutter takes its shadow so: one SampleCmp on the
+// can fall. The reference client's clutter takes its shadow so: one SampleCmp on the
 // cascade (detaildoodad.bls).
 float sunShadowCheap(vec3 pos, vec3 ldir) {
     // Lifted off the ground it stands on by the world map's rule for an

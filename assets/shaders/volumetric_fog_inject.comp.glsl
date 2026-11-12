@@ -53,7 +53,7 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 drift;          // xyz = how far the mist has blown, w = noise amount
     vec4 jitter;         // xyz = sample point inside the cell, w = history weight
     ivec4 dims;          // xyz = size, w = 0 every cell lit, 1 or 2 only odd or even slices
-    vec4 shafts;         // Enhanced's canopy shafts: x = strength (0 = stock), y = how far it
+    vec4 shafts;         // the reference client's canopy shafts: x = strength (0 = stock), y = how far it
                          // is night (the moonlight's share), z = probe radius in yards,
                          // w = 1 / the yards over which they fade out with distance
 } vol;
@@ -291,10 +291,10 @@ void main() {
     vec3 travel = normalize(lightDir.xyz);
     float sunUp = smoothstep(0.0, 0.08, -travel.z);
     vec3 toCamera = normalize(vol.rayOrigin.xyz - p);
-    // Under Enhanced's daylight (localLightMeta.z bit 128) the light comes
+    // Under enhanced daylight (localLightMeta.z bit 128) the light comes
     // from the sun's disc itself (enhanced_palette::sunLightDirection), so the
     // forward lobe sits on it: tighter and with less even scattering, the
-    // bright air round the disc falls off as quickly as round Enhanced's sun
+    // bright air round the disc falls off as quickly as round the reference client's sun
     // (docs/re/enhanced-lighting.md 2e). Elsewhere the stock light stays
     // beside the sun and keeps the wider lobe.
     bool enhancedSun = (localLightMeta.z & 128) != 0;
@@ -303,7 +303,7 @@ void main() {
                              : mix(1.0, phaseHG(cosSun, 0.75), 0.65);
     // And within about 20 degrees of the disc the lobe gives way to even
     // scattering, softly (from 25 degrees to 5): the air right round
-    // Enhanced's sun is no brighter than its sky (enhanced_02's ring falls to
+    // the reference client's sun is no brighter than its sky (reference_02's ring falls to
     // half within 4 degrees), where the lobe laid a wide near-white disc.
     //
     // At every height of the sun: a sun just over the horizon looks along
@@ -323,7 +323,7 @@ void main() {
     float lit = (sunUp > 0.0 || vol.shafts.x > 0.0) ? sunVisibility(p) : 0.0;
     if (vol.shafts.x > 0.0) imageStore(uVisibilityOut, cell, vec4(lit));
     if (sunUp > 0.0) {
-        // Under Enhanced's light the mist's own sunlight (not the canopy
+        // Under the enhanced light the mist's own sunlight (not the canopy
         // shafts below) fades in from the camera: 30% at 4 yards, full by
         // 40. The near air's sunlit veil over everything in front of the
         // camera eased the evening and forest views and the crowns' chroma
@@ -332,7 +332,7 @@ void main() {
         light += lightColor.rgb * (lit * phase * sunUp * vol.lighting.x * nearSun);
     }
 
-    // Enhanced's canopy shafts (vol.shafts.x > 0 only under Enhanced's light,
+    // The reference client's canopy shafts (vol.shafts.x > 0 only under the enhanced light,
     // outdoors; docs/re/enhanced-lighting.md 5c). Its froxel fog reads the
     // sun's cascades per cell as this one does, but under a forest the beams
     // stand out bright against dark air from well off the sun. Here a lit
@@ -362,9 +362,9 @@ void main() {
             float day = sunUp * (1.0 - vol.shafts.y);
             float weight = day + vol.shafts.y;
             // Pale: a beam reads as the light's hue thinned toward white, as
-            // Enhanced's do, not as a column of its full colour. By day most of
+            // the reference client's do, not as a column of its full colour. By day most of
             // the way: the morning sun's gold laid over Goldshire's crowns
-            // turned their green to gold (top third hue 43 against Enhanced's
+            // turned their green to gold (top third hue 43 against the reference client's
             // 57). The moonbeams keep more of the night's blue.
             float thin = mix(0.35, 0.7, 1.0 - vol.shafts.y);
             vec3 beam = mix(lightColor.rgb, vec3(dot(lightColor.rgb, vec3(0.2126, 0.7152, 0.0722))), thin);

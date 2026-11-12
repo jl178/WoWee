@@ -34,7 +34,7 @@ bool WoweeTerrain::exportOpen(const pipeline::ADTTerrain& terrain,
             const auto& chunk = terrain.chunks[ci];
             // Sanitize base + heights on save so a corrupt in-memory terrain
             // (e.g. mid-edit NaN spike) doesn't get persisted into the WHM
-            // and require the load-time guard to clean up forever after.
+            // and require the load-time guard to clean up ever after.
             float base = chunk.position[2];
             if (!std::isfinite(base)) base = 0.0f;
             f.write(reinterpret_cast<const char*>(&base), 4);

@@ -2138,7 +2138,7 @@ stock, the budget, and how to verify.
 ### E13. Ambient occlusion, ambient term only
 
 *Built (Nov 2026) in the reference client's form rather than as planned below:* the
-"Ambient occlusion" row, one full-screen pass with Enhanced's ASSAO settings
+"Ambient occlusion" row, one full-screen pass with the reference client's ASSAO settings
 (SSAOSettings 116: radius 1 yd, multiplier 3, power 3), taking only the
 ambient share of each pixel's light. Off by default and in every ladder
 preset; on in the Enhanced preset. See docs/re/enhanced-lighting.md section 4.
@@ -2797,49 +2797,49 @@ Done (2026-11-07): the row `hdwater`, "HD water" (the Sky page, after
 - **Cost.** About 0.9 ms of GPU in a 30-unit crowd, 0.15 ms main thread;
   see 3.20.
 
-### E36. Smoother animation changes (Enhanced)
+### E36. Smoother animation changes (enhanced)
 
 - **Stock.** A new sequence started while a cross-fade runs either keeps
   the fade's outgoing sequence and swaps the incoming one at once, or drops
   the outgoing one (0x826C40, `docs/re/animation.md`): a pop of up to half
   the pose, most often in a fight (a swing cut by a flinch, a parry, a cast
   or a run inside 150 ms).
-- **What.** Row `poseblend` (Combat page; the Motion page is full), Enhanced on, recommended on:
+- **What.** Row `poseblend` (Combat page; the Motion page is full), on in the reference client, recommended on:
   `CharacterRenderer::beginSequenceBlend` fades from the pose as last drawn
-  (`localPose`) when a fade is running. the reference client's engine stacks its
+  (`localPose`) when a fade is running. The reference client's engine stacks its
   fades in a blend tree (`docs/re/enhanced-combat.md` section 1); a
   snapshot is the one-slot form of it. BlendTime 0 still cuts.
 - **Off is stock.** The branch is skipped; 0x826C40's rule as before.
 - **Cost.** A copy of the bone poses per interrupted fade.
 
-### E37. Spell queue window (Enhanced)
+### E37. Spell queue window (enhanced)
 
 - **Stock.** No queue: a press during the GCD is refused with "Spell is not
   ready yet" and nothing is sent (`docs/re/input-timing.md`).
-- **What.** Row `spellqueue` (Combat page, 0-400 ms), Enhanced 400,
+- **What.** Row `spellqueue` (Combat page, 0-400 ms), 400 in the reference client,
   recommended 400: a press held only by the GCD or the spell's cooldown, or
   by a cast, with at most the window left, is kept and sent the moment it
-  can be (`SpellHandler::castSpell`, `updateTimers`). Enhanced's
+  can be (`SpellHandler::castSpell`, `updateTimers`). The reference client's
   `SpellQueueWindow` (`docs/re/enhanced-combat.md` section 3).
 - **Off is stock.** 0 reads the `SpellQueueWindow` CVar, default 0: refused.
 - **Cost.** None to measure.
 
-### E38. Swing timer (Enhanced)
+### E38. Swing timer (enhanced)
 
-- **Stock.** None. Enhanced has `Blizzard_SwingTimer` (Camelot only).
-- **What.** Row `swingtimer` (Combat page), Enhanced on, recommended on: a
+- **Stock.** None. The reference client has `Blizzard_SwingTimer` (Camelot only).
+- **What.** Row `swingtimer` (Combat page), on in the reference client, recommended on: a
   bar per weapon hand over the action bars in combat, filled from each of
   the player's swings to the next, dimmed and red-labelled out of reach
   between swings (`GameScreen::renderSwingTimer`, `CombatHandler::
-  getPlayerSwing`). Colours from Enhanced's atlas.
+  getPlayerSwing`). Colours from the reference client's atlas.
 - **Off is stock.** Nothing drawn; the swing times are kept either way.
 - **Cost.** Two ImGui rectangles and two labels in combat.
 
-### E39. Far field (the reference client)
+### E39. Far field (enhanced)
 
 - **Stock.** The WDL heights past the far clip, every pixel the fog colour
   (terrain.md section 8): right for a fog that ends at the far clip, a grey
-  cut-out under a fog that ends past it. Enhanced draws full detail to its
+  cut-out under a fog that ends past it. The reference client draws full detail to its
   `horizonStart` 1900 and a low-detail horizon to `horizonClip` 7000 under
   a fog that ends at 18000 (`docs/re/enhanced-lighting.md` section 1).
 - **What.** Row `farfield` (Enhanced page), Enhanced preset on, recommended
@@ -2873,16 +2873,16 @@ Done (2026-11-07): the row `hdwater`, "HD water" (the Sky page, after
     pipeline. 3.3.5 has no WMO LOD files; doodads stop at the view
     distance.
   - **Fog.** With the long view on, the fog ends at 18/7 of the far reach -
-    Enhanced's 18000 - instead of 18/7 of the view distance; the fog
+    the reference client's 18000 - instead of 18/7 of the view distance; the fog
     thickness option now keeps to the same limit instead of the view
     distance.
-  - **Preset.** Enhanced's view distance goes from 2400 to its 1900.
+  - **Preset.** The reference client's view distance goes from 2400 to its 1900.
 - **Off is stock.** The fog-coloured (or E11-lit) horizon; no atlas is
   built, the pipelines are not made, the WMO reach is 0, the load radius
   follows the view distance.
 - **What shows.** With 3.3.5's own light data most zones' fog ends well
   inside 1900 yd, so the far field is the fog colour there, as stock; it
-  shows where the fog is thin - with Enhanced's light data or a lower fog
+  shows where the fog is thin - with the reference client's light data or a lower fog
   thickness (shots at fog thickness 0.15: `farfield/shots/l3_thin_*`,
   `cmp_westfall_thin.png`).
 - **Cost (Nov 8, 1280x720, Enhanced preset, vsync).** Static A/B from 300 yd
@@ -2896,7 +2896,7 @@ Done (2026-11-07): the row `hdwater`, "HD water" (the Sky page, after
   from the far field. The horizon already drew to four far clips; the row
   changes its shading, not its triangles. Memory: the atlas (above) and
   the sixth ring of tiles. 7000 yd is kept: farther costs nothing more on
-  the GPU but runs past Enhanced's own clip.
+  the GPU but runs past the reference client's own clip.
 - **Gaps.** The minimap carries its own baked light and roofs; a lake or
   sea in the WDL is its bed, coloured by the minimap's water; no far
   doodads; `WOWEE_FARFIELD_GAIN` scales the colour for matching by eye.
@@ -2936,7 +2936,7 @@ Done (2026-11-07): the row `hdwater`, "HD water" (the Sky page, after
   toward the player changes how NPCs behave. Not proposed.
 - **Per-zone colour grading**: Light.dbc is the zone's grade. Any LUT is a
   second grade on top. Not proposed as a Wowee invention; the reference client's own
-  noon grade is now the "Colour grade (the reference client)" row, off by default and
+  noon grade is now the "Colour grade (enhanced)" row, off by default and
   on in the Enhanced preset (docs/re/enhanced-lighting.md section 3).
 - **Bloom beyond ffxGlow**: the stock glow chain is already done and
   data-driven per LightParams. Not proposed.

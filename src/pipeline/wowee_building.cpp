@@ -291,7 +291,7 @@ bool WoweeBuildingLoader::save(const WoweeBuilding& bld, const std::string& base
         // Sanitize vertices on the way out - same scrub the load side does.
         // Without this, a manually-constructed WoweeBuilding with NaN-laced
         // vertices would persist them into the file and have the load-time
-        // guard clean up enhanced after.
+        // guard clean up ever after.
         std::vector<WoweeBuilding::Vertex> sanVerts = grp.vertices;
         sanitizeVertices(sanVerts);
         f.write(reinterpret_cast<const char*>(sanVerts.data()),
@@ -624,7 +624,7 @@ WoweeBuilding WoweeBuildingLoader::fromWMO(const WMOModel& wmo, const std::strin
         dp.position = doodad.position;
         // Sanitize position before euler conversion. NaN in the source
         // quaternion would propagate to NaN euler angles and ruin the
-        // doodad transform enhanced after; same for the position floats.
+        // doodad transform ever after; same for the position floats.
         for (int k = 0; k < 3; k++)
             if (!std::isfinite(dp.position[k])) dp.position[k] = 0.0f;
         glm::quat q(doodad.rotation.w, doodad.rotation.x,

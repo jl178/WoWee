@@ -2672,7 +2672,7 @@ static uint32_t& pendingAbandonQuest() {
 /// failing outright.
 // Not static: the tooltip setters in lua_engine.cpp ask the same question, and
 // two copies of this would have to keep the same tab ordering and the same
-// row/column sort enhanced or the tooltip would describe a different talent from
+// row/column sort indefinitely or the tooltip would describe a different talent from
 // the one under the cursor. Declared in lua_api_helpers.hpp.
 
 const game::TalentEntry* talentAt(game::GameHandler* gh,

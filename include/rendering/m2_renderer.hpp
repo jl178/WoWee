@@ -883,7 +883,7 @@ public:
     /// The sky height field (sky_height_field.hpp) draws the static casters
     /// from above with this set, so they do not count as the world map's.
     void setShadowCountQuiet(bool quiet) { shadowCountQuiet_ = quiet; }
-    /// For the next renderShadow calls (the detail map of Enhanced's sun
+    /// For the next renderShadow calls (the detail map of the reference client's sun
     /// shadows, which is kept between frames): `still` draws the foliage
     /// without its wind, so a kept map holds the leaves where the next one
     /// will; `clutter`, when given, is ground clutter instance ids drawn as
@@ -1090,7 +1090,7 @@ public:
     /// True while the instance is still live in the renderer. Owners that cache
     /// instance IDs (game objects, transports) use this to notice an instance
     /// that was dropped underneath them - e.g. by a renderer-wide clear - and
-    /// respawn it instead of silently addressing a dead handle enhanced.
+    /// respawn it instead of silently addressing a dead handle indefinitely.
     [[nodiscard]] bool hasInstance(uint32_t instanceId) const {
         return instanceIndexById.find(instanceId) != instanceIndexById.end();
     }

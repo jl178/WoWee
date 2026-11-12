@@ -1,4 +1,4 @@
-// "Far field (the reference client)" (rendering/far_field.hpp): the colour atlas's
+// "Far field (enhanced)" (rendering/far_field.hpp): the colour atlas's
 // layout over the map's WDL tiles, the box filter and the BC1 encoder that
 // pack the minimap into it, and the limits the far field is drawn between.
 #include <catch_amalgamated.hpp>
@@ -99,7 +99,7 @@ TEST_CASE("Far field: every mip level is encoded down to four texels a tile", "[
     }
 }
 
-TEST_CASE("Far field: it starts inside the chunks' reach and ends at Enhanced's clip", "[farfield]") {
+TEST_CASE("Far field: it starts inside the chunks' reach and ends at the reference client's clip", "[farfield]") {
     // A chunk is kept while its centre is within the far clip, so the ground
     // reaches at least the far clip less half its diagonal.
     const float halfDiagonal = 33.333333f * std::sqrt(2.0f) * 0.5f;

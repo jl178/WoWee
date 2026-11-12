@@ -187,7 +187,7 @@ public:
     /// a shoulder above 0.8 instead of clipped (highlight_rolloff.hpp). Off,
     /// and with no glow drawing, the composite is stock.
     void setHighlightRollOff(bool on) { highlightRollOff_ = on; }
-    /// the reference client's colour grade (enhanced_grade.hpp). `enabled` keeps the
+    /// The reference client's colour grade (enhanced_grade.hpp). `enabled` keeps the
     /// pass alive while the row is on, whatever the hour; `weight` (0..1) is
     /// this frame's share and `kalimdor` picks that continent's curve.
     void setColorGrade(bool enabled, float weight, bool kalimdor) {
@@ -198,13 +198,13 @@ public:
     /// Bloom over the highlights (the Enhanced preset's), 0 off. Rides on the
     /// glow's quarter-size scene, so it shows only where the glow can run.
     void setBloom(float amount) { bloom_ = glm::clamp(amount, 0.0f, 2.0f); }
-    /// The Enhanced daylight's exposure and highlight desaturation in the HDR
+    /// The enhanced daylight's exposure and highlight desaturation in the HDR
     /// scene's tone map (enhanced_palette::kHdrExposure, kHdrSaturation);
     /// 0, 0 is off (and they do nothing without the HDR scene). `shade` is
     /// the shade's chroma scale under them (kHdrShadeChroma), 1 as it is,
     /// and `shadeTint` the hue of the grey it keeps (1, 1, 1 none).
     /// `knee`: the tone curve's knee for the frame (enhanced_tonemap::kKnee,
-    /// or kEnhancedKnee under Enhanced's daylight); 0 keeps the tuning's.
+    /// or kEnhancedKnee under the enhanced daylight); 0 keeps the tuning's.
     void setEnhancedTone(float exposure, float saturation, float shade = 1.0f,
                         const glm::vec3& shadeTint = glm::vec3(1.0f), float knee = 0.0f) {
         toneKnee_ = glm::clamp(knee, 0.0f, 0.95f);

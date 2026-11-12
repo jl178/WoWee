@@ -1800,7 +1800,7 @@ void CameraController::groundFollowedCharacter(float deltaTime, FrameInput& f,
             // target the player is standing on the lower floor, and pinning
             // groundH back up to lastGroundZ leaves the ground reference
             // hanging above the feet so gravity and the snap fight over the
-            // gap enhanced. That is the Undercity overhang yo-yo: walk under
+            // gap indefinitely. That is the Undercity overhang yo-yo: walk under
             // the level above, lastGroundZ stays stuck on it (-43) while the
             // real floor (-47) is refused, and the feet bob in between. If
             // the feet are already past the target, let the real floor

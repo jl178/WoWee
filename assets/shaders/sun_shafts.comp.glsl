@@ -68,7 +68,7 @@ void main() {
     // As a share of a walk that was bright all the way: 1 is the sky's own
     // colour, before the strength scales it.
     vec3 rays = gathered * (push.sun.w / total) * push.tint.rgb;
-    // The Enhanced haze's limit (SunShafts::FrameInputs::cap): eased onto it
+    // The enhanced haze's limit (SunShafts::FrameInputs::cap): eased onto it
     // rather than cut, so a streak keeps its shape and only its peak by the
     // sun - over sky the haze has already lit - is held down.
     if (push.tint.w > 0.0) rays = push.tint.w * (1.0 - exp(-rays / push.tint.w));

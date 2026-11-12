@@ -1,4 +1,4 @@
-// Bounce light (the reference client): the grid's bake (bounce_grid.hpp), its copy of
+// Bounce light (enhanced): the grid's bake (bounce_grid.hpp), its copy of
 // the constants in ambient_occlusion.frag, and the row and preset.
 #include <catch_amalgamated.hpp>
 
@@ -186,7 +186,7 @@ TEST_CASE("sky field: from straight above, the corner at uv 0 and depth down fro
     CHECK((b * glm::vec4(glm::vec2(centre), z - 1.0f, 1.0f)).z < cb.z);
 }
 
-TEST_CASE("bounce light: a Enhanced row, off in stock and the ladder, on in the Enhanced preset",
+TEST_CASE("bounce light: an enhanced row, off in stock and the ladder, on in the Enhanced preset",
           "[enhanced][enhancements]") {
     using namespace wowee::ui;
     const EnhancementRow* row = findEnhancementRow("bouncelight");
@@ -198,7 +198,7 @@ TEST_CASE("bounce light: a Enhanced row, off in stock and the ladder, on in the 
     for (int i = 0; i < kClassicPresetIndex; ++i) CHECK_FALSE(kGraphicsPresets[i].enh.bounceLight);
 }
 
-TEST_CASE("sky shade: a Enhanced row, off in stock and the ladder, on in the Enhanced preset",
+TEST_CASE("sky shade: an enhanced row, off in stock and the ladder, on in the Enhanced preset",
           "[enhanced][enhancements]") {
     using namespace wowee::ui;
     const EnhancementRow* row = findEnhancementRow("skyshade");

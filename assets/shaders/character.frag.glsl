@@ -472,7 +472,7 @@ void main() {
         // Outdoors: the world's ambient and diffuse bands and the sun, the
         // ambient boosted for units and clamped (0x7C1730, flag 0x8000).
         vec3 outAmb = rtAmbient(rt, min(ambientColor.rgb * amul, vec3(1.0)));
-        // Enhanced's ambient (kEnhancedAmbient, 128; enhanced_palette::
+        // The reference client's ambient (kEnhancedAmbient, 128; enhanced_palette::
         // ambientRamp): units are material3_mesh_ps models too - the ambient
         // by a half-Lambert ramp toward the sun, 0.7 away to 1.1 facing it.
         if ((localLightMeta.z & 128) != 0)

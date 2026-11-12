@@ -1,11 +1,11 @@
-// The Enhanced look (docs/re/enhanced-lighting.md): the colour grade's curves
+// The enhanced look (docs/re/enhanced-lighting.md): the colour grade's curves
 // and hour weight (enhanced_grade.hpp, which fxaa.frag mirrors), and the
 // Enhanced preset row.
 #include <catch_amalgamated.hpp>
 
 #include "rendering/enhancements.hpp"
 #include "rendering/enhanced_grade.hpp"
-#include "rendering/enhanced_lights.hpp"
+#include "rendering/enhanced_lighting_table.hpp"
 #include "rendering/enhanced_palette.hpp"
 #include "rendering/enhanced_tonemap.hpp"
 #include "rendering/leaf_light.hpp"
@@ -63,7 +63,7 @@ TEST_CASE("Enhanced daylight: the measured trend, and nothing at weight 0", "[en
     CHECK(glm::dot(white, lum) == Catch::Approx(glm::dot(sun, lum) * 1.03f).margin(1e-3));
     CHECK(white.x - white.z < sun.x - sun.z);
     // A grey only changes brightness - and for the sky's fog band, whose
-    // x1.30 is Enhanced's sky exposure (kSkyExposure), not even that.
+    // x1.30 is the reference client's sky exposure (kSkyExposure), not even that.
     const glm::vec3 g = fp::apply(glm::vec3(0.4f), fp::kSkyFog, 1.0f);
     CHECK(g.x == Catch::Approx(0.4f));
     CHECK(g.z == Catch::Approx(0.4f));
@@ -76,7 +76,7 @@ TEST_CASE("Enhanced daylight: the measured trend, and nothing at weight 0", "[en
 
 TEST_CASE("Enhanced daylight: the sun and sky added as light, never past white", "[enhanced]") {
     namespace fp = enhanced_palette;
-    // Elwynn's noon (Light 1): Enhanced's sun #eabd8a over the ambient #68829a.
+    // Elwynn's noon (Light 1): the reference client's sun #eabd8a over the ambient #68829a.
     const glm::vec3 amb(0x68 / 255.0f, 0x82 / 255.0f, 0x9a / 255.0f);
     const glm::vec3 sun(0xea / 255.0f, 0xbd / 255.0f, 0x8a / 255.0f);
     const glm::vec3 d = fp::linearLightDirect(amb, sun, 1.0f);
@@ -100,9 +100,9 @@ TEST_CASE("Enhanced daylight: the sun and sky added as light, never past white",
     CHECK(glm::all(glm::greaterThanEqual(big, glm::vec3(0.0f))));
 }
 
-TEST_CASE("Enhanced lights: the sky's exposure is taken out, the sun's light is not", "[enhanced]") {
-    namespace fl = enhanced_lights;
-    // Westfall's noon SkyMiddle: 3.3.5's #3c919e is Enhanced's #4ebdcd / 1.3.
+TEST_CASE("Reference lights: the sky's exposure is taken out, the sun's light is not", "[enhanced]") {
+    namespace fl = enhanced_lighting_table;
+    // Westfall's noon SkyMiddle: 3.3.5's #3c919e is the reference client's #4ebdcd / 1.3.
     CHECK(fl::withoutSkyExposure(0x4ebdcdu) == 0x3c919eu);
     CHECK(fl::withoutSkyExposure(0xffffffu) == 0xc4c4c4u);
     CHECK(fl::withoutSkyExposure(0u) == 0u);
@@ -141,7 +141,7 @@ TEST_CASE("Enhanced grade: fxaa.frag carries the same curves", "[enhanced]") {
 #endif
 
 #ifdef WOWEE_SOURCE_DIR
-TEST_CASE("Enhanced ambient: Enhanced's half-Lambert ramp, in every lit model shader", "[enhanced]") {
+TEST_CASE("Enhanced ambient: the reference client's half-Lambert ramp, in every lit model shader", "[enhanced]") {
     // material3_mesh_ps / material3_wmo_ps: 0.4562..1.2333 in linear light,
     // the same ramp as 0.7..1.1 display-encoded.
     CHECK(std::pow(0.4562f, 1.0f / 2.2f) == Catch::Approx(enhanced_palette::kAmbientAway).margin(0.005f));
@@ -165,7 +165,7 @@ TEST_CASE("Enhanced ambient: Enhanced's half-Lambert ramp, in every lit model sh
 }
 #endif
 
-TEST_CASE("Enhanced preset: Ultra plus the Enhanced rows, on one-sample depth", "[enhanced]") {
+TEST_CASE("Enhanced preset: Ultra plus the enhanced rows, on one-sample depth", "[enhanced]") {
     using namespace wowee::ui;
     const GraphicsPresetValues& f = kGraphicsPresets[kEnhancedPresetIndex];
     const GraphicsPresetValues& ultra = kGraphicsPresets[kClassicPresetIndex - 1];
@@ -184,12 +184,12 @@ TEST_CASE("Enhanced preset: Ultra plus the Enhanced rows, on one-sample depth", 
     // The occlusion pass reads a one-sample depth: no multisampling.
     CHECK(f.antiAliasing == 0);
     CHECK(f.fxaa);
-    // Enhanced's detailed range (horizonStart 1900) and its far field past
+    // The reference client's detailed range (horizonStart 1900) and its far field past
     // it to 7000 (far_field.hpp), with the fog over that reach.
     CHECK(f.viewDistance == 1900.0f);
     CHECK(f.shadowDistance >= ultra.shadowDistance);
     CHECK(f.enh.farField);
-    // Neither new row is in the ladder: they are what the Enhanced row adds.
+    // Neither new row is in the ladder: they are what the enhanced row adds.
     for (int i = 0; i < kClassicPresetIndex; ++i) {
         CHECK_FALSE(kGraphicsPresets[i].enh.ambientOcclusion);
         CHECK_FALSE(kGraphicsPresets[i].enh.colorGrade);
@@ -205,14 +205,14 @@ TEST_CASE("Enhanced preset: Ultra plus the Enhanced rows, on one-sample depth", 
 
 namespace {
 
-// A tiny made-up table in enhanced_lights.bin's layout: two keys, one profile
+// A tiny made-up table in enhanced_lighting_table.bin's layout: two keys, one profile
 // authoring the direct colour and the fog end, one link.
 std::vector<uint8_t> enhancedLightsFixture() {
     std::vector<uint32_t> w = {0x314c4657u /* "WFL1" */, 2, 1, 1};
     auto key = [&](uint32_t time, uint32_t direct, float fogEnd) {
         w.push_back(time);
-        for (uint32_t c = 0; c < enhanced_lights::kColorChannels; ++c) w.push_back(c == 0 ? direct : 0);
-        const float values[enhanced_lights::kFloatChannels] = {fogEnd, 0.25f, 1.0f, 0.5f};
+        for (uint32_t c = 0; c < enhanced_lighting_table::kColorChannels; ++c) w.push_back(c == 0 ? direct : 0);
+        const float values[enhanced_lighting_table::kFloatChannels] = {fogEnd, 0.25f, 1.0f, 0.5f};
         for (float v : values) {
             uint32_t bits = 0;
             std::memcpy(&bits, &v, 4);
@@ -230,8 +230,8 @@ std::vector<uint8_t> enhancedLightsFixture() {
 
 }  // namespace
 
-TEST_CASE("Enhanced lights: the table file round-trips and refuses bad input", "[enhanced]") {
-    namespace fl = enhanced_lights;
+TEST_CASE("Reference lights: the table file round-trips and refuses bad input", "[enhanced]") {
+    namespace fl = enhanced_lighting_table;
     const std::vector<uint8_t> good = enhancedLightsFixture();
     fl::Table t;
     REQUIRE(fl::parse(good, t));
@@ -242,7 +242,7 @@ TEST_CASE("Enhanced lights: the table file round-trips and refuses bad input", "
     CHECK(t.keys[1].color[0] == 0xa0b0c0u);
     CHECK(t.keys[0].value[0] == 0.0f);   // a key without a fog end
     CHECK(t.keys[1].value[0] == 18000.0f);
-    CHECK(t.profiles[0].enhancedParamsId == 42);
+    CHECK(t.profiles[0].referenceParamsId == 42);
     CHECK(t.profiles[0].keyCount == 2);
     CHECK(t.links[0].lightId == 7);
 
@@ -265,8 +265,8 @@ TEST_CASE("Enhanced lights: the table file round-trips and refuses bad input", "
     CHECK_FALSE(fl::parse(std::vector<uint8_t>(good.begin(), good.end() - 4), t));
 }
 
-TEST_CASE("Enhanced lights: WFL2 carries the air's density", "[enhanced]") {
-    namespace fl = enhanced_lights;
+TEST_CASE("Reference lights: WFL2 carries the air's density", "[enhanced]") {
+    namespace fl = enhanced_lighting_table;
     // The WFL1 fixture with a density after the profile.
     const std::vector<uint8_t> v1 = enhancedLightsFixture();
     std::vector<uint32_t> w(v1.size() / 4);
@@ -360,7 +360,7 @@ TEST_CASE("Enhanced sun: stock bearing, lower noon, earlier dusk", "[enhanced][s
     CHECK(std::asin(enhancedSunDirection(9.37f * 120.0f).z) * 57.29578f == Catch::Approx(37.2f).margin(1.5f));
 }
 
-TEST_CASE("Enhanced light: from the sun by day, stock at night", "[enhanced][sun]") {
+TEST_CASE("Reference light: from the sun by day, stock at night", "[enhanced][sun]") {
     namespace fp = enhanced_palette;
     const glm::vec3 stockTravel = stockLightDirection(9.37f * 120.0f);
     const glm::vec3 toSun = enhancedSunDirection(9.37f * 120.0f);
@@ -387,10 +387,10 @@ TEST_CASE("HDR sun: brighter by day only", "[enhanced]") {
     // High sun: the full gain, which stays modest.
     CHECK(tm::sunLightScale(-0.9f, tm::kSunLight) == Catch::Approx(tm::kSunLight));
     CHECK(tm::kSunLight >= 1.0f);
-    // Enhanced's F052 (1.5 at most) is a linear multiplier; this one also
+    // The reference client's F052 (1.5 at most) is a linear multiplier; this one also
     // stands in for the mid-tone lift it replaced (section 2d).
     CHECK(tm::kSunLight <= 2.0f);
-    // With it, the softer shoulder under Enhanced's daylight: the identity
+    // With it, the softer shoulder under the enhanced daylight: the identity
     // below half of white, the Barrens' bright road compressed above it.
     CHECK(tm::kEnhancedKnee < tm::kKnee);
     CHECK(tm::kEnhancedKnee >= 0.4f);
@@ -426,7 +426,7 @@ TEST_CASE("Enhanced water: water_hd.frag carries LiquidType 1.60.1's columns", "
     CHECK(src.find("vec3(0x9b, 0xbf, 0xec)") != std::string::npos);
     CHECK(src.find("vec3(0x48, 0xaa, 0xb0)") != std::string::npos);
     CHECK(src.find("vec3(0x1b, 0xb2, 0xe6)") != std::string::npos);
-    // Enhanced's mode is its own build of the file (ENHANCED_WATER), so HD
+    // the enhanced mode is its own build of the file (ENHANCED_WATER), so HD
     // water alone compiles none of it.
     CHECK(src.find("#ifdef ENHANCED_WATER\n    const bool fw = true;") != std::string::npos);
     CHECK(src.find("    const bool fw = false;") != std::string::npos);
@@ -441,7 +441,7 @@ TEST_CASE("Enhanced water: water_hd.frag carries LiquidType 1.60.1's columns", "
     REQUIRE(cm.good());
     std::stringstream cms;
     cms << cm.rdbuf();
-    CHECK(cms.str().find("water_hd.frag.glsl|water_fw.frag.spv|-DENHANCED_WATER") != std::string::npos);
+    CHECK(cms.str().find("water_hd.frag.glsl|water_enh.frag.spv|-DENHANCED_WATER") != std::string::npos);
 }
 
 TEST_CASE("Sun through leaves: its row, the Enhanced preset, the shader bit", "[enhanced]") {
@@ -526,7 +526,7 @@ TEST_CASE("Enhanced shade: fxaa.frag reads its tint and chroma as the push block
 }
 #endif
 
-TEST_CASE("Enhanced's sun shadows: its row, the Enhanced preset, the shader bit", "[enhanced]") {
+TEST_CASE("The reference client's sun shadows: its row, the Enhanced preset, the shader bit", "[enhanced]") {
     using namespace wowee::ui;
     const EnhancementRow* row = findEnhancementRow("enhancedshadows");
     REQUIRE(row != nullptr);

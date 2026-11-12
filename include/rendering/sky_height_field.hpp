@@ -1,6 +1,6 @@
 #pragma once
 
-/// The sky over each point under Enhanced's daylight (docs/re/enhanced-lighting.md
+/// The sky over each point under the enhanced daylight (docs/re/enhanced-lighting.md
 /// section 6e): a height field drawn from straight above round the camera,
 /// the way a shadow map is drawn from the sun - the same casters, pipelines
 /// and depth format - and read by the bounce pass, which marches a few

@@ -5,7 +5,7 @@
 
 An update field is read by index out of Data/expansions/<x>/update_fields.json.
 A wrong index does not fail: it reads whatever the server happened to put at
-that slot, or nothing at all, and the value comes out zero or stale forever.
+that slot, or nothing at all, and the value comes out zero or stale indefinitely.
 What that looks like is a corpse that never registers as lootable, a stealthed
 NPC that never reveals, a title that never displays, a currency stuck at zero -
 each of which reads as a feature that does not work rather than as a number in

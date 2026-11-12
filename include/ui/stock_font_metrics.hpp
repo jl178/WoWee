@@ -143,7 +143,7 @@ private:
 };
 
 /// The next code point of UTF-8 text from `at`, which it moves past it.
-/// A malformed byte comes back as itself, so nothing loops enhanced.
+/// A malformed byte comes back as itself, so nothing loops endlessly.
 uint32_t nextCodepoint(std::string_view text, size_t& at);
 
 /// The width of plain text - no markup - in the caller's units: the widest

@@ -1,12 +1,12 @@
 #pragma once
 
-/// the reference client's daylight, as a trend over 1.12's: the "Enhanced daylight"
+/// WoW enhanced daylight, as a trend over 1.12's: the "Enhanced daylight"
 /// enhancement (docs/re/enhanced-lighting.md section 2).
 ///
-/// Enhanced re-authored every outdoor light of the two continents by hand, so
-/// no formula turns a 1.12 light into its Enhanced one. Over all of them
+/// The reference client re-authored every outdoor light of the two continents by hand, so
+/// no formula turns a 1.12 light into its reference one. Over all of them
 /// though - every Light row of maps 0 and 1 matched by ID and position
-/// between Classic Era 1.15.9 and Enhanced 1.60.1, both sampled each hour from
+/// between Classic Era 1.15.9 and the reference client 1.60.1, both sampled each hour from
 /// 8:00 to 17:00, 1950 samples a colour - the change is consistent:
 ///
 ///   colour          luminance  saturation (chroma)
@@ -20,7 +20,7 @@
 /// These are applied to the light 3.3.5's Light.dbc gives (the old-world
 /// lights are 1.12's), by day only, on maps 0 and 1. No renderer includes.
 
-#include "rendering/enhanced_lights.hpp"
+#include "rendering/enhanced_lighting_table.hpp"
 
 #include <glm/glm.hpp>
 
@@ -37,26 +37,26 @@ struct Trend {
 
 inline constexpr Trend kDirect{1.03f, 0.81f};
 inline constexpr Trend kAmbient{1.15f, 1.08f};
-// The sky's luminance trend is mostly Enhanced's sky exposure
-// (enhanced_lights::kSkyExposure, x1.3 on most keys), which its linear
+// The sky's luminance trend is mostly the reference client's sky exposure
+// (enhanced_lighting_table::kSkyExposure, x1.3 on most keys), which its linear
 // pipeline takes back and 3.3.5's 8-bit sky cannot: it is divided out, as it
-// is from Enhanced's own keyframes, and the change of colour kept.
-inline constexpr Trend kSkyTop{1.09f / enhanced_lights::kSkyExposure, 1.12f};
-inline constexpr Trend kSkyMiddle{1.19f / enhanced_lights::kSkyExposure, 1.28f};
-inline constexpr Trend kSkyFog{1.30f / enhanced_lights::kSkyExposure, 1.35f};
+// is from the reference client's own keyframes, and the change of colour kept.
+inline constexpr Trend kSkyTop{1.09f / enhanced_lighting_table::kSkyExposure, 1.12f};
+inline constexpr Trend kSkyMiddle{1.19f / enhanced_lighting_table::kSkyExposure, 1.28f};
+inline constexpr Trend kSkyFog{1.30f / enhanced_lighting_table::kSkyExposure, 1.35f};
 inline constexpr Trend kSun{1.11f, 0.72f};
 
 /// The sun's intensity in linear light with the HDR scene, by day (weighted
-/// by the day intensity): Enhanced's LightData F052 on Light 1 (1.35; 1.35-1.5
+/// by the day intensity): the reference client's LightData F052 on Light 1 (1.35; 1.35-1.5
 /// elsewhere, 1 at night). The renderer's enhanced_tonemap::kSunLight (1.25)
 /// still scales the result on the display side; the two together were
-/// chosen side by side against Enhanced's Goldshire and Northshire captures.
+/// chosen side by side against the reference client's Goldshire and Northshire captures.
 inline constexpr float kHdrSunIntensity = 1.35f;
 
-/// Enhanced's ambient on models and buildings (material3_mesh_ps and
+/// The reference client's ambient on models and buildings (material3_mesh_ps and
 /// material3_wmo_ps, docs/re/enhanced-lighting.md section 6d): the hemisphere
 /// ambient times a half-Lambert ramp toward the sun,
-/// mix(kAmbientAway, kAmbientToward, 0.5 + 0.5 N.L), N.L signed. Enhanced's
+/// mix(kAmbientAway, kAmbientToward, 0.5 + 0.5 N.L), N.L signed. The reference client's
 /// shaders carry the ramp twice, 0.4562..1.2333 for its linear path and
 /// 0.7..1.1 for display-encoded light - the same ramp, 0.4562^(1/2.2) = 0.70
 /// and 1.2333^(1/2.2) = 1.10. Wowee's lit shaders work in display-encoded
@@ -64,12 +64,12 @@ inline constexpr float kHdrSunIntensity = 1.35f;
 /// character.frag (enh_bits::kEnhancedAmbient).
 inline constexpr float kAmbientAway = 0.7f;
 inline constexpr float kAmbientToward = 1.1f;
-/// The sun's light scaled by how much higher or lower Enhanced's sun stands
+/// The sun's light scaled by how much higher or lower the reference client's sun stands
 /// than 3.3.5's light at this hour (the ratio of their vertical
 /// components, held to 0.5..1.5): the ground keeps the light it had under
 /// the stock direction - which every other exposure in this file was set
 /// against - while the shadows and the sides lit come from the sun. At
-/// noon Enhanced's sun is 65 degrees up against the stock light's 37 (x0.67),
+/// noon the reference client's sun is 65 degrees up against the stock light's 37 (x0.67),
 /// at 9:22 37 against 30 (x0.82), at 17:51 17 against 20 (x1.2).
 /// docs/re/enhanced-lighting.md 2e.
 inline float sunIrradianceScale(const glm::vec3& stockTravel, const glm::vec3& travel) {
@@ -103,11 +103,11 @@ inline float hdrSunIntensity() {
 }
 
 /// How much of 3.3.5's stock full-screen glow (LightParams Glow) a light with
-/// Enhanced keyframes keeps. Enhanced's own Glow is 0 on 106 of the 112 linked
+/// reference keyframes keeps. The reference client's own Glow is 0 on 106 of the 112 linked
 /// profiles - its bloom is a pass of its own, the preset's bloom row - where
-/// 3.3.5's same slots carry 0.5-1, whose blur squared lit Enhanced's brighter
+/// 3.3.5's same slots carry 0.5-1, whose blur squared lit the reference client's brighter
 /// sky into a white sheet. With none at all the picture fell to 0.21-0.23
-/// mean luminance against Enhanced's captures' 0.32 (Goldshire 15:23); half
+/// mean luminance against the reference captures' 0.32 (Goldshire 15:23); half
 /// keeps most of the mid-tones' lift and the sky round the sun under white.
 /// WOWEE_ENHANCED_GLOW=<scale> overrides it for tuning.
 inline constexpr float kGlowScale = 0.5f;
@@ -119,16 +119,16 @@ inline float glowScale() {
     return v;
 }
 
-/// The HDR scene's lift of the lit mid-tones under the Enhanced daylight:
+/// The HDR scene's lift of the lit mid-tones under the enhanced daylight:
 /// light between 0.2 and 0.8 luminance times up to this (fxaa.frag), so the
 /// sunlit ground gains on the shade without the shade lifting or the top
-/// reaching white. Against Jered's live Enhanced captures (Goldshire 9:22)
-/// the lit third read 0.37-0.41 here against Enhanced's 0.44-0.59 at 1; a
+/// reaching white. Against Jered's live reference captures (Goldshire 9:22)
+/// the lit third read 0.37-0.41 here against the reference client's 0.44-0.59 at 1; a
 /// straight exposure (1.25-1.4) took the Barrens' noon dirt to a glowing
 /// orange, and a lift of the low end alone greyed the shade.
 /// Now 1 (none): the lift took every mid-tone, the tree crowns lit by the
 /// sky alone with the sunlit road, and left them 29% brighter than
-/// Enhanced's; the sun's own light (enhanced_tonemap::kSunLight) brightens
+/// the reference client's; the sun's own light (enhanced_tonemap::kSunLight) brightens
 /// what the sun reaches instead (docs/re/enhanced-lighting.md section 2d).
 /// WOWEE_ENHANCED_EXPOSURE=<value> overrides it for tuning.
 inline constexpr float kHdrExposure = 1.0f;
@@ -139,16 +139,16 @@ inline float hdrExposure() {
     }();
     return v;
 }
-/// The HDR scene's chroma scale under the Enhanced daylight, on lit surfaces
-/// (faded in from 0.25 to 0.45 luminance: Enhanced's shade is a near-neutral
+/// The HDR scene's chroma scale under the enhanced daylight, on lit surfaces
+/// (faded in from 0.25 to 0.45 luminance: the reference client's shade is a near-neutral
 /// green, chroma 0.46-0.57, under sunlit ground at 0.62-0.65), easing to 0.8
 /// at the top of the tone curve (0.85-1) so a sunlit Barrens road stays under
 /// white and Duskwood's noon sky does not keep its full cyan. Against Jered's
 /// live Goldshire 9:22 captures, with kHdrExposure: lit chroma 0.63-0.69
-/// (Enhanced 0.62-0.65), shade luminance 0.20-0.24 (0.21-0.26), lit/shade
+/// (reference 0.62-0.65), shade luminance 0.20-0.24 (0.21-0.26), lit/shade
 /// 2.14-2.27 (2.07-2.27); docs/re/enhanced-lighting.md section 2c.
 /// Now 1 (none; the ease to 0.8 at the top stays): with the stronger sun
-/// (section 2d) the sunlit ground reaches Enhanced's chroma (0.70 0.62 0.70
+/// (section 2d) the sunlit ground reaches the reference client's chroma (0.70 0.62 0.70
 /// against 0.70 0.63 0.58) without it, and the crowns' chroma gap falls
 /// from +38% to +18%. WOWEE_ENHANCED_SAT overrides it.
 inline constexpr float kHdrSaturation = 1.0f;
@@ -162,12 +162,12 @@ inline float hdrSaturation() {
 
 /// The shade's chroma scale under the same tone (full below 0.18 luminance,
 /// none from 0.38, by day, outdoors, on warm shade only). 3.3.5's leaf, grass and dirt
-/// textures carry almost no blue, so under Enhanced's own sky-blue ambient
+/// textures carry almost no blue, so under the reference client's own sky-blue ambient
 /// (Goldshire 9:22: 0.40, 0.51, 0.60) the shade stays a saturated
-/// yellow-green - blue/luminance 0.41-0.52 against Enhanced's 0.71-0.73,
+/// yellow-green - blue/luminance 0.41-0.52 against the reference client's 0.71-0.73,
 /// chroma 0.67-0.72 against 0.46-0.57. Tinting the shade's light toward the
 /// sky's colour did not close it: the sky bands are cyan beside the ambient,
-/// and turned the shade green (red/luminance 1.05 -> 0.78). Enhanced's shade
+/// and turned the shade green (red/luminance 1.05 -> 0.78). The reference client's shade
 /// is this one with a little over half its chroma; docs/re/enhanced-lighting.md
 /// section 6c. WOWEE_ENHANCED_SHADE overrides it.
 inline constexpr float kHdrShadeChroma = 0.6f;
@@ -187,7 +187,7 @@ inline float dayShare(float sunDirZ) {
     return t * t * (3.0f - 2.0f * t);
 }
 
-/// How much of the sunlit colour a full shadow takes under Enhanced's daylight
+/// How much of the sunlit colour a full shadow takes under the enhanced daylight
 /// (the renderer's shadowParams.y): measured on Jered's 09:23 capture, where
 /// a tree's shade on the crossroads' flagstones is (0.37, 0.31, 0.16) against
 /// (0.77, 0.55, 0.27) in the sun beside it - 0.48-0.59 a channel, 0.54 in
@@ -195,7 +195,7 @@ inline float dayShare(float sunDirZ) {
 /// shaders' floor is 1 - this (terrain.frag; WMO, M2 and units by
 /// mix(1, shadow, this)). docs/re/enhanced-lighting.md 2e.
 /// Held at 3.3.5's 0.3 for now: 0.46 took the road's lit/shade from 1.57 to
-/// 2.2 (Enhanced 1.9-2.3) but the evening and forest views 25% darker.
+/// 2.2 (the reference client 1.9-2.3) but the evening and forest views 25% darker.
 inline constexpr float kShadowOpacity = 0.30f;
 /// kShadowOpacity, or WOWEE_ENHANCED_SHADOW_OPACITY=<value> (read once).
 inline float shadowOpacity() {
@@ -206,7 +206,7 @@ inline float shadowOpacity() {
     return v;
 }
 
-/// Enhanced's sun lights the world from where it stands (its shadows fall
+/// The reference client's sun lights the world from where it stands (its shadows fall
 /// from the sun; docs/re/enhanced-lighting.md 2e): the way the light travels
 /// is -toSun by day, eased from 3.3.5's `stockTravel` over the sun's first
 /// 9 degrees (dayShare), so the night keeps the stock moonlight direction.
@@ -218,7 +218,7 @@ inline glm::vec3 sunLightDirection(const glm::vec3& stockTravel, const glm::vec3
 }
 
 /// How far the grey the shade keeps takes the ambient's hue (its luminance
-/// kept): Enhanced's ambient is its sky light, and its shade, against 3.3.5's
+/// kept): the reference client's ambient is its sky light, and its shade, against 3.3.5's
 /// orange dirt and yellow leaves, a little bluer and less red.
 /// WOWEE_ENHANCED_SHADE_SKY overrides it.
 inline constexpr float kHdrShadeSky = 0.6f;
@@ -234,7 +234,7 @@ inline float hdrShadeSky() {
 /// kHdrShadeSky of the way from white, scaled by `weight` (0 = white, none).
 /// The ambient's own hue leans green beside its red (0.40, 0.51, 0.60 at
 /// Goldshire 9:22) and turned the shade a green grey (red/luminance 0.98
-/// against Enhanced's 1.05).
+/// against the reference client's 1.05).
 inline glm::vec3 shadeTint(const glm::vec3& ambient, float weight) {
     const float warm = 0.5f * (ambient.r + ambient.g);
     const glm::vec3 cool(warm, warm, ambient.b);
@@ -257,24 +257,24 @@ inline glm::vec3 apply(const glm::vec3& c, const Trend& t, float weight) {
 
 /// The sun's colour such that the sky and the sun, added as the lit shaders
 /// add them (display values, clamped at one per channel), give a fully lit
-/// face what Enhanced's linear pipeline gives it: the two added as light and
+/// face what the reference client's linear pipeline gives it: the two added as light and
 /// encoded back for the screen,
 ///
 ///   direct' = encode(decode(ambient) + decode(direct)) - ambient
 ///
-/// with encode/decode the 2.2 display power. Enhanced authors its colours for
+/// with encode/decode the 2.2 display power. The reference client authors its colours for
 /// that pipeline (docs/re/enhanced-lighting.md section 2c): its noon sun over
 /// Elwynn is `#eabd8a` against 1.12's `#ff8800` at the same ambient, and
 /// summed raw on an 8-bit path the two clip a lit face to white
 /// (1.33, 1.25, 1.15 -> 1, 1, 1) where 1.12's stays warm (1, 1, 0.6). Added
-/// as light the face is (0.98, 0.87, 0.79): Enhanced's own warm, unclipped
+/// as light the face is (0.98, 0.87, 0.79): the reference client's own warm, unclipped
 /// sunlit ground. A face in shade (N.L 0) keeps the ambient exactly; in
 /// between, the shaders' straight line runs a little under the curve.
 /// Weighted by `weight` (0 returns `direct` unchanged).
 ///
 /// With the HDR scene (`hdr`) the sum is not held at one - the tone map takes
 /// what passes it - and the sun may carry an intensity in linear light
-/// (`sunIntensity`, kHdrSunIntensity: Enhanced's LightData F052).
+/// (`sunIntensity`, kHdrSunIntensity: the reference client's LightData F052).
 inline glm::vec3 linearLightDirect(const glm::vec3& ambient, const glm::vec3& direct, float weight,
                                    float sunIntensity = 1.0f, bool hdr = false) {
     constexpr float kGamma = 2.2f;

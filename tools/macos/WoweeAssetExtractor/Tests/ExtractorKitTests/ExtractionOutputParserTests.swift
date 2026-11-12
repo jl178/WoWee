@@ -14,7 +14,7 @@ final class ExtractionOutputParserTests: XCTestCase {
 
     func testCarriageReturnProgressIsSeen() {
         // The progress line is rewritten with \r and never terminated by \n.
-        // A parser that only splits on newlines reports .starting forever.
+        // A parser that only splits on newlines reports .starting indefinitely.
         let parser = ExtractionOutputParser()
         parser.feed("Found 4 MPQ archives\n")
         parser.feed("\r  Extracted 1000 / 500000 files...")

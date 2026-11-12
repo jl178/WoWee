@@ -80,7 +80,7 @@ def scan():
 
         # The counting stubs, defined by looping over a list of names rather
         # than one at a time. They were bootstrap Lua like any other, so one
-        # that shared a name with a C binding won and answered zero forever -
+        # that shared a name with a C binding won and answered zero indefinitely -
         # GetNumMacroIcons did exactly that, leaving the icon picker empty
         # beside a working GetMacroIconInfo.
         #

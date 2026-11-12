@@ -187,13 +187,13 @@ GameScreen::GameScreen() {
     loadSettings();
 }
 
-// the reference client's swing timer (Blizzard_SwingTimer.lua/.xml, loaded only for
+// The reference client's swing timer (Blizzard_SwingTimer.lua/.xml, loaded only for
 // the "camelot" game type): one bar per weapon hand, filled from each of the
 // player's swings to the next and cleared at the end; shown in combat; the
 // frame, bar and labels at 0.4 alpha and the labels red while the target is
 // out of reach (OUT_OF_RANGE_ALPHA), but never during a swing. Drawn here
 // rather than by FrameXML: the 3.3.5 interface has no such frame. Colours are
-// sampled from Enhanced's uiswingtimerbar2xc60.blp atlas.
+// sampled from the reference client's uiswingtimerbar2xc60.blp atlas.
 void GameScreen::renderSwingTimer(game::GameHandler& gameHandler) {
     auto* combat = gameHandler.getCombatHandler();
     if (!combat || !gameHandler.isInCombat()) return;
@@ -203,7 +203,7 @@ void GameScreen::renderSwingTimer(game::GameHandler& gameHandler) {
     }
     if (uiScale <= 0.0f) uiScale = 1.0f;
 
-    // Out of reach of the auto-attack target (Enhanced's range check).
+    // Out of reach of the auto-attack target (the reference client's range check).
     bool outOfRange = false;
     const uint64_t targetGuid = gameHandler.getAutoAttackTargetGuid() != 0
         ? gameHandler.getAutoAttackTargetGuid() : gameHandler.getTargetGuid();

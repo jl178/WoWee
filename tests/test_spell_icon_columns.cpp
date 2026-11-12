@@ -3,7 +3,7 @@
 // Five places built the same iconId -> path table, each with its own copy of
 // the two column numbers and the same fallback when no layout is loaded. A
 // DBCFile asked for the wrong column does not fail: it answers zero, or an
-// empty string, for every row forever. The icons simply do not appear, and
+// empty string, for every row indefinitely. The icons simply do not appear, and
 // nothing anywhere says why.
 //
 // The oracle is the shipped file. SpellIcon.dbc is unusually easy to check

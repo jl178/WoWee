@@ -929,7 +929,7 @@ void M2Renderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::
     // random stream and scratch (ParticleWorker). WOWEE_PARTICLE_LEGACY=1
     // runs the second pass on this thread, with the first worker.
     ++particleFrame_;
-    constexpr float kParticleWarmWindow = 3600.0f;  // "since enhanced": capped at each lifespan
+    constexpr float kParticleWarmWindow = 3600.0f;  // "since the start": capped at each lifespan
     static const bool kParticleLegacy = envFlagEnabled("WOWEE_PARTICLE_LEGACY");
     uint64_t particlesFull = 0, particlesDormant = 0, particlesLive = 0;
     particleWork_.clear();
@@ -3688,7 +3688,7 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         // Inflate by the model's bounding sphere converted to NDC
         // (shadowRadius ≈ frustum half-extent; overshoot is harmless).
         // A map narrower than the radius it is asked with (the detail map of
-        // Enhanced's sun shadows, asked with the world map's) takes the margin
+        // the reference client's sun shadows, asked with the world map's) takes the margin
         // from its own scale, or a crown standing just off its edge would
         // leave its shade out of it. Only for that draw (setShadowDetailDraw):
         // the other maps keep their cull as it was.

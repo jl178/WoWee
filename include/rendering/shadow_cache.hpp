@@ -181,14 +181,14 @@ inline WorldShadowRedraw worldShadowRedrawNeeded(const WorldShadowCacheKey& key,
     return WorldShadowRedraw::None;
 }
 
-/// The detail map of Enhanced's sun shadows (Enhancements::enhancedShadows):
+/// The detail map of the reference client's sun shadows (Enhancements::enhancedShadows):
 /// a third map of the world's casters - terrain, buildings, doodads and the
 /// ground clutter near the player - over a short square round the player at
 /// a fine texel, kept between frames as the world map is. Where it covers a
 /// pixel its taps replace the world map's (shadow_filter.glsli), so the
 /// shadows near the camera are crisp, leaves cut holes in them and clutter
 /// casts, while the world map carries the distance with its softer filter.
-/// the reference client draws its sun shadow as cascades (CSMInfo, up to five, three
+/// The reference client draws its sun shadow as cascades (CSMInfo, up to five, three
 /// in its Config.wtf) blended at their edges; this is the near cascade.
 inline constexpr float kDetailShadowHalfExtent = 72.0f;  ///< yards either side of the player
 inline constexpr uint32_t kDetailShadowMapSize = 2048;   ///< 0.07 yd a texel at 72 yd

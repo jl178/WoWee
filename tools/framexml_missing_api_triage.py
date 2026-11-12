@@ -76,7 +76,7 @@ def index():
         rel = os.path.relpath(path, INTERFACE)
         for match in re.finditer(r"function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", src):
             defines.setdefault(match.group(1), []).append((rel, in_addon))
-        # `X = nil` at file scope reads as absent forever.
+        # `X = nil` at file scope reads as absent indefinitely.
         for match in re.finditer(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*nil\s*;?\s*$",
                                  src, re.M):
             defines.setdefault(match.group(1), []).append((rel, in_addon))

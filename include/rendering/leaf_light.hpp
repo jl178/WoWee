@@ -1,6 +1,6 @@
 #pragma once
 
-// Sunlight through leaves ("Sun through leaves (the reference client)", the leafLight
+// Sunlight through leaves ("Sun through leaves (enhanced)", the leafLight
 // row; docs/re/enhanced-lighting.md section 9c). The per-frame half: where the
 // sun is in the sky and whether it is day, for m2.frag's foliage and the
 // grass blades (grass.frag).

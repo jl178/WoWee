@@ -1,7 +1,8 @@
+#include "core/legacy_settings_migration.hpp"
 #include "core/local_time.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "rendering/enhanced_palette.hpp"
-#include "rendering/enhanced_lights.hpp"
+#include "rendering/enhanced_lighting_table.hpp"
 #include "rendering/light_coords.hpp"
 #include "rendering/light_band_block.hpp"
 #include "rendering/stock_day_night.hpp"
@@ -238,33 +239,43 @@ bool LightingManager::loadLightParamsDbc(pipeline::AssetManager* assetManager) {
 }
 
 void LightingManager::loadEnhancedProfiles(pipeline::AssetManager* assetManager) {
-    namespace fl = enhanced_lights;
+    namespace fl = enhanced_lighting_table;
     enhancedProfiles_.clear();
     fl::Table table;
-    const std::vector<uint8_t> data = assetManager->readFileOptional(fl::kFileName);
+    std::vector<uint8_t> data = assetManager->readFileOptional(fl::kFileName);
     if (data.empty()) {
-        LOG_INFO("Enhanced light keyframes: no <data>/override/wowee/enhanced_lights.bin "
-                 "(tools/enhanced_light_gen.py writes it); the Enhanced daylight uses "
+        // A table written before the rename to the enhanced naming, under its
+        // old name, until it is regenerated (core/legacy_settings_migration.hpp).
+        data = assetManager->readFileOptional(core::kLegacyLightTableFile);
+        if (!data.empty()) {
+            LOG_INFO("Enhanced lighting table: read from its old name, ",
+                     core::kLegacyLightTableFile, "; tools/enhanced_lighting_gen.py "
+                     "writes it as wowee/enhanced_lighting_table.bin");
+        }
+    }
+    if (data.empty()) {
+        LOG_INFO("Enhanced lighting table: no <data>/override/wowee/enhanced_lighting_table.bin "
+                 "(tools/enhanced_lighting_gen.py writes it); the enhanced daylight uses "
                  "the averaged trend everywhere");
         return;
     }
     if (!fl::parse(data, table)) {
-        LOG_WARNING("Enhanced light keyframes: wowee/enhanced_lights.bin is not a valid "
-                    "table; the Enhanced daylight uses the averaged trend everywhere");
+        LOG_WARNING("Enhanced lighting table: the file is not a valid "
+                    "table; the enhanced daylight uses the averaged trend everywhere");
         return;
     }
     for (const fl::Link& link : table.links) {
         auto vit = lightsById_.find(link.lightId);
         if (vit == lightsById_.end() || link.slot >= LightVolume::SLOT_COUNT) continue;
         // Over the slot's own profile: its skybox, water alphas and every
-        // band Enhanced does not author stay 3.3.5's.
+        // band the reference client does not author stay 3.3.5's.
         LightParamsProfile profile;
         const uint32_t stockId =
             paramsIdForSlot(vit->second, static_cast<LightVolume::ParamsSlot>(link.slot));
         if (auto pit = lightParamsProfiles_.find(stockId); pit != lightParamsProfiles_.end()) {
             profile = pit->second;
         }
-        // Less of the stock full-screen glow: Enhanced's own is 0 on almost
+        // Less of the stock full-screen glow: the reference client's own is 0 on almost
         // every profile (enhanced_palette::kGlowScale).
         profile.glow *= enhanced_palette::glowScale();
         const fl::Profile& src = table.profiles[link.profile];
@@ -275,7 +286,7 @@ void LightingManager::loadEnhancedProfiles(pipeline::AssetManager* assetManager)
             ColorBand& band = profile.colorBands[c];
             band.numKeyframes = n;
             for (uint8_t k = 0; k < n; ++k) {
-                // The sky's colours without Enhanced's exposure
+                // The sky's colours without the reference client's exposure
                 // (fl::kSkyExposure): 3.3.5's 8-bit sky has no tone map to
                 // take it back.
                 const uint32_t col = fl::isSkyChannel(c) ? fl::withoutSkyExposure(keys[k].color[c])
@@ -297,11 +308,11 @@ void LightingManager::loadEnhancedProfiles(pipeline::AssetManager* assetManager)
                 ++band.numKeyframes;
             }
         }
-        // The air (enhanced_lights.hpp), Enhanced's global fog layer.
+        // The air (enhanced_lighting_table.hpp), the reference client's global fog layer.
         profile.airDensity = src.airDensity;
         enhancedProfiles_[link.lightId * 8u + link.slot] = profile;
     }
-    LOG_INFO("Enhanced light keyframes: ", enhancedProfiles_.size(), " light slots from wowee/enhanced_lights.bin");
+    LOG_INFO("Enhanced lighting table: ", enhancedProfiles_.size(), " light slots from the table");
 }
 
 const LightParamsProfile* LightingManager::profileForSlot(const LightVolume* volume,
@@ -316,7 +327,7 @@ const LightParamsProfile* LightingManager::profileForSlot(const LightVolume* vol
             return &fit->second;
         }
         // A storm slot that falls back to the clear set falls back to
-        // Enhanced's clear set, so rain does not bring 3.3.5's light back.
+        // the reference client's clear set, so rain does not bring 3.3.5's light back.
         if (slot == LightVolume::SLOT_STORM &&
             paramsIdForSlot(volume, slot) == paramsIdForSlot(volume, LightVolume::SLOT_CLEAR)) {
             return profileForSlot(volume, LightVolume::SLOT_CLEAR, fromEnhanced);
@@ -579,8 +590,8 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     }
 
     // Enhanced daylight (not stock): on the two continents, not under water,
-    // each light Enhanced re-authored is sampled from Enhanced's own keyframes
-    // (enhanced_lights.hpp, profileForSlot); every other light takes the
+    // each light the reference client re-authored is sampled from the reference client's own keyframes
+    // (enhanced_lighting_table.hpp, profileForSlot); every other light takes the
     // averaged trend (enhanced_palette.hpp) by day, before the lights are
     // blended. The sky's fog band takes the fog colour's trend; the fog
     // colour keeps Light.dbc's.
@@ -677,8 +688,8 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
         enhancedTrend(newParams);
     }
 
-    // Enhanced's colours are authored for a linear pipeline: the sun is the
-    // one that, added to the ambient as light, gives what Enhanced's lit face
+    // The reference client's colours are authored for a linear pipeline: the sun is the
+    // one that, added to the ambient as light, gives what the reference client's lit face
     // shows, instead of clipping to white on the 8-bit sum
     // (enhanced_palette::linearLightDirect, docs/re/enhanced-lighting.md 2c).
     if (enhancedActive_) {
@@ -714,11 +725,11 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     float fogClip = std::max(viewDistance_, 1.0f);
     {
         float& farClip = fogClip;
-        // Long view (not stock; the Enhanced preset): Enhanced draws to a
+        // Long view (not stock; the Enhanced preset): the reference client draws to a
         // 7000-yard far clip and its outdoor fog ends at 18000, so what is
         // drawn is never swallowed by a fog wall. Here the fog may end at
         // kLongViewFogReach times the view distance instead of at it, the
-        // WDL horizon carries the land past the clip, and the Enhanced haze
+        // WDL horizon carries the land past the clip, and the enhanced haze
         // gives the distance its air. Only on the maps whose fog is the
         // band's own (below 530), never under water.
         if (longView_ && !farClipFog_ && !isUnderwater)
@@ -802,12 +813,12 @@ void LightingManager::update(const glm::vec3& playerPos, uint32_t mapId, uint32_
     currentParams_ = newParams;
     currentParams_.dayIntensity = dayIntensity;
     currentParams_.nightIntensity = nightIntensity;
-    // Enhanced's sun climbs to 65 degrees, not 85, and rises and sets
+    // The reference client's sun climbs to 65 degrees, not 85, and rises and sets
     // earlier; its bearing and the light's direction are stock
     // (stock_day_night::kEnhancedSunPhi).
     currentParams_.sunDir = enhancedActive_ ? enhancedSunDirection(timeHalfMinutesExact)
                                            : stockSunDirection(timeHalfMinutesExact);
-    // And Enhanced's sun lights the world from where it stands: its shadows
+    // And the reference client's sun lights the world from where it stands: its shadows
     // are cast from the sun (the road through Goldshire lies in the sun at
     // 9:22, under 3.3.5's lower north-west light the trees shade all of it).
     // By day only, eased in over the sun's first 9 degrees, so the night
@@ -1106,7 +1117,7 @@ LightingParams LightingManager::sampleLightParams(const LightParamsProfile* prof
     params.oceanShallowAlpha = profile->oceanShallowAlpha;
     params.oceanDeepAlpha = profile->oceanDeepAlpha;
     params.glow = profile->glow;
-    // Enhanced's air (0 on 3.3.5's own profiles).
+    // The reference client's air (0 on 3.3.5's own profiles).
     params.airDensity = profile->airDensity;
     // The dome's dawn and dusk highlight strength (horizonGlow is what the
     // sky reads it from; blended between lights like the other floats).

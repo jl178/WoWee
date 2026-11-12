@@ -34,7 +34,7 @@ Fields of the structs in include/game/world_packets.hpp, against every mention
 of that name in the tree. A field counts as read when it is named anywhere
 outside the packet header and the parser sources.
 
-TWO THINGS THAT MAKE A NAIVE VERSION REPORT ZERO ENHANCED
+TWO THINGS THAT MAKE A NAIVE VERSION REPORT ZERO INDEFINITELY
 
 Both were hit while writing this, and both fail silently in the safe-looking
 direction - a clean report that has seen nothing.

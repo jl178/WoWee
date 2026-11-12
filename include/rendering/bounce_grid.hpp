@@ -1,10 +1,10 @@
 #pragma once
 
-/// "Bounce light (the reference client)": what the reference client's probe GI gives its shade,
+/// "Bounce light (enhanced)": what the reference client's probe GI gives its shade,
 /// from a world-space grid instead of probes (docs/re/enhanced-lighting.md
 /// section 6b).
 ///
-/// Enhanced traces rays against a software BVH into irradiance probes and adds
+/// The reference client traces rays against a software BVH into irradiance probes and adds
 /// what they hold, resampled into a froxel volume, to every lit pixel: shade
 /// under a canopy is darker and green, shade beside sunlit ground or a sunlit
 /// wall is warm, a forest floor the sky cannot see is dim. What decides those

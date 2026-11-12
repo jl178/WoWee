@@ -880,7 +880,7 @@ void CombatHandler::handleAttackerStateUpdate(network::Packet& packet) {
         } else if (!data.noAnimation()) {
             if (owner_.meleeSwingCallbackRef()) owner_.meleeSwingCallbackRef()(0, data.hitInfo);
         }
-        // The swing timer's clock (Enhanced's PLAYER_SWING): this hand swung
+        // The swing timer's clock (the reference client's PLAYER_SWING): this hand swung
         // now, and swings again after its current swing time, haste included
         // (UNIT_FIELD_BASEATTACKTIME main, off).
         if (!rangedShot) {

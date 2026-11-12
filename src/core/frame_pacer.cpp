@@ -138,7 +138,7 @@ void FramePacer::waitForCap(int fps) {
         // Track the worst recent overshoot rather than the average: the
         // margin has to cover the bad frames, since those are the ones that
         // show. It decays so that a single hitch under load does not leave
-        // the client spinning a millisecond a frame enhanced after.
+        // the client spinning a millisecond a frame ever after.
         if (overshoot > sleepSlackNs_) {
             sleepSlackNs_ = std::min(overshoot, frameNs);   // never a whole frame
         } else {

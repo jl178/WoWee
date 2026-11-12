@@ -56,7 +56,7 @@ public:
     /// distance can be thick where the trees and doorways are.
     static constexpr float kNear = 0.5f;
     static constexpr float kFar = 400.0f;
-    /// The Enhanced haze's reach (sunHaze): the same cells over twice the
+    /// The enhanced haze's reach (sunHaze): the same cells over twice the
     /// depth, so canopy shafts run on past 400 yards. Torch and lamp light
     /// is gathered only in the near kLocalLightReach of either (the inject
     /// shader), which is what kept the longer volume cheap.
@@ -96,9 +96,9 @@ public:
         /// (LightingParams::sunDisc): 0 under a sky with no sun disc, where
         /// it scatters evenly instead of glowing at a sun that is not there.
         float sunLobe = 1.0f;
-        /// Enhanced's canopy shafts (docs/re/enhanced-lighting.md 5c): how
+        /// The reference client's canopy shafts (docs/re/enhanced-lighting.md 5c): how
         /// much more a sunlit cell scatters for the shade round it, 0 for
-        /// none (the stock mist). Only under Enhanced's light, outdoors.
+        /// none (the stock mist). Only under the enhanced light, outdoors.
         float shaftStrength = 0.0f;
         /// How far it is night: the shafts' light is then the moonlight the
         /// shadow map is cast from, not the sun.

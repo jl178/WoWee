@@ -137,7 +137,7 @@ WoweeSoulbindRules WoweeSoulbindRulesLoader::makeVanillaPolicy(
         B::BindOnPickup, B::Uncommon, 0, 0, 0, 0,
         "Green+ quality items bind on pickup. NO "
         "trade window in vanilla - pick it up, it's "
-        "yours forever. Famous source of master-loot "
+        "yours for good. Famous source of master-loot "
         "drama."));
     c.entries.push_back(makeRule(
         4, "Vanilla Epic+ (purple/orange)",

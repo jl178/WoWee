@@ -103,7 +103,7 @@ TEST_CASE("an array part is visited once per element", "[lua][genericfor]") {
 TEST_CASE("an empty table runs the body no times", "[lua][genericfor]") {
     Fixture f;
     // The loop has to *end*, which is the half a wrong control variable
-    // breaks: it would either run forever or never start.
+    // breaks: it would either run endlessly or never start.
     f.ok("n = 0\n"
          "for k, v in {} do n = n + 1 end\n");
     CHECK(f.number("n") == 0);

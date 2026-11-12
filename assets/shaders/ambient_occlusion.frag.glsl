@@ -4,7 +4,7 @@
 // docs/re/enhanced-lighting.md section 4). Drawn by ContactShadowPass with
 // this shader in place of contact_shadow.frag.
 //
-// the reference client draws Intel's ASSAO with the settings of its SSAOSettings row
+// The reference client draws Intel's ASSAO with the settings of its SSAOSettings row
 // 116, which 260 of its 882 LightParams name: radius 1 yard, shadow multiplier
 // 3, shadow power 3, shadow clamp 1, horizon threshold 0.1. This is ASSAO's
 // obscurance term with that radius, threshold, clamp and power, in one pass:
@@ -13,12 +13,12 @@
 //   pixel     o = min(mean(taps) * 4.3, 1) * fade
 //   occlusion max((1 - o)^3, 0.6)
 //
-// The multiplier is ASSAO's default 1 rather than Enhanced's 3, and the
-// ambient light keeps at least 0.6 of itself: Enhanced adds its probe GI over
+// The multiplier is ASSAO's default 1 rather than the reference client's 3, and the
+// ambient light keeps at least 0.6 of itself: the reference client adds its probe GI over
 // the result and Wowee has none (see kStrength). Taps sit on a fixed 24-point
 // spiral 1 yard across on screen, six a pixel, pooled over the 2x2 quad as
 // the contact shadows are; positions are rebuilt in view space. Only the
-// light that comes from all around is occluded (how Enhanced's material
+// light that comes from all around is occluded (how the reference client's material
 // shaders apply its AO was not traced; this is the usual use): the pixel's
 // colour is multiplied by what is left of its light once that share
 // is occluded - the ambient colour against the sun colour times N.L times
@@ -26,7 +26,7 @@
 // light below can brighten as well as darken).
 //
 // Built a second time with BOUNCE_GRID (ambient_bounce.frag.spv) for the
-// "Bounce light (the reference client)" row: the fill's sky and ground terms then take
+// "Bounce light (enhanced)" row: the fill's sky and ground terms then take
 // their colour from a grid baked over the ground around the camera
 // (rendering/bounce_grid.hpp) - the ground's own colour, the canopy over the
 // pixel and its leaves, the walls beside it - in place of one colour
@@ -92,7 +92,7 @@ const float kGridEdge = 0.1;
 // the ground below is in their shade (its bounce weaker), and the ambient
 // itself - the light from all round - is dimmer and is the sky's light
 // passed through the leaves: half the sky's hue, half the leaves'. Against
-// Jered's live Enhanced captures that is what its canopy shade is: darker
+// Jered's live reference captures that is what its canopy shade is: darker
 // than 3.3.5's, and a cool olive-green where 3.3.5's is golden (the leaf
 // textures are yellow-green; the light under them is not).
 const float kCanopySky = 0.7;
@@ -110,9 +110,9 @@ const vec3 kWallAlbedo = vec3(0.5, 0.42, 0.32);
 
 #ifdef SKY_FIELD
 // Built a fourth and fifth time with BOUNCE_GRID and SKY_FIELD
-// (ambient_sky.frag.spv, ambient_sky_fill.frag.spv) for the "Sky shade (WoW
-// Enhanced)" row.
-// The sky over each point under Enhanced's daylight (sky_height_field.hpp;
+// (ambient_sky.frag.spv, ambient_sky_fill.frag.spv) for the "Sky shade
+// (enhanced)" row.
+// The sky over each point under the enhanced daylight (sky_height_field.hpp;
 // docs/re/enhanced-lighting.md 6e): depth maps from straight above round the
 // camera - the tops of the buildings and doodads, the terrain alone - and
 // from straight below, the undersides of the buildings and doodads.
@@ -145,7 +145,7 @@ const float kSkyQuadPerYard = 0.05;
 // kModelClosed (a trunk or a wall stands in the open air beside it).
 const float kSkyClosed = 0.7;
 const float kModelClosed = 0.9;
-// Enhanced's probe GI (giQuality 3) stands in as a fill with no facing - its
+// The reference client's probe GI (giQuality 3) stands in as a fill with no facing - its
 // irradiance volume is read at the pixel and added (section 6) - on the
 // ground in shade. Only in the open: none at kOpenFrom of the sky seen,
 // all of it from kOpenTo.
@@ -190,21 +190,21 @@ const float kDuskWarm = 0.6;
 
 layout(location = 0) out vec4 outColor;
 
-// SSAOSettings 116 (Enhanced 1.60.1.70862).
-const float kRadius = 0.6;           // yards (Enhanced's 1 drew rims a hand wide)
+// SSAOSettings 116 (the reference client 1.60.1.70862).
+const float kRadius = 0.6;           // yards (the reference client's 1 drew rims a hand wide)
 // The most the disk spans on screen, as a share of its height (see main).
 const float kMaxRadiusScreen = 0.03;
 const float kHorizon = 0.1;          // horizon angle threshold
-// Enhanced's ShadowMultiplier is 3 (3 * 4.3, clamped at 10 as ASSAO does).
+// The reference client's ShadowMultiplier is 3 (3 * 4.3, clamped at 10 as ASSAO does).
 // Side by side in Goldshire that took the whole road and every shaded bush
-// down with it: Enhanced puts its probe GI back over the result and Wowee has
+// down with it: the reference client puts its probe GI back over the result and Wowee has
 // none, and 3.3.5's ambient is a larger share of the light. ASSAO's own
-// default multiplier, 1, matches what Enhanced's picture shows.
+// default multiplier, 1, matches what the reference client's picture shows.
 const float kStrength = 4.3;
 const float kClamp = 1.0;            // ShadowClamp
 const float kPower = 3.0;            // ShadowPower
-// The most of the ambient light it takes. Enhanced's own result can reach
-// none, but Enhanced adds its probe GI back on top (section 6); Wowee has no
+// The most of the ambient light it takes. The reference client's own result can reach
+// none, but the reference client adds its probe GI back on top (section 6); Wowee has no
 // bounce light, so at full strength bushes and shaded walls went black.
 // Jered on the live client (Nov 2026): "too strong - it just creates
 // shadows around things". At most a fifth of the ambient now (it was 0.4),
@@ -215,7 +215,7 @@ const float kFloor = 0.8;
 const float kFadeFrom = 60.0;
 // Fill light: how much of the horizon colour the sky gives an upward face,
 // and how much of the sun the ground sends back up at a typical Elwynn grass
-// and dirt colour. Tuned side by side against Enhanced's shade in Goldshire.
+// and dirt colour. Tuned side by side against the reference client's shade in Goldshire.
 const float kFillSky = 0.2;
 const float kFillBounce = 0.2;
 // The most the fill may lift a pixel's light, and only in sunlight: shade
@@ -364,7 +364,7 @@ float groundSunlit(vec3 p, vec3 ldir, int lane) {
         pr.xy = pr.xy * 0.5 + 0.5;
         bool inside = all(greaterThanEqual(pr, vec3(0.0))) && all(lessThanEqual(pr, vec3(1.0)));
         float sun = inside ? texture(uShadowMap, vec3(pr.xy, pr.z - bias)) : 1.0;
-        // Enhanced's sun shadows: the detail map where it covers the point,
+        // The reference client's sun shadows: the detail map where it covers the point,
         // as the surfaces read it (shadow_filter.glsli), so the fill beside
         // a crisp shadow edge turns with the edge rather than over the world
         // map's penumbra. Lifted as above: the ground height is the field's.
@@ -489,7 +489,7 @@ void main() {
     float sumQ = sumH + (takeV ? sv : 0.0);
     float wQ = wH + (takeV ? wv : 0.0);
 #ifdef SKY_FIELD
-    // The sky's visibility under Enhanced's daylight (skyVisibilityLane),
+    // The sky's visibility under the enhanced daylight (skyVisibilityLane),
     // pooled over the quad here, before any pixel of it may discard: a
     // neighbour more than a little off in depth is another surface and its
     // looks are not taken. Only inside the field (fading out over its outer
@@ -580,7 +580,7 @@ void main() {
     bool readGrid = bounceOn && keepPlain < 1.0;
 #endif
     if (fillOn) {
-        // Fill light (a stand-in for Enhanced's probe GI, section 6 of
+        // Fill light (a stand-in for the reference client's probe GI, section 6 of
         // docs/re/enhanced-lighting.md): the sky's light from above, in the
         // zone's horizon colour, and the sun's light bounced off the ground
         // from below, warmed by the ground's colour; a face takes each by how
@@ -692,15 +692,15 @@ void main() {
     }
 #endif
 #ifdef SKY_FIELD
-    // Enhanced's daylight with the sky height field drawn (docs/re/
+    // Enhanced daylight with the sky height field drawn (docs/re/
     // enhanced-lighting.md 6e). What the light at the pixel was is taken
-    // apart again - the ambient by Enhanced's ramp toward the sun (held to
+    // apart again - the ambient by the reference client's ramp toward the sun (held to
     // flat ground's on terrain), the sun under its shadow (all of it on
     // terrain, terrain.frag; 1 - shadowParams.y of it on models) - and put
     // back with the ambient scaled by what of the sky the point sees:
-    // - the ground in shade takes a fill for Enhanced's probe GI: the sky's
+    // - the ground in shade takes a fill for the reference client's probe GI: the sky's
     //   light, and the sun off the ground round it - more where more of that
-    //   ground is in the sun - partly in the sky's hue, as Enhanced's shade
+    //   ground is in the sun - partly in the sky's hue, as the reference client's shade
     //   keeps it; under the trees (little open sky) none of it;
     // - a model (a trunk, a wall, a unit) keeps the bounce light above, its
     //   ambient scaled by its sky;
@@ -751,7 +751,7 @@ void main() {
                 ground = mix(vec3(lum(ground)), ground, kGiBounceSat);
                 // The sun on level ground round it, against its height
                 // at 9:22 (37 degrees) where the fill was set against
-                // Enhanced's shade; squared, as the light's colour is
+                // the reference client's shade; squared, as the light's colour is
                 // already scaled to hold level ground's light as the sun
                 // sinks (enhanced_palette::sunIrradianceScale).
                 litGround = groundSunlit(pos, ldir, skyLane);
@@ -764,7 +764,7 @@ void main() {
                 gi = (fogColor.rgb * kGiSky + bounce) * (open * pc.target.z * occlusion * shade * sunUpF);
             }
             // At dusk the shade is warm: the light in it takes the low sun's
-            // hue at its own brightness (Enhanced's dusk road is dark brown,
+            // hue at its own brightness (the reference client's dusk road is dark brown,
             // not grey-blue), easing in as the sun sinks under kDuskFrom.
             vec3 shadeLight = ambF * (occlusion * skyK) + gi;
             vec3 sunHue = lightColor.rgb / max(lum(lightColor.rgb), 1e-3);
@@ -790,15 +790,15 @@ void main() {
             vec3 fGround = clamp(target / beforeF, 0.0, kEnhancedMaxLift);
             // The rebuild is for the ground in shade. On sunlit ground it
             // also took the plain fill (the bounce pass's warm stand-in for
-            // Enhanced's probe GI) that sunlit ground keeps everywhere else:
+            // the reference client's probe GI) that sunlit ground keeps everywhere else:
             // the lit road at Goldshire 9:22 lost a tenth of its red and
             // green and none of its blue with the sky shade on (lit L -11%,
-            // b/L +24% against Enhanced, lit/shade 1.6 against 1.9-2.3). By
+            // b/L +24% against the reference client, lit/shade 1.6 against 1.9-2.3). By
             // the shade's own weight, sunlit ground keeps what the bounce
             // light gave it - under a sun below 40 degrees, easing back to
             // the rebuild by 55: kept at every height it lifted the Barrens'
             // noon road (65 degrees) 4.5%, past its blow-out bar. The
-            // height is a fit to that bar, not Enhanced's.
+            // height is a fit to that bar, not the reference client's.
             float litKeep = (1.0 - shade) * (1.0 - smoothstep(kLitKeepSun0, kLitKeepSun1, ldir.z));
             fGround = mix(fGround, f, litKeep);
             fF = mix(fModel, fGround, onGround);

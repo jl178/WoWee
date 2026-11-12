@@ -131,7 +131,7 @@ TEST_CASE("each enhancement page keeps its rows together", "[enhancements]") {
     }
 }
 
-TEST_CASE("the Enhanced combat values name rows and lie in their ranges", "[enhancements]") {
+TEST_CASE("the enhanced combat values name rows and lie in their ranges", "[enhancements]") {
     for (const auto& v : kEnhancedCombatValues) {
         INFO(v.key);
         const auto* r = findEnhancementRow(v.key);
@@ -140,7 +140,7 @@ TEST_CASE("the Enhanced combat values name rows and lie in their ranges", "[enha
             CHECK(v.value >= r->minValue);
             CHECK(v.value <= r->maxValue);
         }
-        // Not the stock value: each is a departure the Enhanced set makes.
+        // Not the stock value: each is a departure the enhanced set makes.
         CHECK(v.value != r->stockValue);
     }
 }

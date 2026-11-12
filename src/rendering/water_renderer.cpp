@@ -401,14 +401,14 @@ void WaterRenderer::setCausticsEnabled(bool on) {
 // HD water: water.vert with water_hd.frag, everything else the water's own -
 // layout, vertex format, depth tested and not written, alpha blended. Where
 // the colour copy holds the scene the shader composes the bed itself and
-// writes alpha 1; elsewhere it blends as the stock water does. "Water (WoW
-// Enhanced)" is the same source built with ENHANCED_WATER (water_fw.frag.spv),
+// writes alpha 1; elsewhere it blends as the stock water does. "Water
+// (enhanced)" is the same source built with ENHANCED_WATER (water_enh.frag.spv),
 // so each pipeline carries only its own path.
 VkPipeline WaterRenderer::buildHdPipeline(VkRenderPass pass, VkSampleCountFlagBits samples) {
     if (!vkCtx || !pipelineLayout || pass == VK_NULL_HANDLE) return VK_NULL_HANDLE;
     VkDevice device = vkCtx->getDevice();
     VkShaderModule vertShader, fragShader;
-    const char* fragPath = enhancedWater_ ? "assets/shaders/water_fw.frag.spv" : "assets/shaders/water_hd.frag.spv";
+    const char* fragPath = enhancedWater_ ? "assets/shaders/water_enh.frag.spv" : "assets/shaders/water_hd.frag.spv";
     if (!vertShader.loadFromFile(device, "assets/shaders/water.vert.spv") ||
         !fragShader.loadFromFile(device, fragPath)) {
         LOG_WARNING("WaterRenderer: ", fragPath, " missing - the stock water instead");
@@ -793,7 +793,7 @@ void WaterRenderer::setLiquidLighting(const LightingParams& lighting) {
     frameUBO_.oceanClose = glm::vec4(lighting.oceanCloseColor, lighting.oceanShallowAlpha);
     frameUBO_.oceanFar = glm::vec4(lighting.oceanFarColor, lighting.oceanDeepAlpha);
     // HD water's reflected sky; water.frag never reads these.
-    // The .w's carry the sun for the Enhanced water's highlight and sun gate:
+    // The .w's carry the sun for the enhanced water's highlight and sun gate:
     // dnc.db's day and night intensity and the direction to the sun sprite
     // (the stock light stays up all night; LightingParams::sunDir).
     frameUBO_.skyTop = glm::vec4(lighting.skyTopColor, lighting.dayIntensity);
@@ -2464,12 +2464,12 @@ void WaterRenderer::clearRings() {
     frameUBO_.ringBounds = glm::vec4(0.0f);
 }
 
-// Ripple rings (Enhanced water). A ring lives kRingLife seconds; the shader
+// Ripple rings (enhanced water). A ring lives kRingLife seconds; the shader
 // draws it as a few wavelets on a front that runs out at a fixed speed,
 // lower as it spreads and ages. Each source keeps its own beat, so a bobber
 // bobs out slow rings and someone wading throws them close together.
 void WaterRenderer::updateRings(float deltaTime, const std::vector<RingEmitter>& emitters) {
-    constexpr float kRingLife = 4.5f;  // water_hd.frag FW_RING_LIFE
+    constexpr float kRingLife = 4.5f;  // water_hd.frag ENH_RING_LIFE
     for (auto& r : rings_) r.age += deltaTime;
     rings_.erase(std::remove_if(rings_.begin(), rings_.end(),
                                 [](const WaterRing& r) { return r.age >= kRingLife; }),
@@ -2494,7 +2494,7 @@ void WaterRenderer::updateRings(float deltaTime, const std::vector<RingEmitter>&
     for (int i = 0; i < count; ++i) centre += rings_[i].pos;
     if (count > 0) centre /= static_cast<float>(count);
     float radius = 0.0f;
-    // The shader's front speed (FW_RING_SPEED) times the life, plus the
+    // The shader's front speed (ENH_RING_SPEED) times the life, plus the
     // wavelets' reach behind and ahead of the front.
     constexpr float kRingReach = 0.85f * kRingLife + 1.0f;
     for (int i = 0; i < count; ++i) {

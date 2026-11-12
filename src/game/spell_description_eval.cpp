@@ -6,7 +6,7 @@ namespace {
 
 struct Parser {
     const SpellDescriptionContext& ctx;
-    int depth = 0;   ///< a row may name itself; stop rather than recurse forever
+    int depth = 0;   ///< a row may name itself; stop rather than recurse indefinitely
 
     bool value(const std::string& text, std::size_t& i, double& out);
     bool expression(const std::string& text, std::size_t& i, double& out);

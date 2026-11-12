@@ -1556,7 +1556,7 @@ dependency on the original-interface work. Most are backported from the
 
 ### Networking
 - **Stop dropping every packet that has no payload.** `handlePacket()` ignored any packet whose body was empty, but `getSize()` is the payload length and the opcode is carried separately - for the many opcodes with no payload, the opcode *is* the message. All of them were swallowed before dispatch, which is also why no "unhandled opcode" warning ever fired for them. Eight registered opcodes were affected:
-  - `SMSG_LOGOUT_COMPLETE` - the server logged the character out and moved on while the client waited forever, so the logout countdown ended and nothing happened
+  - `SMSG_LOGOUT_COMPLETE` - the server logged the character out and moved on while the client waited indefinitely, so the logout countdown ended and nothing happened
   - `SMSG_LOGOUT_CANCEL_ACK` - a cancelled logout was never confirmed
   - `SMSG_ATTACKSWING_NOTINRANGE` / `_BADFACING` / `_DEADTARGET` / `_CANT_ATTACK` - none of the four auto-attack errors ever reached the player
   - `SMSG_PET_BROKEN`, `SMSG_INVALIDATE_PLAYER`

@@ -84,7 +84,7 @@ struct WoweeSoulbindRules {
         BindOnAccount  = 3,
         Soulbound      = 4,    // already-soulbound at
                                 // loot time (rare)
-        NoBind         = 5,    // tradable forever
+        NoBind         = 5,    // tradable indefinitely
     };
 
     enum ItemQuality : uint8_t {

@@ -449,7 +449,7 @@ CHECKS = [
      "server messages this client is sent and never handles"),
     # Update-field indices against the server's own UpdateFields.h. Zero, and it
     # has to stay zero: a wrong index reads whatever sits at that slot and the
-    # value is simply wrong forever, with no error anywhere. Five were wrong
+    # value is simply wrong indefinitely, with no error anywhere. Five were wrong
     # when this was written - UNIT_FIELD_BYTES_1 and UNIT_DYNAMIC_FLAGS at 137
     # and 147, which are inside the unit block and so look right, against the
     # server's 74 and 79; and the chosen title and both PvP currencies past

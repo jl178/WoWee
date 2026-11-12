@@ -24,7 +24,7 @@ struct LightingParams {
     /// climbs to the zenith and sets (see stock_day_night.hpp). Follows the
     /// clock alone, so it is neither blended nor smoothed. Defaults to noon.
     glm::vec3 sunDir{0.057f, 0.057f, 0.997f};
-    /// Under Enhanced's daylight, the sun's light times this
+    /// Under enhanced daylight, the sun's light times this
     /// (enhanced_palette::sunIrradianceScale); 1 otherwise. Not blended.
     float sunScale = 1.0f;
     /// How much of the procedural sun the sky shows: 0 where a sky model
@@ -95,8 +95,8 @@ struct LightingParams {
     float oceanShallowAlpha = 0.75f;
     float oceanDeepAlpha = 1.0f;
 
-    /// Enhanced's global fog layer, the "air" (docs/re/enhanced-lighting.md
-    /// 5b): its density per yard at the ground, 0 outside Enhanced's
+    /// The reference client's global fog layer, the "air" (docs/re/enhanced-lighting.md
+    /// 5b): its density per yard at the ground, 0 outside the reference client's
     /// daylight. It scatters the fog colour. Read by the sun haze pass.
     float airDensity = 0.0f;
 };
@@ -269,7 +269,7 @@ struct LightParamsProfile {
 
     FloatBand floatBands[FLOAT_CHANNEL_COUNT];
 
-    /// Enhanced's global fog layer (enhanced_lights.hpp; Enhanced profiles only):
+    /// The reference client's global fog layer (enhanced_lighting_table.hpp; reference profiles only):
     /// the air's density per yard (0: none).
     float airDensity = 0.0f;
 };
@@ -345,26 +345,26 @@ public:
     /// default; 1 is the sky itself. A Wowee option. See
     /// LightingManager::update.
     void setFogSkyBlend(float blend) { fogSkyBlend_ = blend; }
-    /// the reference client's daylight on maps 0 and 1: its own keyframes for every
-    /// light enhanced_lights.hpp matches, the averaged trend
+    /// WoW enhanced daylight on maps 0 and 1: its own keyframes for every
+    /// light enhanced_lighting_table.hpp matches, the averaged trend
     /// (enhanced_palette.hpp) for the rest.
     void setEnhancedDaylight(bool on) { enhancedDaylight_ = on; }
-    /// Whether Enhanced's daylight is lighting the frame: the row on, on a map
-    /// Enhanced re-authored (0 or 1), not under water.
+    /// Whether enhanced daylight is lighting the frame: the row on, on a map
+    /// the reference client re-authored (0 or 1), not under water.
     [[nodiscard]] bool isEnhancedActive() const { return enhancedActive_; }
-    /// Whether the scene is HDR (RGBA16F, tone mapped): the Enhanced sun is
+    /// Whether the scene is HDR (RGBA16F, tone mapped): the enhanced sun is
     /// then added to the ambient as light without holding the sum at one
     /// (enhanced_palette::linearLightDirect).
     void setHdrScene(bool on) { hdrScene_ = on; }
-    /// How many of 3.3.5's lights have Enhanced keyframes (0 before initialize).
+    /// How many of 3.3.5's lights have reference keyframes (0 before initialize).
     [[nodiscard]] size_t enhancedLightCount() const { return enhancedProfiles_.size(); }
     /// Long view: the fog may end past the far clip (see update()).
     void setLongView(bool on) { longView_ = on; }
     /// The far field's reach (far_field::kReach), or 0: with the long view,
     /// the fog ends at kLongViewFogReach times the farther of it and the
-    /// view distance - Enhanced's 18000 over its 7000-yard horizonClip.
+    /// view distance - the reference client's 18000 over its 7000-yard horizonClip.
     void setLongViewReach(float yards) { longViewReach_ = yards; }
-    /// Enhanced's fog end over its far clip: 18000 / 7000.
+    /// The reference client's fog end over its far clip: 18000 / 7000.
     static constexpr float kLongViewFogReach = 18000.0f / 7000.0f;
     [[nodiscard]] float getFogSkyBlend() const { return fogSkyBlend_; }
     /// How much distance fog, as a multiplier on the zone's own fog distances.
@@ -470,15 +470,15 @@ private:
                       float stormIntensity, bool isUnderwater, LightingParams& out,
                       bool* fromEnhanced = nullptr) const;
 
-    /// The profile a volume's slot is sampled from: Enhanced's keyframes for
-    /// it while the Enhanced daylight is on over map 0 or 1 and one exists,
+    /// The profile a volume's slot is sampled from: the reference client's keyframes for
+    /// it while the enhanced daylight is on over map 0 or 1 and one exists,
     /// else the slot's own LightParams (paramsIdForSlot). Null if neither.
     const LightParamsProfile* profileForSlot(const LightVolume* volume,
                                              LightVolume::ParamsSlot slot,
                                              bool* fromEnhanced = nullptr) const;
 
-    /// enhanced_lights.hpp's table, read from the client data's override
-    /// folder, as profiles built over the stock ones (channels Enhanced leaves
+    /// enhanced_lighting_table.hpp's table, read from the client data's override
+    /// folder, as profiles built over the stock ones (channels the reference client leaves
     /// empty keep 3.3.5's bands). No file: none, and the trend everywhere.
     void loadEnhancedProfiles(pipeline::AssetManager* assetManager);
 
@@ -545,9 +545,9 @@ private:
     float fogSkyBlend_ = 0.0f;
     bool enhancedDaylight_ = false;
     bool hdrScene_ = false;
-    /// enhancedDaylight_ and the map being drawn is one Enhanced re-authored.
+    /// enhancedDaylight_ and the map being drawn is one the reference client re-authored.
     bool enhancedActive_ = false;
-    /// Enhanced's keyframes by 3.3.5 light id * 8 + slot (loadEnhancedProfiles).
+    /// The reference client's keyframes by 3.3.5 light id * 8 + slot (loadEnhancedProfiles).
     std::map<uint32_t, LightParamsProfile> enhancedProfiles_;
     bool longView_ = false;
     float longViewReach_ = 0.0f;

@@ -65,7 +65,7 @@ def pulls_glm(path, seen=None):
     if key in seen:
         return False
     seen.add(key)
-    _cache[key] = False        # a cycle answers no rather than recursing forever
+    _cache[key] = False        # a cycle answers no rather than recursing indefinitely
     try:
         text = path.read_text(errors="ignore")
     except OSError:

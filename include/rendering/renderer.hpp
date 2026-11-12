@@ -408,7 +408,7 @@ private:
     bool decideDepthLightPass(bool want, DepthLightPassState& s, const char* fragSpv, const char* name,
                               int blend, VkDescriptorSetLayout extraLayout = VK_NULL_HANDLE,
                               VkDescriptorSetLayout extraLayout2 = VK_NULL_HANDLE);
-    /// "Bounce light (the reference client)" (bounce_grid_gpu.hpp): its grid, made
+    /// "Bounce light (enhanced)" (bounce_grid_gpu.hpp): its grid, made
     /// on first use and let go eight frames after the row goes off; whether
     /// this frame's ambient pass reads it.
     std::unique_ptr<BounceGrid> bounceGrid_;
@@ -416,8 +416,8 @@ private:
     bool bounceFrame_ = false;
     /// Main thread, in update: lands and starts the grid's bakes.
     void updateBounceGrid(float dt);
-    /// The sky over each point under Enhanced's daylight (sky_height_field.hpp),
-    /// the "Sky shade (the reference client)" row: made with the bounce light and the
+    /// The sky over each point under the enhanced daylight (sky_height_field.hpp),
+    /// the "Sky shade (enhanced)" row: made with the bounce light and the
     /// row both on, let go eight frames after either goes off; whether this
     /// frame's ambient pass is the sky build. Drawn by renderSkyField inside
     /// the shadow pass (before the unit map, whose movers' matrices follow
@@ -616,7 +616,7 @@ private:
     NearShadowMask nearShadowMask_;
     std::vector<glm::vec4> nearCasterSpheres_;
     uint32_t nearSphereSplit_[2] = {};  ///< where the units' and doodads' spheres end
-    /// The detail map of Enhanced's sun shadows (shadow_cache.hpp,
+    /// The detail map of the reference client's sun shadows (shadow_cache.hpp,
     /// enh_.enhancedShadows): two images made on first use, the front one
     /// read at binding 6 and the other drawn into whole when the player has
     /// walked or the sun turned, then the two swap. Until they exist binding
@@ -724,7 +724,7 @@ public:
         terrainRelief_ = enabled ? glm::clamp(strength / 0.8f, 0.0f, 2.5f) : 0.0f;
     }
     int getTerrainLoadRadius() const;
-    /// "Far field (the reference client)" is on (applyEnhancements): the buildings'
+    /// "Far field (enhanced)" is on (applyEnhancements): the buildings'
     /// silhouettes reach kFarFieldWmoReach, so six rings of tiles stay loaded.
     bool farField_ = false;
     static constexpr float kFarFieldWmoReach = 3000.0f;

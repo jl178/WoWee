@@ -111,7 +111,7 @@ TEST_CASE("a name that is not declared is not a number", "[spell][description]")
     CHECK_FALSE(evaluateSpellExpression("$<nosuchthing>", ctx, out));
 }
 
-TEST_CASE("a declaration naming itself stops rather than recurring forever",
+TEST_CASE("a declaration naming itself stops rather than recurring indefinitely",
           "[spell][description]") {
     const auto ctx = contextFor("$loop=${$<loop>+1}");
     double out = 0.0;

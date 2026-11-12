@@ -152,7 +152,7 @@ def declaredNames():
 def checkSuppressionNames():
     """Names listed for suppression that no XML declares.
 
-    A name invented here suppresses nothing and reports NOT BUILT forever, which
+    A name invented here suppresses nothing and reports NOT BUILT indefinitely, which
     looks identical to a frame that simply never opens. Names built from
     $parent are composed at run time, so a listed name counts as real when it is
     some declared frame followed by a declared $parent suffix.

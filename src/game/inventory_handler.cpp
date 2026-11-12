@@ -5276,7 +5276,7 @@ void InventoryHandler::handleItemQueryResponse(network::Packet& packet) {
         : ItemQueryResponseParser::parse(packet, data);
     if (!parsed) {
         // Extract entry from raw packet so we can clear the pending query even on parse failure.
-        // Without this, the entry stays in pendingItemQueries_ enhanced, blocking retries.
+        // Without this, the entry stays in pendingItemQueries_ indefinitely, blocking retries.
         if (packet.getSize() >= 4) {
             packet.setReadPos(0);
             // High bit indicates a negative (invalid/missing) item entry response;

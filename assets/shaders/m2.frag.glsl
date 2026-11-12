@@ -342,7 +342,7 @@ void main() {
     vec3 norm = normalize(Normal);
     bool foliageTwoSided = (alphaTest == 2);
     if (!foliageTwoSided && !gl_FrontFacing) norm = -norm;
-    // Under Enhanced's daylight (bit 128) a leaf card seen from its back is
+    // Under enhanced daylight (bit 128) a leaf card seen from its back is
     // lit as its back: with the light from the sun's disc, cards turned to
     // the sun but seen from the shade side glowed as if lit (the yellow
     // crowns against the sun at 15:23); the light through them is the leaf
@@ -417,12 +417,12 @@ void main() {
         // light through it sees the difference.
         bool leafLight = isFoliage && !wmoInterior && (localLightMeta.z & 64) != 0;
         if (shadowParams.x > 0.5 && !wmoInterior) {
-            // Clutter casts into the detail map (Enhanced's sun shadows), and a
+            // Clutter casts into the detail map (the reference client's sun shadows), and a
             // tuft's card is lit with the ground's normal, which lies in the
             // card: read a quarter yard toward the sun, out of its own card.
             vec3 shadowPos = groundDetail && detailShadowParams.x > 0.5 ? FragPos + ldir * 0.25 : FragPos;
             // Leaves take the world map's shade alone: the crowns' light (and
-            // the light through them) was matched to Enhanced's with it, and
+            // the light through them) was matched to the reference client's with it, and
             // the detail map's is for what the crowns throw on the ground.
             shadow = sunShadow(shadowPos, (leafLight && nDotL < 0.0) ? -norm : norm, ldir, isFoliage);
             shadow = mix(1.0, shadow, shadowParams.y);
@@ -450,7 +450,7 @@ void main() {
         // stand on. The stock client lights foliage like any other M2.
         vec3 ambientTerm = wmoInterior ? unpackUnorm4x8(vWmoLight.x).rgb
                                        : rtAmbient(rt, ambientColor.rgb);
-        // Enhanced's ambient (kEnhancedAmbient, 128; enhanced_palette::
+        // The reference client's ambient (kEnhancedAmbient, 128; enhanced_palette::
         // ambientRamp): material3_mesh_ps scales its ambient by a half-Lambert
         // ramp toward the sun, 0.7 on the side turned away to 1.1 facing it in
         // display-encoded light, so a model's shaded side is darker than its
@@ -468,7 +468,7 @@ void main() {
         // No leaf glow (sss unused): stock foliage is lit like any other M2.
 
         // Sun through the leaves (the leafLight row; not stock). WoW
-        // Enhanced's mesh shader (material3_mesh_ps) has a light from behind:
+        // the reference client's mesh shader (material3_mesh_ps) has a light from behind:
         // albedo * colour * sat(-N.L) * (1 - alpha^2), added to the lit
         // colour (docs/re/enhanced-lighting.md 9c). Here it is the sun's,
         // through the face turned to the eye; a thin leaf passes some light
@@ -490,9 +490,9 @@ void main() {
             float back = 0.25 + 0.75 * clamp(-dot(nEye, ldir), 0.0, 1.0);
             float through = lobe * back * shadow * max(sun.w, 0.0) * texColor.a;
             vec3 leafTint = albedo * (0.4 + 0.6 * albedo);
-            // 0.25 under Enhanced's daylight (bit 128): with the world's light
+            // 0.25 under the enhanced daylight (bit 128): with the world's light
             // from the sun's disc the sunward cards are lit already, and at
-            // 1.3 the crowns against the sun went 26% over Enhanced's chroma.
+            // 1.3 the crowns against the sun went 26% over the reference client's chroma.
             float leafStrength = (localLightMeta.z & 128) != 0 ? 0.25 : 1.3;
             vec3 transmit = leafTint * sunColor * (leafStrength * through);
             // Never past a bright leaf: the tone map's knee is 0.8 and the

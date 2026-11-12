@@ -2458,7 +2458,7 @@ void CharacterRenderer::beginSequenceBlend(CharacterInstance& inst, const pipeli
         // Not stock ("Smoother animation changes"): fade from the pose as it
         // was last drawn, both sides of the running fade in it, so neither
         // the swapped incoming side nor the dropped outgoing one pops. The
-        // modern engine stacks its fades (blend trees, Enhanced's
+        // modern engine stacks its fades (blend trees, the reference client's
         // "Animation Blend Tree"); a snapshot is the one-slot form of that.
         if (poseBlend_ && blendMs > 0 && inst.localPose.size() == model.bones.size()) {
             inst.blendFromSeq = -1;

@@ -39,7 +39,7 @@ namespace ui {
 namespace {
 
 /// A path that resolved to nothing. Stored rather than retried, so one bad
-/// SetTexture in an addon does not read a missing file every frame enhanced.
+/// SetTexture in an addon does not read a missing file every frame indefinitely.
 constexpr VkDescriptorSet kMissing = VK_NULL_HANDLE;
 
 uint32_t packColor(const float rgba[4], float alpha) {

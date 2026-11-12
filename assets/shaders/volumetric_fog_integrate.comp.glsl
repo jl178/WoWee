@@ -54,7 +54,7 @@ vec3 rayAt(vec2 uv) {
     return mix(top, bottom, uv.y);
 }
 
-// Under Enhanced's light (localLightMeta.z bit 128) the light the air adds in
+// Under the enhanced light (localLightMeta.z bit 128) the light the air adds in
 // front of a surface is held under a ceiling set by the sky behind it - the
 // zone's fog colour, which the sky is painted to meet at the horizon - plus
 // a little of the sun's own colour, so a dark night sky does not choke the

@@ -4229,7 +4229,7 @@ std::optional<float> WMORenderer::getFloorHeight(float glX, float glY, float glZ
     // Once per place, not once a second. The floor is queried every frame, so
     // a player standing on a spot with no floor under it wrote the same line
     // with the same three coordinates for as long as they stood there - a
-    // second apart, enhanced - and the second line said nothing the first did
+    // second apart, indefinitely - and the second line said nothing the first did
     // not. A place is a couple of units across, and after enough of them the
     // report says so and stops: a run that is finding hundreds has one
     // problem, not hundreds.

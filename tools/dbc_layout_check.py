@@ -23,7 +23,7 @@ draenei tendrils were drawn at all.
 WHAT IT CANNOT SEE
 
 An index that is in range and wrong, which is the larger half. Field 6 of that
-same file exists and reads zero forever. Telling that apart from a genuine zero
+same file exists and reads zero indefinitely. Telling that apart from a genuine zero
 needs to know what the column means - which is what the sibling detectors do by
 probing values, and what a person does by checking a row they recognise.
 

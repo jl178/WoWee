@@ -4,7 +4,7 @@
 /// gathered from the loaded world on the main thread, baked on a worker,
 /// copied into a 256x256x3 RGBA16F array image outside any render pass, and
 /// read by the ambient pass through its own descriptor set. Nothing here
-/// exists until the "Bounce light (the reference client)" row is first on.
+/// exists until the "Bounce light (enhanced)" row is first on.
 
 #include "rendering/bounce_grid.hpp"
 

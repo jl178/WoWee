@@ -318,7 +318,7 @@ two runs each, three 5.5 s windows a view; per-pass medians in ms.
 moves 0.5 ms between runs of the same build; the other three are steady.)
 The Classic preset on the same views, same session: 5.7, 8.9, 11.0, 8.5 and
 8.4 ms, its glow pass 0.27-0.42 ms. Classic's shorter view distance leaves
-it more terrain in the Trade District; elsewhere Enhanced's own passes are
+it more terrain in the Trade District; elsewhere the reference client's own passes are
 now about 1-1.5 ms over it, most of that the final pass's FXAA and the
 fill and bounce pass.
 
@@ -347,7 +347,7 @@ build agree with each other (the glow's sums are kept at half precision).
 
 Tried and left: neighbours' luma through quad derivatives (slower, 1.38 ->
 1.58 ms), skipping the water reflection and refraction copy with no water
-surface in the frustum (at the Enhanced view distance some always is), the
+surface in the frustum (at the reference view distance some always is), the
 fog inject (already half rate).
 
 ### Second round (same day, same setup)

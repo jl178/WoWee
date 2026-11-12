@@ -6322,7 +6322,7 @@ int lua_EditBox_GetText(lua_State* L) {
 /// Absent, so it fell to the no-op catch-all and the box kept whatever it had.
 /// MoneyInputFrame_SetCopper is built on this: it compares GetNumber against
 /// the value it wants and calls SetNumber where they differ, so with the
-/// setter doing nothing the comparison stayed false enhanced. Opening a trade
+/// setter doing nothing the comparison stayed false indefinitely. Opening a trade
 /// runs MoneyInputFrame_SetCopper(TradePlayerInputMoneyFrame, 0) to clear the
 /// three fields, and they held the last amount instead.
 ///
@@ -6719,7 +6719,7 @@ int lua_Slider_SetThumbTexture(lua_State* L) {
             // hides `<bar>ThumbTexture` when a list fits - and the thing the
             // layout has to move along the track, since a <ThumbTexture>
             // carries a size and no anchors and would otherwise sit centred on
-            // the bar enhanced.
+            // the bar indefinitely.
             w->thumbRegion = tid;
         }
     }
@@ -8500,7 +8500,7 @@ void LuaEngine::registerCoreAPI() {
         // *animation* is how FrameXML hides a faded-out frame:
         // alertframes.xml puts `self:GetRegionParent():Hide()` there. Only the
         // group's OnFinished was ever called, so an achievement banner faded to
-        // nothing and stayed on screen enhanced.
+        // nothing and stayed on screen indefinitely.
         "function animMeta:SetScript(k, f) self[k] = f end\n"
         "function animMeta:GetScript(k) return self[k] end\n"
         "function animMeta:GetRegionParent() return self.group and self.group.parent end\n"
@@ -13745,7 +13745,7 @@ void LuaEngine::dispatchMouse(float x, float y, float screenH, MouseButtons butt
     // puts it down.
     //
     // With nothing held it is put down here, whatever else went wrong. A frame
-    // stuck to the cursor follows it enhanced and there is no way back from it
+    // stuck to the cursor follows it indefinitely and there is no way back from it
     // in the running client, so this does not rely on the release path having
     // matched the drag correctly.
     const bool anyHeld = std::any_of(std::begin(buttonDown_), std::end(buttonDown_),

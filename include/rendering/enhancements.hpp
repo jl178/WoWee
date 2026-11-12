@@ -103,7 +103,7 @@ struct Enhancements {
     /// above 0.8 instead, scaled to the glow's own reach (highlight_rolloff.hpp,
     /// E18). Nothing below 0.8 changes, and with no glow nothing changes.
     bool  highlightRollOff = false;
-    /// the reference client's daytime colour grade on the two continents: its noon
+    /// The reference client's daytime colour grade on the two continents: its noon
     /// LUT's per-channel curve, weighted by the hour (enhanced_grade.hpp).
     /// Off is the stock picture, ungraded.
     bool  colorGrade = false;
@@ -111,12 +111,12 @@ struct Enhancements {
     /// two continents: a whiter sun, brighter fill light, a brighter and
     /// bluer sky and haze (enhanced_palette.hpp). Off is Light.dbc's colours.
     bool  enhancedDaylight = false;
-    /// the reference client's global fog layer over the whole view: air thickest
+    /// The reference client's global fog layer over the whole view: air thickest
     /// near the ground, lit by the sky and, mostly forward, by the sun, so
     /// the distance pales and a low sun glows gold (enhanced_haze.frag).
     /// Off is stock: Light.dbc's distance fog alone.
     bool  sunHaze = false;
-    /// Bloom over the highlights, 0 off (fxaa.frag bloomAt). Enhanced ships
+    /// Bloom over the highlights, 0 off (fxaa.frag bloomAt). The reference client ships
     /// its Bloom Intensity at the maximum; stock has only the glow.
     float bloom = 0.0f;
     /// The distance fog ends well past the view distance, as the reference client's
@@ -126,10 +126,10 @@ struct Enhancements {
     /// the far clip.
     bool  longView = false;
     /// Past the view distance the land goes on in its own colours to
-    /// Enhanced's 7000-yard horizonClip (far_field.hpp): the WDL heights
+    /// the reference client's 7000-yard horizonClip (far_field.hpp): the WDL heights
     /// coloured by the minimap, lit and fogged as the ground, and the big
     /// outdoor parts of the loaded buildings out to 3000 yards. With the
-    /// long view, the fog ends at 18/7 of that reach, as Enhanced's. Off is
+    /// long view, the fog ends at 18/7 of that reach, as the reference client's. Off is
     /// stock: the fog-coloured WDL silhouette.
     bool  farField = false;
     /// The scene drawn in 16-bit float (RGBA16F) instead of the screen's 8
@@ -155,16 +155,16 @@ struct Enhancements {
     /// fill row off. Off is stock: no grid, the fill (if on) the same colour
     /// everywhere.
     bool  bounceLight = false;
-    /// With the bounce light, under Enhanced's daylight: the ground lit as
-    /// Enhanced's terrain shader lights it (the ambient by its ramp toward the
+    /// With the bounce light, under the enhanced daylight: the ground lit as
+    /// the reference client's terrain shader lights it (the ambient by its ramp toward the
     /// sun, the shadow on the sun alone, no 70% floor), and what of the sky
     /// each point sees - from a height field drawn round the camera
     /// (sky_height_field.hpp) - scaling its ambient and, in open shade, a
-    /// fill for Enhanced's probe GI (docs/re/enhanced-lighting.md section 6e).
+    /// fill for the reference client's probe GI (docs/re/enhanced-lighting.md section 6e).
     /// Off is the bounce light as it was: no field drawn, the pass's
     /// bounce build, the terrain's floor.
     bool  skyShade = false;
-    /// Enhanced's sun shadows: a third shadow map - the world's casters, the
+    /// The reference client's sun shadows: a third shadow map - the world's casters, the
     /// ground clutter near the player among them - over 72 yards round the
     /// player at a 0.07-yard texel, kept between frames and blended into the
     /// world map at its edge (shadow_cache.hpp detail map,
@@ -201,7 +201,7 @@ struct Enhancements {
     /// depth under the surface, a soft shoreline and a gentle refraction.
     /// Off draws water.frag, the stock surface, and takes no colour copy.
     bool  hdWater = false;
-    /// the reference client's PBR water (docs/re/enhanced-water.md): per liquid, its
+    /// The reference client's PBR water (docs/re/enhanced-water.md): per liquid, its
     /// absorption and scattering colours from LiquidType 1.60.1, its
     /// reflection and sun highlight, foam where the bed meets the surface
     /// and down flowing rivers. Uses the HD water pipelines. Off is the rows
@@ -335,19 +335,19 @@ struct Enhancements {
     /// keep the whole screen. Off is the stock layout across the whole width.
     bool  ultrawideHud = false;
 
-    // ---- Combat feel (the reference client, docs/re/enhanced-combat.md) --------------
+    // ---- Combat feel (enhanced, docs/re/enhanced-combat.md) --------------
     /// A new animation that starts while a cross-fade is still running fades
     /// from the pose as drawn (a snapshot) over its blendTime, so a swing cut
     /// short by a flinch, a run or another swing never pops. Off is the stock
     /// 0x826C40: the fade keeps its outgoing sequence and swaps the incoming
     /// one at once, or drops the outgoing one.
     bool  poseBlend = false;
-    /// The spell queue window in ms (Enhanced's SpellQueueWindow, 400): a press
+    /// The spell queue window in ms (the reference client's SpellQueueWindow, 400): a press
     /// that only the GCD, a cooldown or the cast's end holds within that time
     /// is sent the moment it can be (SpellHandler). 0 is stock 3.3.5a: no
     /// queue, the press refused (or the CVar's own window).
     int   spellQueueWindow = 0;
-    /// Enhanced's swing timer (Blizzard_SwingTimer, Camelot only): a bar per
+    /// The reference client's swing timer (Blizzard_SwingTimer, Camelot only): a bar per
     /// weapon hand over the action bars, filled from each of the player's
     /// own swings to the next and dimmed out of melee range. Off: none.
     bool  swingTimer = false;
@@ -366,15 +366,15 @@ inline constexpr uint32_t kSoftShadows    = 1u << 3;  ///< 9-tap disk instead of
 inline constexpr uint32_t kSmoothLeaves   = 1u << 4;  ///< alpha-to-coverage ramp instead of the 224/255 key
 inline constexpr uint32_t kHdrLight      = 1u << 5;  ///< HDR scene: lit shaders' clamp at 1 lifted (set by the renderer)
 inline constexpr uint32_t kLeafLight     = 1u << 6;  ///< m2.frag sunlight through foliage cards
-/// Enhanced's daylight in use (LightingManager::isEnhancedActive, set by the
-/// renderer): M2s, WMOs and units take Enhanced's ambient, turned toward the
+/// Enhanced daylight in use (LightingManager::isEnhancedActive, set by the
+/// renderer): M2s, WMOs and units take the reference client's ambient, turned toward the
 /// sun (enhanced_palette::kAmbientAway..kAmbientToward by half-Lambert), and
 /// the terrain's shadow floor follows shadowParams.y below stock's 0.7.
 inline constexpr uint32_t kEnhancedAmbient = 1u << 7;
 /// The sky shade's ground light (terrain.frag): set by the renderer with
 /// kEnhancedAmbient while the ambient pass is the sky build.
 inline constexpr uint32_t kSkyShade = 1u << 8;
-/// Enhanced's sun shadows (Enhancements::enhancedShadows): the grass field's
+/// The reference client's sun shadows (Enhancements::enhancedShadows): the grass field's
 /// blades take the sun's shadow (grass.frag).
 inline constexpr uint32_t kEnhancedShadows = 1u << 9;
 }  // namespace enh_bits

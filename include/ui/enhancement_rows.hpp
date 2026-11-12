@@ -19,7 +19,8 @@
 ///     is the Classic preset.
 ///   - every member has exactly one row (a sizeof guard catches a new member
 ///     with none).
-///   - saveKey is never renamed or reused: a saved file keeps its meaning.
+///   - saveKey is never reused, and renamed only with a row in
+///     core/legacy_settings_migration.hpp: a saved file keeps its meaning.
 
 #include "rendering/enhancements.hpp"
 #include "ui/settings_schema.hpp"
@@ -693,9 +694,9 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "Renderer::update: the hour handed to LightingManager::update in place "
                  "of GameHandler::getGameTime; nothing is sent",
      .asInt = &Enhancements::fixedTimeOfDay},
-    {.key = "colorgrade", .label = "Colour grade (the reference client)", .kind = SettingKind::Bool,
-     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "the reference client",
-     .tooltip = "the reference client's daytime grade in Azeroth and Kalimdor: brighter\n"
+    {.key = "colorgrade", .label = "Colour grade (enhanced)", .kind = SettingKind::Bool,
+     .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "Enhanced",
+     .tooltip = "The reference client's daytime grade in Azeroth and Kalimdor: brighter\n"
                 "mid-tones and richer colour around midday, easing off toward\n"
                 "morning and evening. Indoors, at night and in dungeons the\n"
                 "picture is unchanged.",
@@ -703,19 +704,19 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "the curve at the end of the glow composite (fxaa.frag, "
                  "enhanced_grade.hpp): two push constants; keeps that pass running",
      .asBool = &Enhancements::colorGrade},
-    {.key = "enhanceddaylight", .label = "Daylight (the reference client)", .kind = SettingKind::Bool,
+    {.key = "enhanceddaylight", .label = "Enhanced daylight", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "Azeroth and Kalimdor lit with the reference client's own light for each\n"
                 "zone: twelve keys a day with a slow dawn and a long golden\n"
-                "evening, a whiter sun, a brighter sky. Where Enhanced has no\n"
+                "evening, a whiter sun, a brighter sky. Where the reference client has no\n"
                 "match, the day is shifted by its average. Dungeons and\n"
                 "Outland are unchanged.",
      .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "enhanced_daylight",
-     .controls = "LightingManager: Enhanced's keyframes for the lights "
-                 "enhanced_lights.hpp matches, the measured trend "
+     .controls = "LightingManager: the reference client's keyframes for the lights "
+                 "enhanced_lighting_table.hpp matches, the measured trend "
                  "(enhanced_palette.hpp) for the rest, before the band blend",
      .asBool = &Enhancements::enhancedDaylight},
-    {.key = "sunhaze", .label = "Sun haze (the reference client)", .kind = SettingKind::Bool,
+    {.key = "sunhaze", .label = "Sun haze (enhanced)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "Air over the whole view, thickest near the ground: the distance\n"
                 "pales into the sky and the air round a low sun glows gold, as\n"
@@ -733,7 +734,7 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "bloomAt in the glow composite (fxaa.frag): 9 taps of the quarter-size "
                  "scene; keeps that pass running",
      .asFloat = &Enhancements::bloom},
-    {.key = "longview", .label = "Long view (the reference client)", .kind = SettingKind::Bool,
+    {.key = "longview", .label = "Long view (enhanced)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "The distance fog ends well past the edge of what is drawn, as\n"
                 "the reference client's does, so far hills stand clear in the haze\n"
@@ -742,7 +743,7 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "LightingManager: the frame fog's end at 18/7 of the view distance "
                  "on maps below 530",
      .asBool = &Enhancements::longView},
-    {.key = "farfield", .label = "Far field (the reference client)", .kind = SettingKind::Bool,
+    {.key = "farfield", .label = "Far field (enhanced)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "Past the view distance the land goes on in its own colours\n"
                 "to the reference client's 7000 yards, lit and hazed like the ground\n"
@@ -754,7 +755,7 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "reach for big outdoor groups; with the long view, the fog's end at "
                  "18/7 of the far reach",
      .asBool = &Enhancements::farField},
-    {.key = "hdrscene", .label = "HDR lighting (the reference client)", .kind = SettingKind::Bool,
+    {.key = "hdrscene", .label = "HDR lighting (enhanced)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "The world drawn with more than the screen's range of light, as\n"
                 "the reference client's is, so the sun, the sky round it and bright\n"
@@ -765,7 +766,7 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "pipeline remade in RGBA16F (the anti-aliasing rebuild); ~2x the scene "
                  "colour memory and bandwidth",
      .asBool = &Enhancements::hdrScene},
-    {.key = "leaflight", .label = "Sun through leaves (the reference client)", .kind = SettingKind::Bool,
+    {.key = "leaflight", .label = "Sun through leaves (enhanced)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "Looking toward the sun, the leaves of trees and bushes in front\n"
                 "of it glow warm in their own colour with the light coming\n"
@@ -775,7 +776,7 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "a branch in m2.frag for the foliage cutout batches (enh_bits::kLeafLight); "
                  "no extra texture or shadow reads",
      .asBool = &Enhancements::leafLight},
-    {.key = "bouncelight", .label = "Bounce light (the reference client)", .kind = SettingKind::Bool,
+    {.key = "bouncelight", .label = "Bounce light (enhanced)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "Shade takes the colour of what is around it, as in the reference client:\n"
                 "green and dimmer under the trees, warm beside sunlit ground and\n"
@@ -787,7 +788,7 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "the camera moves 48 yd; the ambient pass's BOUNCE_GRID build reads it "
                  "(about 7 filtered taps a pixel)",
      .asBool = &Enhancements::bounceLight},
-    {.key = "skyshade", .label = "Sky shade (the reference client)", .kind = SettingKind::Bool,
+    {.key = "skyshade", .label = "Sky shade (enhanced)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "With the bounce light: shade lit as in the reference client. The sun's\n"
                 "shadow takes the sun alone, so shade keeps the sky's cooler\n"
@@ -798,9 +799,9 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "SkyHeightField (made on first use): three 512x512 depth maps round the "
                  "camera drawn with the shadow casters, two parts every 32 yd or 2 s; the "
                  "ambient pass's SKY_FIELD build reads them (about 0.4 ms more at 1280x540 "
-                 "on an Iris Xe); terrain.frag's Enhanced light (enh_bits::kSkyShade)",
+                 "on an Iris Xe); terrain.frag's enhanced light (enh_bits::kSkyShade)",
      .asBool = &Enhancements::skyShade},
-    {.key = "enhancedshadows", .label = "Sun shadows (the reference client)", .kind = SettingKind::Bool,
+    {.key = "enhancedshadows", .label = "Sun shadows (enhanced)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "Crisp sun shadows near you, as in the reference client: leaves dapple\n"
                 "the ground through their gaps, plants and grass take the shade\n"
@@ -811,7 +812,7 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                  "every 9 yd or 0.15 degrees of sun; shadow_cache.hpp) read by the surface "
                  "shaders before the world map; one tap per grass blade fragment",
      .enabledWhen = "shadows", .asBool = &Enhancements::enhancedShadows},
-    {.key = "enhancedwater", .label = "Water (the reference client)", .kind = SettingKind::Bool,
+    {.key = "enhancedwater", .label = "Water (enhanced)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "Lakes, rivers, the sea and the canals as the reference client draws\n"
                 "them: clear in the shallows and deepening to each water's own\n"
@@ -819,7 +820,7 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
                 "foam where the shore and rocks break the surface and down\n"
                 "running rivers. Lava and slime stay as they are.",
      .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "enhanced_water",
-     .controls = "the HD water pipelines (water_hd.frag) in Enhanced's mode, made on "
+     .controls = "the HD water pipelines (water_hd.frag) in the enhanced mode, made on "
                  "first use; the scene's depth and colour copies as HD water takes them",
      .asBool = &Enhancements::enhancedWater},
 
@@ -828,8 +829,8 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "Combat feel",
      .tooltip = "When a character changes what it is doing in the middle of a\n"
                 "change - a swing cut short by a flinch, a cast by a run - it\n"
-                "eases from where its body is into the new move, as in WoW\n"
-                "Enhanced. Off is the original, which can jump part of the way.",
+                "eases from where its body is into the new move, as in the\n"
+                "reference client. Off is the original, which can jump part of the way.",
      // docs/re/enhanced-combat.md: a copy of the pose per interrupted fade.
      .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "pose_blend",
      .controls = "the snapshot branch of CharacterRenderer::beginSequenceBlend (a fade "
@@ -850,7 +851,7 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "A bar over the action bars that fills from each of your melee\n"
                 "swings to the next, one per weapon hand, dimmed when your\n"
-                "target is out of reach. the reference client's swing timer; the\n"
+                "target is out of reach. The reference client's swing timer; the\n"
                 "original game has none.",
      .choices = "", .stockValue = 0, .recommendedValue = 1, .saveKey = "swing_timer",
      .controls = "GameScreen::renderSwingTimer: two ImGui bars in combat, from "
@@ -943,7 +944,7 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
 };
 
 /// The combat, targeting and animation rows as the reference client has them
-/// (docs/re/enhanced-combat.md): what a "Enhanced" set gives these keys.
+/// (docs/re/enhanced-combat.md): what an "Enhanced" set gives these keys.
 struct EnhancementPresetValue {
     const char* key;
     float value;

@@ -56,7 +56,7 @@ public:
     /// the boss frames, the guild roster, the friends list, the dungeon finder
     /// and the who window, all of which are FrameXML's now, and what was left
     /// was this one line beside four unread text buffers.
-    /// the reference client's swing timer bars (enhancement "swingtimer").
+    /// The reference client's swing timer bars (enhancement "swingtimer").
     void renderSwingTimer(game::GameHandler& gameHandler);
     void openInspectWindow(game::GameHandler& gameHandler);
 

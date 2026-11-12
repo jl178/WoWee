@@ -5,6 +5,7 @@
 #include "ui/game_screen.hpp"
 #include "ui/settings_schema.hpp"
 #include "ui/enhancement_rows.hpp"
+#include "core/legacy_settings_migration.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "ui/ui_raid_icons.hpp"
 #include "ui/ui_colors.hpp"
@@ -2181,17 +2182,20 @@ void GameScreen::loadSettings() {
     bool bagScaleLoaded = false;
     bool windowScaleLoaded = false;
     bool actionBarScaleLoaded = false;
+    // The whole file first, so a key renamed since it was written loads under
+    // its new name (core/legacy_settings_migration.hpp).
+    std::vector<std::pair<std::string, std::string>> lines;
     std::string line;
     while (std::getline(in, line)) {
         size_t eq = line.find('=');
         if (eq == std::string::npos) continue;
-        std::string key = line.substr(0, eq);
-        std::string val = line.substr(eq + 1);
-
+        lines.emplace_back(line.substr(0, eq), line.substr(eq + 1));
+    }
+    for (const auto& [key, val] : core::migrateSettingsLines(std::move(lines))) {
         try {
             // Every enhancement, by its saved key, held to its row's range
-            // (kEnhancementRows). The keys are the ones these settings were
-            // always saved under, so an older file reads the same.
+            // (kEnhancementRows). A key renamed since is read through the
+            // legacy migration table, so an older file reads the same.
             if (const EnhancementRow* row = findEnhancementRowBySaveKey(key)) {
                 setEnhancementValue(settingsPanel_.enhancements, *row,
                                     row->asBool ? (std::stoi(val) != 0 ? 1.0f : 0.0f)

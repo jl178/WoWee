@@ -87,7 +87,7 @@ struct WaterSurface {
 // Matches set 2 binding 3 in water.frag.glsl. Keep kMaxWakePoints in step with
 // the MAX_WAKE_POINTS constant declared there.
 constexpr int kMaxWakePoints = 32;
-// Ripple rings on Enhanced water (water_hd.frag's FW_RINGS): at most this many
+// Ripple rings on enhanced water (water_hd.frag's ENH_RINGS): at most this many
 // expanding at once.
 constexpr int kMaxWaterRings = 16;
 
@@ -238,8 +238,8 @@ public:
     /// water.frag and no colour copy.
     void setHdWater(bool on);
     [[nodiscard]] bool hdWater() const { return hdWater_; }
-    /// Water (the reference client) (docs/re/enhanced-water.md): the HD pipelines in
-    /// Enhanced's mode (hdParams.x = 2) - its absorption and scattering per
+    /// Water (enhanced) (docs/re/enhanced-water.md): the HD pipelines in
+    /// the enhanced mode (hdParams.x = 2) - its absorption and scattering per
     /// liquid, its reflection and highlight, foam at the shore, rocks and in
     /// flowing rivers. Needs the HD pipelines; the renderer turns those on
     /// with it.
@@ -267,7 +267,7 @@ public:
     }
     /// The wake froth (not stock) off: no points, nothing drawn.
     void clearWake();
-    /// Something touching the surface of Enhanced water - a unit wading or
+    /// Something touching the surface of enhanced water - a unit wading or
     /// swimming at the top, a fishing bobber: it sends out a ring every
     /// `period` seconds while it stays (the first at once), `strength` its
     /// height. Keyed so each source keeps its own beat.

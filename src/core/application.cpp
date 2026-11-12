@@ -4140,7 +4140,7 @@ void Application::applyServerMovementState(float deltaTime) {
         // attachment, while folding real WASD/jump movement since
         // last frame into that offset. Treating ships as fully
         // externally driven cleared movement input and reapplied the
-        // boarding-time offset enhanced, freezing the player in a
+        // boarding-time offset indefinitely, freezing the player in a
         // running pose at the point where they stepped aboard.
         auto* tm = gameHandler->getTransportManager();
         auto* tr = tm ? tm->getTransport(gameHandler->getPlayerTransportGuid()) : nullptr;
@@ -4217,7 +4217,7 @@ void Application::applyServerMovementState(float deltaTime) {
                     // on boarding and cleared only by a successful deck query,
                     // so boarding somewhere the query never succeeds - a
                     // gangway that belongs to the pier rather than the hull -
-                    // reapplied the boarding offset every frame enhanced. That
+                    // reapplied the boarding offset every frame indefinitely. That
                     // is a rider running on the spot, unable to walk far
                     // enough to trigger disembark and so unable to get off.
                     deckFloorPending_ = false;
@@ -4289,7 +4289,7 @@ void Application::applyServerMovementState(float deltaTime) {
                     // shows up as horizontal render-position drift, and this code
                     // previously couldn't tell that apart from real WASD input - it baked
                     // ANY frame-to-frame position change into localOffset, compounding
-                    // enhanced. Gate on genuine movement input (the same signal driving the
+                    // indefinitely. Gate on genuine movement input (the same signal driving the
                     // walking animation) so gravity noise while stationary is ignored
                     // instead of accumulated; only apply the delta when the player is
                     // actually pressing a movement key.
@@ -7601,7 +7601,7 @@ void Application::updateUnitHighlights() {
 // Enhanced water's ripple rings: what touches the surface near the camera -
 // a unit standing or wading in it, swimming at the top, a fishing bobber
 // (FISHINGNODE, type 17) - sends out rings, faster while it moves and quick
-// while a fish bites. Only with "Water (the reference client)" on.
+// while a fish bites. Only with "Water (enhanced)" on.
 void Application::updateWaterRings() {
     auto* water = renderer ? renderer->getWaterRenderer() : nullptr;
     if (!water) return;

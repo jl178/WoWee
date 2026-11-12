@@ -8,6 +8,7 @@
 #include "ui/graphics_choices.hpp"
 #include "ui/graphics_presets.hpp"
 #include "ui/settings_panel.hpp"
+#include "core/legacy_settings_migration.hpp"
 #include "core/profile_tag.hpp"
 #include "addons/addon_manager.hpp"
 #include "ui/settings_schema.hpp"
@@ -749,6 +750,9 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
 
 
 std::string SettingsPanel::settingValue(const std::string& key) const {
+    // A setting's name from before the rename to the enhanced naming, as an
+    // addon or a script may still spell it (core/legacy_settings_migration.hpp).
+    if (const char* renamed = core::migratedSettingName(key)) return settingValue(renamed);
     // The graphics preset is an enum class rather than one of the three field
     // types, and it is the only setting whose value is derived: touching any of
     // the settings it covers moves it to Custom, so what it reads is whatever
@@ -810,6 +814,7 @@ double clampedToSchema(const std::string& key, double value) {
 }  // namespace
 
 bool SettingsPanel::setSettingValue(const std::string& key, const std::string& value) {
+    if (const char* renamed = core::migratedSettingName(key)) return setSettingValue(renamed, value);
     const double v = std::atof(value.c_str());
     const bool on = settingIsOn(value);
 

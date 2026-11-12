@@ -125,7 +125,7 @@ void Renderer::decideContactShadows() {
         vkCtx->deferAfterAllFrameFences([prev]() mutable { prev.reset(); });
         bounceOffFrames_ = 0;
     }
-    // "Sky shade (the reference client)" rides on the bounce light: its build of the
+    // "Sky shade (enhanced)" rides on the bounce light: its build of the
     // pass (SKY_FIELD) also reads the sky height field, as set 3. Off, the
     // pass is the bounce build as it was, and nothing draws the field.
     bool sky = bounce && enh_.skyShade && shadowRenderPass != VK_NULL_HANDLE;
@@ -153,7 +153,7 @@ void Renderer::decideContactShadows() {
                                         sky ? skyField_->setLayout() : VK_NULL_HANDLE) &&
                    bounce;
     skyFrame_ = bounceFrame_ && sky;
-    // The Enhanced haze lays light over everything the opaque pass drew.
+    // The enhanced haze lays light over everything the opaque pass drew.
     decideDepthLightPass(enh_.sunHaze && indoorFactor_ < 0.99f, sunHaze_,
                          "assets/shaders/enhanced_haze.frag.spv", "Sun haze",
                          static_cast<int>(ContactShadowPass::Blend::OverTransmittance));
@@ -192,7 +192,7 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
                 sky = skyField_->params();
                 skySet = skyField_->set();
                 // WOWEE_SKY_DEBUG=1 darkens each pixel by what of the sky it
-                // sees, under Enhanced's daylight (flag 32).
+                // sees, under the enhanced daylight (flag 32).
                 static const bool kSkyDebug = std::getenv("WOWEE_SKY_DEBUG") != nullptr;
                 flags |= kSkyDebug ? 32 : 0;
             }
@@ -225,8 +225,8 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
         const float wx = weather ? glm::clamp(weather->getIntensity(), 0.0f, 1.0f) : 0.0f;
         // Flag 8: the HDR scene, where the haze's light may pass 1.3.
         const int hazeFlags = vkCtx->isHdrScene() ? 8 : 0;
-        // Enhanced's air (its global fog layer, docs/re/enhanced-lighting.md
-        // 5b): its density per yard, 0 outside Enhanced's daylight.
+        // The reference client's air (its global fog layer, docs/re/enhanced-lighting.md
+        // 5b): its density per yard, 0 outside the enhanced daylight.
         // Its r: how much of the sun's light scatters toward the sun, 0 under
         // a sky with no sun disc (LightingParams::sunDisc, Outland).
         glm::vec4 air(1.0f, 0.0f, 0.0f, 0.0f);
@@ -257,7 +257,7 @@ void Renderer::updateBounceGrid(float dt) {
 // draw rebuilds both for its own matrix (the world map's next part rebuilds
 // them again, as it would for a moved sun), so the two must not share a
 // frame. The candidates are asked with the world map's centre and radius,
-// which keeps their list. Under Enhanced's daylight only: nothing else reads it.
+// which keeps their list. Under enhanced daylight only: nothing else reads it.
 void Renderer::renderSkyField() {
     if (!skyField_ || !skyFrame_ || !camera || currentCmd == VK_NULL_HANDLE || worldShadowCullRadius_ <= 0.0f) return;
     if (!lightingManager || !lightingManager->isEnhancedActive()) return;

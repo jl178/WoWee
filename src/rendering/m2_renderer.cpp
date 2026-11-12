@@ -2976,7 +2976,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {
                 int32_t parent = (i < model.bones.size())
                     ? model.bones[i].parentBone : -1;
                 // Bounded by the bone count: a malformed parent cycle would
-                // otherwise spin here enhanced.
+                // otherwise spin here indefinitely.
                 for (std::size_t guard = 0; parent >= 0 && guard < boneCount; ++guard) {
                     const std::size_t p = static_cast<std::size_t>(parent);
                     if (p >= boneCount || p >= model.bones.size()) break;

@@ -264,7 +264,7 @@ struct SpellRules {
     float speed = 0.0f;
     /// The caster's cast time for it is not zero (the unit's virtual
     /// GetSpellCastTime, 0x71AD20: SpellCastTimes from CastingTimeIndex, or
-    /// "enhanced" for SPELL_ATTR0 0x2).
+    /// "endless" for SPELL_ATTR0 0x2).
     bool castTime = false;
 };
 

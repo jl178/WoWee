@@ -6,7 +6,7 @@ Two shapes, one failure:
   * **a boolean**, where `x == 0` against `true`/`false` is silently false and
     the branch simply never runs. IsActionInRange is the case that named this:
     actionbutton.lua tests `valid == 0` and `valid == 1` for the out-of-range
-    indicator, and a boolean would have failed both and hidden it forever.
+    indicator, and a boolean would have failed both and hidden it indefinitely.
 
   * **nil**, which is worse, because it fails the comparison in the *other*
     direction. `nil ~= 0` is **true** in Lua, so a binding answering nil where
@@ -59,7 +59,7 @@ THE TWO THE FIRST ARM REPORTS TODAY
     reachability.
   * GetWintergraspWaitTime - guarded the careful way, `if ( nextBattleTime and
     nextBattleTime > 60 )`, so nil takes the final else and the timer reads
-    "in progress" forever. Wrong on screen and safe underneath, and there is
+    "in progress" indefinitely. Wrong on screen and safe underneath, and there is
     no better answer: a number would be a more confident lie.
 
 Verified failable by restoring GetQuestWorldMapAreaID's lua_ReturnNil, which

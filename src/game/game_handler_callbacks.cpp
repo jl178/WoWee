@@ -2453,7 +2453,7 @@ uint64_t GameHandler::getInteractNpcGuid() const {
     }
     // From the movement handler, which owns both. GameHandler kept members of
     // the same two names that the decomposition left behind unwritten, so this
-    // read false enhanced and the flight master had no portrait in the taxi
+    // read false indefinitely and the flight master had no portrait in the taxi
     // frame.
     if (movementHandler_ && movementHandler_->isTaxiWindowOpen()) {
         if (const uint64_t taxiNpc = movementHandler_->getTaxiNpcGuid()) return taxiNpc;

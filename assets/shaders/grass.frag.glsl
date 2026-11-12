@@ -25,7 +25,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
     ivec4 localLightMeta;
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
     // The rest of the block as far as the sun's shadow maps
-    // (shadow_filter.glsli), for Enhanced's sun shadows on the blades.
+    // (shadow_filter.glsli), for the reference client's sun shadows on the blades.
     mat4 rtViewProj;
     vec4 rtCameraPos;
     vec4 rtParams;
@@ -111,7 +111,7 @@ void main() {
 
     // Wrapped diffuse, so the unlit side falls off softly rather than going
     // black - grass is thin enough to pass light through.
-    // Under Enhanced's daylight (bit 128) the blades take the ground's light,
+    // Under enhanced daylight (bit 128) the blades take the ground's light,
     // as clutter is lit from the terrain under it (and as Wowee's M2 clutter
     // already is): with the light from the sun's disc, a high noon sun
     // otherwise left upright blades in their own half-light.
@@ -124,7 +124,7 @@ void main() {
 
     // Light through the blade: looking toward the sun the upper blade glows
     // with the light behind it, as a meadow does against a low sun (WoW
-    // Enhanced's Goldshire afternoon). Without it the field read as dark
+    // the reference client's Goldshire afternoon). Without it the field read as dark
     // stubs exactly where the sun made everything else brightest. Strongest
     // looking straight into the sun, gone by 60 degrees off it, and only
     // while the sun is up. The sun is the sprite's direction and its day
@@ -136,8 +136,8 @@ void main() {
     float facing = clamp(dot(normalize(vWorldPos - viewPos.xyz), sun.xyz), 0.0, 1.0);
     float through = facing * facing * facing * vHeightT * max(sun.w, 0.0);
 
-    // Enhanced's sun shadows (enh_bits::kEnhancedShadows, 512): the blade
-    // takes the sun's shadow where it stands, one tap, as Enhanced's clutter
+    // The reference client's sun shadows (enh_bits::kEnhancedShadows, 512): the blade
+    // takes the sun's shadow where it stands, one tap, as the reference client's clutter
     // does; without it a field under the trees glowed in full sun.
     // As deep as the ground under the blade takes it (terrain.frag): the
     // whole of the sun under the sky shade (256), else the map's share.

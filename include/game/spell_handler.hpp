@@ -254,7 +254,7 @@ public:
 
     // Spell queue. Stock 3.3.5a has none; SpellQueueWindow (a later
     // client's CVar, ms, default 0 here) or the "Spell queue window"
-    // enhancement (the reference client's 400 ms, docs/re/enhanced-combat.md) brings it.
+    // enhancement (enhanced's 400 ms, docs/re/enhanced-combat.md) brings it.
     [[nodiscard]] uint32_t getQueuedSpellId() const {
         return queuedSpellId_ != 0 ? queuedSpellId_ : readyQueuedSpellId_;
     }
@@ -817,7 +817,7 @@ private:
     uint64_t queuedSpellTarget_ = 0;
     /// A press refused only by the global cooldown or the spell's own
     /// cooldown, within the queue window of its end: sent by updateTimers the
-    /// moment the spell is ready (Enhanced's SpellQueueWindow).
+    /// moment the spell is ready (the reference client's SpellQueueWindow).
     uint32_t readyQueuedSpellId_ = 0;
     uint64_t readyQueuedTarget_ = 0;
     std::chrono::steady_clock::time_point readyQueuedAt_{};

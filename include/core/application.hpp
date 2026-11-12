@@ -495,7 +495,7 @@ private:
     void loadQuestMarkerModels();  // No-op; the models load on first use
     void updateQuestMarkers();     // Places, turns and removes the marker instances
     void updateLootSparkles();
-    void updateWaterRings();       // Enhanced water: rings round units and bobbers touching the surface
+    void updateWaterRings();       // enhanced water: rings round units and bobbers touching the surface
     std::unordered_map<uint64_t, glm::vec3> waterRingLastPos_;
     std::chrono::steady_clock::time_point waterRingClock_{};
     bool waterRingClockSet_ = false;     // The glitter over corpses with loot, and when a corpse is down

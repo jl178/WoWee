@@ -574,7 +574,7 @@ public:
     float getAuctionSearchDelay() const { return auctionSearchDelayTimer_; }
     // Ticked from GameHandler::update - this member is the authoritative
     // timer (GameHandler used to decrement its own never-set copy, leaving
-    // the search button disabled enhanced after the first search).
+    // the search button disabled ever after the first search).
     void tickAuctionSearchDelay(float deltaTime) {
         if (auctionSearchDelayTimer_ > 0.0f) {
             auctionSearchDelayTimer_ -= deltaTime;

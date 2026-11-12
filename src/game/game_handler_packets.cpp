@@ -3723,7 +3723,7 @@ void GameHandler::handlePacket(network::Packet& packet) {
     // opcode is carried separately, so for the many opcodes that have no payload the
     // opcode *is* the message. Dropping them here silently swallowed
     // SMSG_LOGOUT_COMPLETE - the server logged the character out and moved on while
-    // the client waited enhanced, so the countdown ended and nothing happened.
+    // the client waited indefinitely, so the countdown ended and nothing happened.
     uint16_t opcode = packet.getOpcode();
 
     try {

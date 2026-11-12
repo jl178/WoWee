@@ -50,7 +50,7 @@ namespace pipeline {
 //     iconColorRGBA (uint32)
 struct WoweeCreaturePatrol {
     enum PathKind : uint8_t {
-        Loop      = 0,    // patrol forever in a circle
+        Loop      = 0,    // patrol endlessly in a circle
         OneShot   = 1,    // walk once, then idle at last waypoint
         Reverse   = 2,    // walk to end, walk back, repeat
         Random    = 3,    // pick next waypoint randomly each step

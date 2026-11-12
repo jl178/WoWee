@@ -1,6 +1,6 @@
-# the reference client: combat, targeting and animation feel
+# The reference client: combat, targeting and animation feel
 
-What the official "the reference client" client (build `WOW-70862patch1.60.1`,
+What the official reference client (build `WOW-70862patch1.60.1`,
 product `wowf`, launched 2026-11-04: the 1.12 game on Blizzard's current
 engine) does differently from stock 3.3.5a in combat, targeting and
 animation, how that was established, and what Wowee took from it. Read with
@@ -14,7 +14,7 @@ animation, how that was established, and what Wowee took from it. Read with
   bits/byte, and a scan for RIP-relative `lea`/`mov` found 23 thousand hits
   where a plain x64 binary of that size has millions, none of them to the
   CVar names. Disassembly would need a dump of the running process on
-  Jered's PC, which was out of reach. So nothing below quotes Enhanced's
+  Jered's PC, which was out of reach. So nothing below quotes the reference client's
   machine code; where a rule needs code (Tab ordering weights, the
   directional damage numbers' curve, blend-tree weights) it is marked as not
   known.
@@ -23,16 +23,16 @@ animation, how that was established, and what Wowee took from it. Read with
   textures) and the whole interface (Lua/XML), Jered's `Config.wtf`, and his
   Moonlight stream (one capture).
 - **How the data was read.** The share has the CASC store but serves no
-  byte ranges, so files were found through Enhanced's own build config
+  byte ranges, so files were found through the reference client's own build config
   (`Data/config/5a/da/5ada954...`), encoding and root (`wowf` root, 1.25 M
   files), the local `.idx` files, and fetched by byte range from the CDN
   archives the CDN config's archive-group index names. Tools in the session
   scratchpad (`fc-scripts/casc.py`, `addon.py`, `pget.py`, `m2seq.py`,
   `m2keys.py`, `blp.py`, `xr.py`); paths from the community listfile.
-- **Enhanced's interface is the current "Mainline" one** with a `Camelot`
+- **The reference client's interface is the current "Mainline" one** with a `Camelot`
   game type: tocs carry `[AllowLoadGameType camelot]`, and `Camelot\`
   overrides sit beside `Mainline\` ones (nameplates, settings). `Camelot`
-  is Enhanced's internal name (`wow_camelot` telemetry, `CamelotCombat`
+  is the reference client's internal name (`wow_camelot` telemetry, `CamelotCombat`
   trait config type).
 
 ## 1. Animation
@@ -40,11 +40,11 @@ animation, how that was established, and what Wowee took from it. Read with
 ### Models: the HD characters, same timing as 3.3.5
 
 `character/human/male/humanmale.m2` (FileDataID 119940) and
-`humanmale_hd.m2` (1011653) are the same file in Enhanced: the HD model, M2
+`humanmale_hd.m2` (1011653) are the same file in the reference client: the HD model, M2
 version 272, 416 sequences (3.3.5: 156), 215 bones (138). The sequences
 that matter in a fight have the 3.3.5 timing exactly (`m2seq.py`):
 
-| Sequence | 3.3.5 dur / speed / blend | Enhanced dur / speed / blendIn |
+| Sequence | 3.3.5 dur / speed / blend | reference dur / speed / blendIn |
 |---|---|---|
 | Stand 0 | 2667 ms / - / **500** | 2667 / - / **150** |
 | Walk 4 | 1000 / 2.50 / 150 | 1000 / 2.50 / 150 |
@@ -55,14 +55,14 @@ that matter in a fight have the 3.3.5 timing exactly (`m2seq.py`):
 | Sprint 143 | 666 / - | 666 / 11.0 |
 
 The 3.3.5 `blendTime` (u32 at +0x1C) became `blendTimeIn`/`blendTimeOut`
-(two u16); every Enhanced sequence read has `blendTimeOut` 0. So the
+(two u16); every reference sequence read has `blendTimeOut` 0. So the
 cross-fade lengths are the 3.3.5 ones; the change is that Stand fades in
 over 150 ms rather than 500.
 
 What is denser is the animation itself (`m2keys.py`, rotation keys of the
 bones a sequence moves):
 
-| | 3.3.5 HumanMale | Enhanced HumanMale |
+| | 3.3.5 HumanMale | reference HumanMale |
 |---|---|---|
 | Run: bones animated | 53 | 87 |
 | Run: keys per bone per second | 18.6 | 24.3 |
@@ -90,7 +90,7 @@ a fight: a swing cut by a flinch, a parry, a cast or a run, all within the
 150 ms of the previous fade.
 
 **Ported (E36, row `poseblend`, "Smoother animation changes", Combat page,
-"Feel (the reference client)", Enhanced set on, stock off).** `CharacterRenderer::beginSequenceBlend`: a play that
+"Feel (enhanced)", enhanced set on, stock off).** `CharacterRenderer::beginSequenceBlend`: a play that
 starts while a fade is running fades from the pose as last drawn
 (`localPose`, both sides of the running fade in it) over the new sequence's
 blendTime. A one-slot stand-in for the tree: nothing pops, the fading pose
@@ -114,7 +114,7 @@ A sequence with blendTime 0 still cuts.
 
 ## 2. Targeting
 
-- **Selection circle: the same art.** Enhanced's
+- **Selection circle: the same art.** The reference client's
   `textures/unitselecttexture.blp` (186224) is a 256x256 DXT5 of a white disk
   whose alpha rises from 0 at a quarter of the radius to 34 at 0.8 and peaks
   at 77 on the rim (0.85); 3.3.5's is a paletted one with the same profile
@@ -124,7 +124,7 @@ A sequence with blendTime 0 still cuts.
   `outlineMouseOverFadeDuration`, `outlineSelectionFadeDuration`,
   `targetHighlightAlwaysShown` ("If enabled, targeted units have a highlight
   applied regardless of Outline Mode settings"), the `OutlineEffect` DB2.
-  Enhanced's Camelot settings override `RegisterOutlineSettings` with an empty
+  The reference client's Camelot settings override `RegisterOutlineSettings` with an empty
   function: the outline options are hidden, and the stream shows no outline
   on the selected target. Not ported.
 - **Soft targeting and Tab priority.** 34 `SoftTarget*` and 22
@@ -132,7 +132,7 @@ A sequence with blendTime 0 still cuts.
   targets with icons and nameplates, the interact key (`INTERACTTARGET`),
   Tab ordered by a priority over an in-view test with the screen's edges
   pulled in (`TargetPriorityFrustumPullIn*`), combat and PvP locks, a 
-  "values bank". Enhanced's settings default the KBM forms off: "Enable
+  "values bank". The reference client's settings default the KBM forms off: "Enable
   Action Targeting" sets `softTargetEnemy` 3 (any) or 1 (gamepad) and
   defaults to false; "Enable Interact Key" the same for
   `softTargetInteract` (`Blizzard_SettingsDefinitions_Frame/Combat.lua`,
@@ -153,7 +153,7 @@ refused with "Spell is not ready yet", one during a cast is sent and refused
 by the server). The current client's default is 400 ms (its code; the
 interface never sets it).
 
-**Ported (E37, row `spellqueue`, "Spell queue window (ms)", 0-400, Enhanced
+**Ported (E37, row `spellqueue`, "Spell queue window (ms)", 0-400, the reference client
 set 400, stock 0).** `SpellHandler`:
 
 - a press refused locally only by the GCD or the spell's own cooldown, with
@@ -179,7 +179,7 @@ server's queue rather than in a refusal.
 
 ### Swing timer
 
-`Blizzard_SwingTimer` (`## AllowLoadGameType: camelot`: Enhanced only), with
+`Blizzard_SwingTimer` (`## AllowLoadGameType: camelot`: the reference client only), with
 `C_SwingTimer` (`IsTargetWithinSwingRange`, `EnableRangeCheck`) and the
 events `PLAYER_SWING(swingDuration, swingType)` and
 `PLAYER_SWING_RANGE_UPDATE`. A bar per hand (main, off, ranged) in the
@@ -193,7 +193,7 @@ Atlas `uiswingtimerbar2xc60.blp`: dark frame (20,19,17 at 60%), brown border
 (86,66,43), main hand fill a light stone (186,175,156 to 112,100,97), off
 hand blue-grey (105,113,118), ranged green-grey (135,144,128).
 
-**Ported (E38, row `swingtimer`, "Swing timer", Enhanced set on, stock
+**Ported (E38, row `swingtimer`, "Swing timer", enhanced set on, stock
 off).** `CombatHandler` keeps the player's last swing per hand from
 `SMSG_ATTACKERSTATEUPDATE` (off hand by `HITINFO_OFFHAND` 0x4) and that
 hand's `UNIT_FIELD_BASEATTACKTIME`; `GameScreen::renderSwingTimer` draws the
@@ -207,7 +207,7 @@ on-next-swing ability (Heroic Strike's blow comes as a spell).
 `WorldTextRampDuration_v2`, `floatingCombatTextCombatDamageDirectionalScale_v2`
 ("Directional damage numbers movement scale (0 = no directional numbers)")
 and `..._DirectionalOffset_v2`: the current engine's numbers can fly
-outward from the hit. Enhanced's combat settings offer the float mode only
+outward from the hit. The reference client's combat settings offer the float mode only
 when `classicStyleWorldText` is 0; its default and the curves are code.
 Not ported (3.3.5's world text is what `world-ui.md` section 5 describes and
 Wowee draws).
@@ -222,9 +222,9 @@ a bounded frame queue. Wowee already poses characters on worker threads
 ## 5. Measurements
 
 Lab server, level 10 human mage, Arcane Explosion (instant, 1.5 s GCD),
-`enhanced-combat/test/fc1.lua` in the session scratchpad, 1280x720:
+`reference-combat/test/fc1.lua` in the session scratchpad, 1280x720:
 
-| Case | Stock (`spellqueue` 0) | Enhanced (`spellqueue` 400) |
+| Case | Stock (`spellqueue` 0) | the reference client (`spellqueue` 400) |
 |---|---|---|
 | One press 1.2 s into the GCD, nothing after | refused ("Spell is not ready yet."), never cast | sent 1.511 s after the first (11 ms after the GCD's end) |
 | A press every 250 ms for 9 s | 6 casts, mean gap 1.516 s | 7 casts, mean gap 1.509 s |
@@ -245,7 +245,7 @@ copy per interrupted fade, one compare per frame for the queue).
 | E37 | Spell queue window, GCD and cooldowns too | `SpellHandler::castSpell`, `updateTimers` | `spellqueue` |
 | E38 | Swing timer | `CombatHandler::getPlayerSwing`, `GameScreen::renderSwingTimer` | `swingtimer` |
 
-The Enhanced values of these rows (and E10, `remotesmoothing`, which is the
+The reference values of these rows (and E10, `remotesmoothing`, which is the
 other units' half of the same feel) are `kEnhancedCombatValues` in
 `include/ui/enhancement_rows.hpp`, for the "Enhanced" preset.
 

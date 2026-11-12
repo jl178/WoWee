@@ -156,7 +156,7 @@ private:
     /// Opens the device at a joystick index, if nothing is open already.
     void openDevice(SDL_JoystickID joystickIndex);
     /// Closes whatever is open and forgets its state, so a disconnected pad
-    /// cannot leave a button held down forever.
+    /// cannot leave a button held down indefinitely.
     void closeDevice();
     /// Looks for anything already plugged in. Used at startup and after a
     /// disconnect, so unplugging the second pad of two leaves the first live.

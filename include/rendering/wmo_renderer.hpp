@@ -111,7 +111,7 @@ public:
     /// Whether this instance's model has finished uploading its groups, and so
     /// whether a failed floor query means "nothing under you" rather than "not
     /// loaded yet". The two need telling apart: a rider held in place waiting
-    /// for collision that is already there waits enhanced.
+    /// for collision that is already there waits indefinitely.
     bool instanceHasCollisionGeometry(uint32_t instanceId) const;
 
     /**
@@ -393,7 +393,7 @@ public:
     bool isDistanceCullingEnabled() const { return distanceCulling; }
     float getMaxGroupDistance() const { return maxGroupDistance; }
     void setViewDistance(float distance) { viewDistance_ = std::clamp(distance, 400.0f, 2400.0f); }
-    /// "Far field (the reference client)": past the view distance and out to `yards`,
+    /// "Far field (enhanced)": past the view distance and out to `yards`,
     /// the big outdoor groups of the buildings already loaded (MOGP 0x8, at
     /// least kFarGroupMinSize across) are still drawn - their silhouettes on
     /// the far field. 0 is stock: nothing past the view distance.

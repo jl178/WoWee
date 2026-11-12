@@ -568,7 +568,7 @@ function(compile_shaders TARGET_NAME)
         "ambient_occlusion.frag.glsl|ambient_fill.frag.spv|-DBOUNCE_GRID -DFILL_ONLY"
         "ambient_occlusion.frag.glsl|ambient_sky.frag.spv|-DBOUNCE_GRID -DSKY_FIELD"
         "ambient_occlusion.frag.glsl|ambient_sky_fill.frag.spv|-DBOUNCE_GRID -DFILL_ONLY -DSKY_FIELD"
-        "water_hd.frag.glsl|water_fw.frag.spv|-DENHANCED_WATER"
+        "water_hd.frag.glsl|water_enh.frag.spv|-DENHANCED_WATER"
     )
     foreach(VARIANT ${SHADER_VARIANTS})
         string(REPLACE "|" ";" VARIANT_PARTS "${VARIANT}")

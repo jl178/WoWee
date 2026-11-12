@@ -83,7 +83,7 @@ TEST_CASE("an extension no format claims is not a format", "[format-table]") {
 TEST_CASE("a format's extension and magic name the same row",
           "[format-table]") {
     // The two lookups are how --fix-magic decides a file is misnamed, so they
-    // have to agree about every format or it proposes renames forever.
+    // have to agree about every format or it proposes renames indefinitely.
     for (const auto* f = formatTableBegin(); f != formatTableEnd(); ++f) {
         INFO(f->description);
         CHECK(findFormatByMagic(f->magic) == f);

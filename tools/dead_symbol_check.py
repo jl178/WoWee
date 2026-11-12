@@ -171,7 +171,7 @@ def use_counts(names):
                 # A name inside a string literal is not a call. A function
                 # whose only remaining mention is its own log line -
                 # `LOG_WARNING("foo: ...")` inside foo - would otherwise count
-                # as used forever. Canaried both ways.
+                # as used indefinitely. Canaried both ways.
                 #
                 # This does not weaken the Lua case: a binding reached by name
                 # is registered as `{"Name", lua_Name}`, and `lua_Name` there is

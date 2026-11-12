@@ -1,10 +1,10 @@
 #pragma once
 
-/// The tone curve of the HDR scene (the "HDR lighting (the reference client)" row,
+/// The tone curve of the HDR scene (the "HDR lighting (enhanced)" row,
 /// docs/re/enhanced-lighting.md section 9b), and the few constants that let
 /// light past 1 into it.
 ///
-/// the reference client renders in linear light into RGBA16F (its `linear` CVar) with
+/// The reference client renders in linear light into RGBA16F (its `linear` CVar) with
 /// a sun up to 1.5 (LightData F052) and tone maps before its colour grade.
 /// Wowee's lit shaders still write 3.3.5's display-encoded values, which sit
 /// in 0..1 nearly everywhere; what passes 1 is the sky round the sun, the sun
@@ -44,13 +44,13 @@ inline float toScene(float d, float knee = kKnee) {
     return knee + (1.0f - knee) * f / (1.0f - f);
 }
 
-/// The knee under Enhanced's daylight, outdoors (renderer, by the indoor
+/// The knee under the enhanced daylight, outdoors (renderer, by the indoor
 /// factor): a softer shoulder from half of white. With the sun at kSunLight
 /// the Barrens' noon road reached the old knee's shoulder - 2% of it with a
 /// channel over 0.92, its 99th percentile 0.86 against 0.76 before; from 0.5
 /// it is 0.74 and none over 0.92, and the tree crowns (0.25-0.30), the shade
 /// and the mid-tones below 0.5 are untouched (docs/re/enhanced-lighting.md 2d).
-/// Indoors, at night and without the Enhanced daylight the knee stays kKnee.
+/// Indoors, at night and without the enhanced daylight the knee stays kKnee.
 inline constexpr float kEnhancedKnee = 0.5f;
 /// kEnhancedKnee, or WOWEE_ENHANCED_KNEE=<value> for tuning (read once).
 inline float enhancedKnee() {
@@ -67,21 +67,21 @@ inline float enhancedKnee() {
 inline constexpr float kSunGain = 2.5f;
 
 /// The sun's light on the world by day, as a multiple of Light.dbc's:
-/// Enhanced's LightData F052 (1.0 at night, 1.35-1.5 by day) has the shape
+/// The reference client's LightData F052 (1.0 at night, 1.35-1.5 by day) has the shape
 /// of a sun intensity in its linear pipeline. Scaled in by the sun's height
 /// so the night keeps Light.dbc's moonlight. 2 (was 1.25 with a x1.3 lift of
-/// every mid-tone in the composite): Enhanced brightens what its sun lights,
+/// every mid-tone in the composite): the reference client brightens what its sun lights,
 /// not what the sky alone lights - measured against Jered's Goldshire
 /// captures, the crowns' luminance gap +29% -> +16% with the sunlit ground
 /// as bright as before (docs/re/enhanced-lighting.md section 2d). Under
-/// Enhanced's daylight only (its row, maps 0 and 1); elsewhere the HDR scene
+/// enhanced daylight only (its row, maps 0 and 1); elsewhere the HDR scene
 /// keeps Light.dbc's sun (section 9b).
 inline constexpr float kSunLight = 2.0f;
 
 /// The share of the light above 1 the bloom adds back (times the Bloom row).
 inline constexpr float kHdrBloom = 0.75f;
 
-/// The Enhanced haze's light is held, by its brightest channel so it keeps
+/// The enhanced haze's light is held, by its brightest channel so it keeps
 /// its gold, at 0.88 in the 8-bit scene, where more only blew the sky out;
 /// under the tone curve it may reach this (enhanced_haze.frag kMaxLightHdr,
 /// flag 8). 3 per channel took the sky round a high sun to white.

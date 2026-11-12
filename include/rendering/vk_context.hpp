@@ -239,7 +239,7 @@ public:
     [[nodiscard]] VkSwapchainKHR getSwapchain() const { return swapchain; }
     [[nodiscard]] VkFormat getSwapchainFormat() const { return swapchainFormat; }
     /// The format the scene is drawn in: the swapchain's, or RGBA16F while the
-    /// HDR scene is on (the "HDR lighting (the reference client)" row), so light above
+    /// HDR scene is on (the "HDR lighting (enhanced)" row), so light above
     /// 1 survives to the tone map in the final composite. Every pass the scene
     /// pipelines draw in, and every image a scene pass writes or is copied
     /// into, is made in this format. Changed only between frames, with the

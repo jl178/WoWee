@@ -118,7 +118,7 @@ five (6553), Mount two.
 
 - `loops = replayMin + (rand() * (replayMax - replayMin) >> 15)`, at least
   one. A sequence **with flag 0x01** plays `loops` laps, fires its end once
-  and holds its last frame; a sequence **without 0x01 loops enhanced and
+  and holds its last frame; a sequence **without 0x01 loops endlessly and
   fires its end at every lap**.
 - The default end handler (0x831FC0), after the owner's callback, rolls a
   new variation at the lap of a looping sequence whose variation was rolled

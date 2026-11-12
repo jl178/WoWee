@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A log line whose only bound is a clock: once a second, forever.
+"""A log line whose only bound is a clock: once a second, indefinitely.
 
     tools/timed_log_check.py
 

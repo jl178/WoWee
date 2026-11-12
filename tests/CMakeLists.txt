@@ -1722,7 +1722,7 @@ wowee_add_test(test_phase2_motion
     SOURCES test_phase2_motion.cpp)
 
 # ── test_far_field ──────────────────────────────────────────
-# Far field (the reference client): the minimap atlas's layout, box filter and BC1
+# Far field (enhanced): the minimap atlas's layout, box filter and BC1
 # encoder, and the limits it is drawn between.
 wowee_add_test(test_far_field
     SOURCES test_far_field.cpp)
@@ -1741,11 +1741,18 @@ wowee_add_test(test_phase2_light
     SOURCES test_phase2_light.cpp)
 
 # ── test_enhanced_look ───────────────────────────────────────
-# The Enhanced look (docs/re/enhanced-lighting.md): the colour grade's curves,
+# The enhanced look (docs/re/enhanced-lighting.md): the colour grade's curves,
 # its hour weight and its copy in fxaa.frag, and the Enhanced preset row.
 wowee_add_test(test_enhanced_look
     SOURCES test_enhanced_look.cpp)
 target_compile_definitions(test_enhanced_look PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
+# ── test_legacy_settings_migration ──────────────────────────
+# A settings.cfg saved before the rename to the enhanced naming loads with every
+# enhancement row as saved (core/legacy_settings_migration.hpp), a new key
+# beside an old one wins, and the light table's old name is only the fallback.
+wowee_add_test(test_legacy_settings_migration
+    SOURCES test_legacy_settings_migration.cpp)
 
 # ── test_weather_fx ─────────────────────────────────────────
 # The weather page (E23-E31, rendering/weather_fx.hpp): the intensity slider
@@ -2785,7 +2792,7 @@ register_test_target(test_m2_color_track)
 
 # ── test_dbc_layout_columns ──────────────────────────────────
 # Every column a layout names has to exist in the file it describes. A DBC
-# asked for a field past the end answers zero for every row, enhanced, which
+# asked for a field past the end answers zero for every row, indefinitely, which
 # is how the light bands read as empty for as long as they did.
 add_executable(test_dbc_layout_columns
     test_dbc_layout_columns.cpp
@@ -3374,9 +3381,9 @@ wowee_add_packet_test(test_message_chat_packet)
 wowee_add_test(test_wmo_liquid_stream SOURCES test_wmo_liquid_stream.cpp)
 
 # ── test_bounce_light ───────────────────────────────────────
-# Bounce light (the reference client, bounce_grid.hpp): the grid's bake - ground hue,
+# Bounce light (enhanced, bounce_grid.hpp): the grid's bake - ground hue,
 # canopy cover and heights, walls - its halves, the shader's copy of its
-# constants, and the Enhanced row.
+# constants, and the enhanced row.
 wowee_add_test(test_bounce_light
     SOURCES test_bounce_light.cpp)
 target_compile_definitions(test_bounce_light PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

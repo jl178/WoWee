@@ -580,7 +580,7 @@ void ZoneManager::enrichFromDBC(pipeline::AssetManager* assets) {
         // Field 4 is Flags. Not in dbc_layouts.json, so checked against known
         // rows rather than trusted from its position: area 4197 is Wintergrasp
         // and must carry 0x01000000, and 3703 is Shattrath and must carry the
-        // sanctuary bit 0x800. A wrong column reads as zero enhanced.
+        // sanctuary bit 0x800. A wrong column reads as zero indefinitely.
         if (haveFlags) areaFlags_[areaId] = areaDbc->getUInt32(i, 4);
     }
 

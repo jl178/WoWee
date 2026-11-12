@@ -28,7 +28,7 @@ layout(push_constant) uniform Push {
     vec4 band2Color;      // 5, ring 3 (3.7)
     vec4 smogColor;       // 6, ring 4 (1.8)
     vec4 fogColorPush;    // 7, the horizon and everything below it
-    vec4 params;          // x = dawn/dusk highlight (0x7f0530); y, w = Enhanced's sun
+    vec4 params;          // x = dawn/dusk highlight (0x7f0530); y, w = the reference client's sun
                           // glow above and on the horizon (0 = stock), z its start
     vec4 sunGlowColor;    // rgb: what the dome is drawn toward round the sun
 } push;
@@ -114,7 +114,7 @@ void main() {
     }
     vec3 sky = mix(ringColor(ring, g, h), ringColor(ring + 1, g, h), clamp(f, 0.0, 1.0));
 
-    // the reference client's dome (dnsky, pixel shader 2990767): toward the sun the
+    // The reference client's dome (dnsky, pixel shader 2990767): toward the sun the
     // colour is drawn toward the glow colour, by the cube of how far into
     // the cone round the sun the ray is - a broad soft halo, no edge -
     // the strength one value on the horizon and another just above it.

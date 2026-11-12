@@ -1,10 +1,10 @@
 #version 450
 
-// Enhanced haze - the "Sun haze (the reference client)" setting (not stock;
+// Enhanced haze - the "Sun haze (enhanced)" setting (not stock;
 // docs/re/enhanced-lighting.md section 5). Drawn by ContactShadowPass with
 // this shader, blended src.rgb + dst * src.a, once the opaque scene is done.
 //
-// Enhanced's global fog (volumefogglobalfog.bls) puts layers of air into its
+// The reference client's global fog (volumefogglobalfog.bls) puts layers of air into its
 // froxel volume, each with a start distance, a density, an exponential fade
 // with height and in-scattering of the sun through a forward phase lookup,
 // out to its 7000-yard far clip. Wowee's own froxel mist covers the first 400
@@ -17,7 +17,7 @@
 //   added light = (sky * kSkyScatter + sun * phase(cos) * kSunScatter) * (1 - T)
 //
 // with h0 the ground under the player, c the camera, v the ray. The phase is
-// Henyey-Greenstein, g 0.7, mixed 60/40 with even scattering - Enhanced's
+// Henyey-Greenstein, g 0.7, mixed 60/40 with even scattering - the reference client's
 // lookup table itself was not read. The sky takes the ray to kSkyDistance, so
 // the air around a low sun glows gold and the horizon pales; the sun's
 // shadow is left to the froxel mist near the camera, which is where shafts
@@ -42,7 +42,7 @@ layout(set = 1, binding = 0) uniform sampler2D uSceneDepth;
 layout(push_constant) uniform Push {
     mat4 invViewProj;  // clip -> world, this frame's
     vec4 target;       // xy the render extent, z strength (0..2; weather thins it), w flags (4 debug, 8 HDR scene)
-    vec4 air;          // Enhanced's air: a its density per yard at the ground (0 = none);
+    vec4 air;          // the reference client's air: a its density per yard at the ground (0 = none);
                        // r the forward lobe's share (0 under a sky with no sun disc);
                        // g the sun's light added to the sky toward a low sun (HDR scene only,
                        // 0 = none); b the dusk glow's strength (0 = none)
@@ -51,7 +51,7 @@ layout(push_constant) uniform Push {
 layout(location = 0) out vec4 outColor;
 
 // Thin: Jered's first evening in Goldshire with 0.0006 from 40 yards was
-// a grey wall over the whole view. Enhanced's near field is clear; its air
+// a grey wall over the whole view. The reference client's near field is clear; its air
 // shows over hundreds of yards. Now the density also ramps in over kRamp
 // past the start, so nothing near the player is hazed at all.
 const float kDensity = 0.00022;      // per yard at the ground under the player
@@ -63,13 +63,13 @@ const float kSkyDistance = 5000.0;   // how far a sky pixel's ray runs
 // little elsewhere. The sky's own share is small and taken from the fog
 // colour, which is grey under cloud - most of what made the wall grey.
 const float kSkyScatter = 0.35;      // of the fog colour, light from the sky
-// 0.65 (was 0.8): with the world's light now from Enhanced's sun (the
-// Enhanced daylight), the forward lobe sits on the sun's disc rather than
+// 0.65 (was 0.8): with the world's light now from the reference client's sun (the
+// enhanced daylight), the forward lobe sits on the sun's disc rather than
 // beside it, and at 0.8 the sky round the sun had 15% more near-white.
 const float kSunScatter = 0.65;      // of the sun colour, at even scattering
 const float kG = 0.7;
-// Enhanced's air toward the sun: the sun's light through the forward half of
-// the lobe (HG g 0.7 - Enhanced's field 037 is 0.7 or 0.8 on its profiles),
+// The reference client's air toward the sun: the sun's light through the forward half of
+// the lobe (HG g 0.7 - the reference client's field 037 is 0.7 or 0.8 on its profiles),
 // set against the Barrens toward an evening sun (docs/re/enhanced-lighting.md
 // 5b).
 const float kAirSun = 0.39;
@@ -114,7 +114,7 @@ void main() {
     // Indoors the outdoor air stays outside.
     float outdoors = 1.0 - clamp(shadowParams.w, 0.0, 1.0);
 
-    // Enhanced's air: its global fog layer (volumefogglobalfog.bls; the
+    // The reference client's air: its global fog layer (volumefogglobalfog.bls; the
     // layer's density from LightParams, docs/re/enhanced-lighting.md 5b) -
     // the fog colour's light taken in from the camera out, thinning with
     // height as the haze below. Not on the sky, whose dome carries its own
@@ -134,20 +134,20 @@ void main() {
         float lenNear = min(len, kAirSunStart);
         float odNear = abs(kA) < 1e-5 ? baseA * lenNear : baseA * (1.0 - exp(-kA * lenNear)) / kA;
         float airTNear = mix(1.0, exp(-odNear * strength), outdoors);
-        // Enhanced's layer takes in the sun through its phase lookup as well
+        // The reference client's layer takes in the sun through its phase lookup as well
         // as its own light (scatter * phase(cos) * intensity): toward a low
         // sun its air is the sun's gold, not the sky fog's colour. The
         // Barrens at 17:45 (Jered's video frame) had its far hills orange,
         // hue 26-27 and blue/red 0.30-0.49, where this layer alone left
         // them purple-grey (hue 327-12, blue/red 0.73-0.94) - the Barrens'
         // evening SkyFogColor. The forward half of the lobe only: the even
-        // part is the fog colour's, set against Enhanced's Goldshire
+        // part is the fog colour's, set against the reference client's Goldshire
         // (docs/re/enhanced-lighting.md 5b), and no view away from the sun
         // changes. And only from kAirSunStart out: over the whole ray the
         // gold took the hills a few hundred yards off as well, as bright as
-        // the sky (luminance 159 against Enhanced's 71-118 there), and the
+        // the sky (luminance 159 against the reference client's 71-118 there), and the
         // layers the frame shows - dark near trees and ridges, the farthest
-        // hills paling into the sky - were one gold sheet. Enhanced's own
+        // hills paling into the sky - were one gold sheet. The reference client's own
         // layer thickens with distance too (its curve 1 + k1 t^k0, field
         // 036's 1-16 the likely exponent), so the near air stays clear.
         float lobe = phaseHG(cosSun, kG) * max(cosSun, 0.0) * clamp(pc.air.r, 0.0, 1.0) * sunUp;
@@ -161,11 +161,11 @@ void main() {
         airLight = fogColor.rgb * (1.0 - airTNear) + sunAir * (airTNear - airT);
     }
 
-    // The dusk glow: Enhanced's air toward a sun near the horizon is a large
+    // The dusk glow: the reference client's air toward a sun near the horizon is a large
     // warm glow, the trees and road in front of it veiled orange (Jered's
     // Elwynn dusk frame, about 19:30, sun 3 degrees up: the gap round the
     // sun 202, the air between the trunks 43, the trunks 20-35, all hue
-    // 24-34). That air is lit unshadowed - Enhanced's global fog layer and
+    // 24-34). That air is lit unshadowed - the reference client's global fog layer and
     // this haze, not the shadowed froxel mist, whose shadow map at a 3
     // degree sun is still cast mostly from 3.3.5's 17.5 degree direction,
     // so the air toward the sun sat in the trees' shadow. Added light only
@@ -179,7 +179,7 @@ void main() {
     // falloff shows no circle on the far terrain; under a 15 degree sun, full under 8
     // and as the sun sets, gone a little below the horizon - so the noon and
     // morning views, and every evening view away from the sun, keep what
-    // they had. Under the Enhanced daylight with the sun shown (not by the
+    // they had. Under the enhanced daylight with the sun shown (not by the
     // air's density, which is 0 once that daylight's keys end, before the
     // sun is down).
     vec3 duskLight = vec3(0.0);
@@ -235,9 +235,9 @@ void main() {
     // reaches the eye is the haze's light through the air, and the air's own.
     float total = a * airT;
     // The sky toward a low sun, lit up before the tone curve - the sky alone
-    // (depth at the far plane), the HDR scene alone, and only in Enhanced's
+    // (depth at the far plane), the HDR scene alone, and only in the reference client's
     // daylight (the air's density is 0 outside it) with the sun shown.
-    // Enhanced's sky round a low sun is a pale gold near white (Jered's
+    // The reference client's sky round a low sun is a pale gold near white (Jered's
     // Barrens frame at 17:45: 234 by the sun, 220 30-40 degrees off it, 248
     // at its brightest) that the dome's halo (skybox.frag) could not reach
     // under the tone curve's shoulder: at full strength it stopped at 218.

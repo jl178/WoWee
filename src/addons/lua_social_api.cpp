@@ -1824,7 +1824,7 @@ void registerSocialLuaAPI(lua_State* L) {
                 //
                 // A request, not a getter: the answer comes back as
                 // UPDATE_GM_STATUS. The help frame calls this from OnShow and
-                // waits for the event, so a no-op here meant it waited enhanced
+                // waits for the event, so a no-op here meant it waited indefinitely
                 // and kept whatever it was last told.
                 {"GetGMStatus", [](lua_State* L) -> int {
             if (auto* gh = getGameHandler(L)) gh->requestGmSystemStatus();

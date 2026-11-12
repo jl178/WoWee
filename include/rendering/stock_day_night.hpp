@@ -136,13 +136,13 @@ inline constexpr std::array<Key, 3> kMoonTheta{{
 
 inline constexpr float kHalfMinutesPerDay = 2880.0f;
 
-/// the reference client's sun sprite phi (Wow.exe 1.60.1.70862, file offset
+/// The reference client's sun sprite phi (Wow.exe 1.60.1.70862, file offset
 /// 0x49059b0, the same {time, radians} layout as 0xd391e0): 95 degrees (five
 /// under the horizon) at 05:30 and 20:30, 25 off the zenith from 11:55 to
 /// 12:05 - lower at noon (65 degrees up against 85), up at 05:58 and down at
 /// 19:54. Its theta (0x4905a50) is 45 degrees all day, as stock, and its
 /// light tables (0x48f7400: theta 225, phi 127 / 110 / 127 / 110) are
-/// byte for byte 0xd390c4 and 0xd390e4: Enhanced moved neither the light nor
+/// byte for byte 0xd390c4 and 0xd390e4: the reference client moved neither the light nor
 /// the sun's bearing, only how high the sun climbs (docs/re/enhanced-lighting.md
 /// section 2d).
 inline constexpr std::array<Key, 5> kEnhancedSunPhi{{

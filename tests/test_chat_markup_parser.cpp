@@ -56,10 +56,10 @@ TEST_CASE("Colored text segment: |cAARRGGBB...text...|r", "[chat_markup]") {
 
 TEST_CASE("Colored text without |r includes rest of string", "[chat_markup]") {
     ChatMarkupParser parser;
-    auto segs = parser.parse("|cFF00FF00Green forever");
+    auto segs = parser.parse("|cFF00FF00Green for good");
     REQUIRE(segs.size() == 1);
     CHECK(segs[0].type == SegmentType::ColoredText);
-    CHECK(segs[0].text == "Green forever");
+    CHECK(segs[0].text == "Green for good");
 }
 
 TEST_CASE("Mixed plain and colored text", "[chat_markup]") {

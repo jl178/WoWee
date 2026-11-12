@@ -12,7 +12,7 @@ as the *outer* thing exists and the setting is marked delivered to something
 that was not there to take it: gamma was read from the file and never reached
 anything that draws, because the post-process pipeline is built after the
 renderer and the latch only waited for the renderer. Never set it and the
-client re-applies the same value every frame forever.
+client re-applies the same value every frame indefinitely.
 
 So for each `if (!somethingApplied_)` guard this reads the block under it and
 asks where `somethingApplied_ = true` sits. If the block tests anything before

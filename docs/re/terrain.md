@@ -274,7 +274,7 @@ Durotar's sparse clutter is the data, in both clients. Round the Valley of
 Trials (`kalimdor_39_33`) the ground is `DurotarDirt`, effect 1949: density 8
 and **no doodads**, so it grows nothing. Only `DurotarDirtSmooth` (1972,
 density 3: DurBus01/03, DurRoc02/04) does, on a few quads, and 42% of the
-quads are masked (82% round Razor Hill). the reference client's split ADT of the same
+quads are masked (82% round Razor Hill). The reference client's split ADT of the same
 tile (`_tex0` and root, 1.60.1.70862) has the same MCLY effect ids, the same
 doodad mapping and masks, and its `_obj0` the same 102 M2 placements within
 80 yd, by model; its `GroundEffectTexture` rows 1949 and 1972 match 3.3.5's.
@@ -307,7 +307,7 @@ Pieces within 32 yd that the data asks for at Wowee's 70% / 150%
 | Specular | `_s` tilesets, pow(N·H, 20) × sun colour × alpha × shadow, per vertex | none | **stock**, per vertex (`terrain.vert`), `WOWEE_TERRAIN_SPECULAR=0` turns it off |
 | MCCV | MPHD 0x2 maps only | when the chunk has it | unchanged (only Northrend has it) |
 | Holes | 2x2-quad bits | the same | unchanged |
-| WDL horizon | fog-coloured, far clip − 50 to 4 far clips | none: sky past the far clip | **stock** (`TerrainHorizon`), with the WDL's low-detail WMOs; tiles past 2 far clips drawn at a coarse level (128 triangles, Wowee's), `WOWEE_TERRAIN_HORIZON=0` turns it off; the "Lit far horizon" enhancement (E11) shades it under the fog colour; "Far field (the reference client)" (E39, `far_field.hpp`) colours it from the minimap, lit and fogged as the ground, from the far clip less 24 yd (distance in the plane) to 7000 yd |
+| WDL horizon | fog-coloured, far clip − 50 to 4 far clips | none: sky past the far clip | **stock** (`TerrainHorizon`), with the WDL's low-detail WMOs; tiles past 2 far clips drawn at a coarse level (128 triangles, Wowee's), `WOWEE_TERRAIN_HORIZON=0` turns it off; the "Lit far horizon" enhancement (E11) shades it under the fog colour; "Far field (enhanced)" (E39, `far_field.hpp`) colours it from the minimap, lit and fogged as the ground, from the far clip less 24 yd (distance in the plane) to 7000 yd |
 | Alpha resolution option | 32 or 64 (`shadowLevel`) | 64 | unchanged (= the Ultra preset) |
 | Cube-map layers | Crystalsong | drawn as a flat 2D texture | gap |
 | Streaming | chunk square ≈ 1.25 far clips, nearest first | tile circle ⌈far/533⌉+1, nearest first, unload at +3 | unchanged |

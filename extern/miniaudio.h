@@ -29689,7 +29689,7 @@ static ma_result ma_device_start__alsa(ma_device* pDevice)
     if (pDevice->type == ma_device_type_playback || pDevice->type == ma_device_type_duplex) {
         /*        
         When data is written to the device we wait for the device to get ready to receive data with poll(). In my testing
-        I have observed that poll() can sometimes block forever unless the device is started explicitly with snd_pcm_start()
+        I have observed that poll() can sometimes block indefinitely unless the device is started explicitly with snd_pcm_start()
         or some data is written with snd_pcm_writei().
 
         To resolve this I've decided to do an explicit start with snd_pcm_start(). The problem with this is that the device
