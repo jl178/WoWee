@@ -540,7 +540,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     gq.race = st.raceId;
     gq.gender = st.genderId;
     if (gameHandler_) {
-        if (auto e = gameHandler_->getEntityManager().getEntity(guid)) {
+        if (auto e = gameHandler_->getEntityManager().getEntity(unitGuidFor(guid))) {
             const uint32_t bytes0 = e->getField(game::fieldIndex(game::UF::UNIT_FIELD_BYTES_0));
             gq.deathKnight = ((bytes0 >> 8) & 0xFF) == 6;
         }
@@ -618,7 +618,7 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid,
     }
     std::vector<std::pair<int, std::string>> regionLayers =
         pipeline::buildItemRegionLayers(*assetManager_, *displayInfoDbc, equipped, isFemale);
-    if (gameHandler_) core::applyGuildTabardFor(*gameHandler_, guid, regionLayers);
+    if (gameHandler_) core::applyGuildTabardFor(*gameHandler_, unitGuidFor(guid), regionLayers);
 
     const auto slotsIt = playerTextureSlotsByModelId_.find(st.modelId);
     if (slotsIt == playerTextureSlotsByModelId_.end()) return;
@@ -657,7 +657,8 @@ void EntitySpawner::despawnPlayer(uint64_t guid) {
     pendingPlayerMorphs_.erase(guid);
     despawnCreature(morphSpawnKey(guid));
     if (auto morph = playerMorphs_.find(guid); morph != playerMorphs_.end()) {
-        if (morph->second.instanceId != 0) charRenderer->removeInstance(morph->second.instanceId);
+        if (morph->second.character) releaseCharacterIllusion(guid, morph->second.instanceId);
+        else if (morph->second.instanceId != 0) charRenderer->removeInstance(morph->second.instanceId);
         if (auto pit = playerInstances_.find(guid); pit != playerInstances_.end())
             pit->second = morph->second.nativeInstanceId;
         playerMorphs_.erase(morph);
@@ -1227,8 +1228,10 @@ void EntitySpawner::applyPlayerMorph(uint64_t guid, uint32_t displayId, uint32_t
     // What is drawn now: the character, or the form this one replaces.
     uint32_t shownInstance = nativeInstanceId;
     uint32_t oldMorphInstance = 0;
+    bool oldWasCharacter = false;
     if (auto old = playerMorphs_.find(guid); old != playerMorphs_.end()) {
         oldMorphInstance = old->second.instanceId;
+        oldWasCharacter = old->second.character;
         shownInstance = oldMorphInstance;
     }
 
@@ -1261,7 +1264,12 @@ void EntitySpawner::applyPlayerMorph(uint64_t guid, uint32_t displayId, uint32_t
         cr->setInstanceVisible(nativeInstanceId, false);
         cr->setInstanceVisible(morphInstanceId, true);
     }
-    if (oldMorphInstance != 0) cr->removeInstance(oldMorphInstance);
+    if (oldMorphInstance != 0) {
+        // A character drawn for an illusion has a composite model of its own.
+        const uint32_t oldModel = oldWasCharacter ? cr->getInstanceModelId(oldMorphInstance) : 0;
+        cr->removeInstance(oldMorphInstance);
+        if (oldModel != 0) cr->unloadModelIfUnused(oldModel);
+    }
     playerMorphs_[guid] = {.displayId = displayId, .instanceId = morphInstanceId,
                            .nativeInstanceId = nativeInstanceId};
     LOG_INFO("Player morph: guid=0x", std::hex, guid, std::dec, " displayId=", displayId,
@@ -1301,9 +1309,127 @@ void EntitySpawner::clearPlayerMorph(uint64_t guid) {
             cr->setInstanceVisible(morph.nativeInstanceId, true);
         }
     }
-    if (morph.instanceId != 0) cr->removeInstance(morph.instanceId);
+    if (morph.character) releaseCharacterIllusion(guid, morph.instanceId);
+    else if (morph.instanceId != 0) cr->removeInstance(morph.instanceId);
     LOG_INFO("Player morph cleared: guid=0x", std::hex, guid, std::dec,
              " displayId=", morph.displayId, local ? " (local)" : "");
+}
+
+// ---------------------------------------------------------------------------
+// Race illusions: a display that draws the player as a character of another
+// race. The Culling of Stratholme puts every non-human in 19723/19724 - the
+// human male and female models with an Extra (13749/13750) that names the
+// race and sex and nothing else. Drawn through the creature path that was a
+// bare human in the Extra's (empty) look; stock composes the player as that
+// race in their own look and their own gear.
+// ---------------------------------------------------------------------------
+
+bool EntitySpawner::characterIllusion(uint32_t displayId, uint8_t& raceId, uint8_t& sexId) {
+    buildCreatureDisplayLookups();
+    auto disp = displayDataMap_.find(displayId);
+    if (disp == displayDataMap_.end() || disp->second.extraDisplayId == 0) return false;
+    auto flags = modelIdToFlags_.find(disp->second.modelId);
+    if (flags == modelIdToFlags_.end() || !(flags->second & 0x4)) return false;
+    auto extra = humanoidExtraMap_.find(disp->second.extraDisplayId);
+    if (extra == humanoidExtraMap_.end() || !(extra->second.flags & 0x1)) return false;
+    if (game::getPlayerModelPath(static_cast<game::Race>(extra->second.raceId),
+                                 extra->second.sexId == 1 ? game::Gender::FEMALE : game::Gender::MALE)
+            .empty()) {
+        return false;
+    }
+    raceId = extra->second.raceId;
+    sexId = extra->second.sexId;
+    return true;
+}
+
+bool EntitySpawner::playerVisibleEquipment(uint64_t guid, std::array<uint32_t, 19>& displayIds,
+                                           std::array<uint8_t, 19>& inventoryTypes) const {
+    displayIds.fill(0);
+    inventoryTypes.fill(0);
+    if (isLocalPlayer(guid)) {
+        // The local character's gear is the inventory's (the equipment
+        // callback is not raised for it).
+        const auto& inv = gameHandler_->getInventory();
+        for (int s = 0; s < 19; ++s) {
+            const auto& slot = inv.getEquipSlot(static_cast<game::EquipSlot>(s));
+            if (slot.empty()) continue;
+            displayIds[s] = slot.item.displayInfoId;
+            inventoryTypes[s] = slot.item.inventoryType;
+        }
+        return true;
+    }
+    if (auto it = lastOnlinePlayerEquipment_.find(guid); it != lastOnlinePlayerEquipment_.end()) {
+        displayIds = it->second.first;
+        inventoryTypes = it->second.second;
+        return true;
+    }
+    if (auto it = pendingOnlinePlayerEquipment_.find(guid); it != pendingOnlinePlayerEquipment_.end()) {
+        displayIds = it->second.first;
+        inventoryTypes = it->second.second;
+        return true;
+    }
+    return false;
+}
+
+uint32_t EntitySpawner::buildCharacterIllusion(uint64_t guid, uint8_t raceId, uint8_t sexId) {
+    // The player's own skin, face, hair and facial hair (0x71D010, arg 1 =
+    // the player: PLAYER_BYTES / PLAYER_BYTES_2 as they are, on the new
+    // race's model).
+    uint32_t appearanceBytes = 0;
+    uint8_t facialFeatures = 0;
+    if (isLocalPlayer(guid)) {
+        const game::Character* ch = gameHandler_->getActiveCharacter();
+        if (!ch) return 0;
+        appearanceBytes = ch->appearanceBytes;
+        facialFeatures = ch->facialFeatures;
+    } else if (auto app = onlinePlayerAppearance_.find(guid); app != onlinePlayerAppearance_.end()) {
+        appearanceBytes = app->second.appearanceBytes;
+        facialFeatures = app->second.facialFeatures;
+    } else {
+        return 0;
+    }
+    float x = 0.0f, y = 0.0f, z = 0.0f, o = 0.0f;
+    if (auto entity = gameHandler_->getEntityManager().getEntity(guid)) {
+        x = entity->getLatestX(); y = entity->getLatestY(); z = entity->getLatestZ();
+        o = entity->getOrientation();
+    }
+    // Built as a player of its own under the morph key, then taken out of
+    // the player map so nothing moves or despawns it as one.
+    const uint64_t key = morphSpawnKey(guid);
+    spawnOnlinePlayer(key, raceId, sexId, appearanceBytes, facialFeatures, x, y, z, o);
+    auto it = playerInstances_.find(key);
+    if (it == playerInstances_.end()) return 0;
+    const uint32_t instance = it->second;
+    playerInstances_.erase(it);
+    return instance;
+}
+
+void EntitySpawner::dressCharacterIllusion(uint64_t guid, PlayerMorph& morph) {
+    std::array<uint32_t, 19> displayIds{};
+    std::array<uint8_t, 19> inventoryTypes{};
+    if (!playerVisibleEquipment(guid, displayIds, inventoryTypes)) return;
+    if (morph.dressed && displayIds == morph.equipment) return;
+    const uint64_t key = morphSpawnKey(guid);
+    // The equipment pass works on a spawned player; this one is, for the call.
+    playerInstances_[key] = morph.instanceId;
+    setOnlinePlayerEquipment(key, displayIds, inventoryTypes);
+    playerInstances_.erase(key);
+    lastOnlinePlayerEquipment_.erase(key);
+    morph.equipment = displayIds;
+    morph.dressed = true;
+}
+
+void EntitySpawner::releaseCharacterIllusion(uint64_t guid, uint32_t instanceId) {
+    const uint64_t key = morphSpawnKey(guid);
+    onlinePlayerAppearance_.erase(key);
+    pendingOnlinePlayerEquipment_.erase(key);
+    lastOnlinePlayerEquipment_.erase(key);
+    onlinePlayerWeaponSlots_.erase(key);
+    if (auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr; cr && instanceId != 0) {
+        const uint32_t modelId = cr->getInstanceModelId(instanceId);
+        cr->removeInstance(instanceId);
+        if (modelId != 0) cr->unloadModelIfUnused(modelId);
+    }
 }
 
 void EntitySpawner::processPendingPlayerMorphs() {
@@ -1323,16 +1449,22 @@ void EntitySpawner::processPendingPlayerMorphs() {
             playerMorphs_.erase(local);
             if (renderer_->getCharacterInstanceId() == stale.instanceId)
                 renderer_->setCharacterMorphInstance(0);
-            cr->removeInstance(stale.instanceId);
+            if (stale.character) releaseCharacterIllusion(self, stale.instanceId);
+            else cr->removeInstance(stale.instanceId);
             if (!pendingPlayerMorphs_.count(self)) pendingPlayerMorphs_[self] = stale.displayId;
         }
     }
 
     // A drawn form keeps the character hidden underneath. Equipment changes
     // re-attach weapons to it, and new attachments start out visible.
-    for (const auto& [guid, morph] : playerMorphs_) {
-        (void)guid;
+    // An illusion's character follows the player's gear as it changes.
+    for (auto& [guid, morph] : playerMorphs_) {
         if (morph.nativeInstanceId != 0) cr->setInstanceVisible(morph.nativeInstanceId, false);
+        if (!morph.character) continue;
+        dressCharacterIllusion(guid, morph);
+        // Remote players' weapons follow their sheath in the unit sync; the
+        // local character's own are the composer's, so this one does it here.
+        if (isLocalPlayer(guid)) syncUnitSheath(guid, morph.instanceId);
     }
 
     for (auto it = pendingPlayerMorphs_.begin(); it != pendingPlayerMorphs_.end(); ) {
@@ -1363,6 +1495,26 @@ void EntitySpawner::processPendingPlayerMorphs() {
             nativeInstance = app->second.instanceId;
         }
         if (nativeInstance == 0) { ++it; continue; }
+
+        // Another race's character, in the player's own look and gear.
+        if (uint8_t race = 0, sex = 0; characterIllusion(want, race, sex)) {
+            despawnCreature(key);
+            const uint32_t built = buildCharacterIllusion(guid, race, sex);
+            if (built == 0) {
+                LOG_WARNING("Player illusion display ", want, " could not be built; guid=0x",
+                            std::hex, guid, std::dec);
+                clearPlayerMorph(guid);
+                it = pendingPlayerMorphs_.erase(it);
+                continue;
+            }
+            applyPlayerMorph(guid, want, built, nativeInstance, local);
+            if (auto m = playerMorphs_.find(guid); m != playerMorphs_.end()) {
+                m->second.character = true;
+                dressCharacterIllusion(guid, m->second);
+            }
+            it = pendingPlayerMorphs_.erase(it);
+            continue;
+        }
 
         // Built: take it out of the creature maps and draw it for the player.
         if (auto built = creatureDisplayIds_.find(key);

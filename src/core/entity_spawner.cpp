@@ -859,14 +859,30 @@ const EntitySpawner::ItemDbcRow* EntitySpawner::lookupItemDbc(uint32_t entry) {
 std::array<EntitySpawner::ItemDbcRow, 3> EntitySpawner::unitWeaponItems(uint64_t guid) {
     std::array<ItemDbcRow, 3> out{};
     if (!gameHandler_) return out;
-    auto entity = gameHandler_->getEntityManager().getEntity(guid);
+    const uint64_t owner = unitGuidFor(guid);
+    auto entity = gameHandler_->getEntityManager().getEntity(owner);
     if (!entity) return out;
     if (entity->getType() == game::ObjectType::PLAYER) {
-        // Visible item entries, slots 15-17 (main hand, off hand, ranged).
+        // Visible item entries, slots 15-17 (main hand, off hand, ranged);
+        // the local character's from its inventory (a race illusion draws
+        // its weapons through here).
+        std::array<uint32_t, 3> entries{};
+        bool known = false;
         auto& table = gameHandler_->otherPlayerVisibleItemEntriesRef();
-        if (auto it = table.find(guid); it != table.end()) {
+        if (auto it = table.find(owner); it != table.end()) {
+            for (int i = 0; i < 3; ++i) entries[i] = it->second[15 + i];
+            known = true;
+        } else if (owner == gameHandler_->getPlayerGuid()) {
+            const auto& inv = gameHandler_->getInventory();
             for (int i = 0; i < 3; ++i) {
-                const uint32_t entry = it->second[15 + i];
+                const auto& slot = inv.getEquipSlot(static_cast<game::EquipSlot>(15 + i));
+                entries[i] = slot.empty() ? 0 : slot.item.itemId;
+            }
+            known = true;
+        }
+        if (known) {
+            for (int i = 0; i < 3; ++i) {
+                const uint32_t entry = entries[i];
                 if (const auto* row = lookupItemDbc(entry)) {
                     out[i] = *row;
                 } else if (const auto* info = entry ? gameHandler_->getItemInfo(entry) : nullptr) {
@@ -908,9 +924,18 @@ rendering::WeaponLoadout EntitySpawner::unitWeaponLoadout(uint64_t guid) {
     return rendering::anim::loadoutFromItems(toItem(items[0]), toItem(items[1]), toItem(items[2]));
 }
 
+uint64_t EntitySpawner::unitGuidFor(uint64_t guid) const {
+    // A race illusion's character is built under the player's morph key;
+    // what it holds, and how, is still the player's.
+    const uint64_t owner = morphSpawnKey(guid);
+    if (auto m = playerMorphs_.find(owner); m != playerMorphs_.end() && m->second.character)
+        return owner;
+    return guid;
+}
+
 uint8_t EntitySpawner::unitSheathState(uint64_t guid) const {
     if (!gameHandler_) return 0;
-    auto entity = gameHandler_->getEntityManager().getEntity(guid);
+    auto entity = gameHandler_->getEntityManager().getEntity(unitGuidFor(guid));
     if (!entity) return 0;
     const uint16_t idx = game::fieldIndex(game::UF::UNIT_FIELD_BYTES_2);
     if (idx == 0xFFFF) return 1;  // no such field: show them drawn, as before
@@ -921,7 +946,7 @@ uint8_t EntitySpawner::presentedSheathState(uint64_t guid, uint32_t instanceId) 
     const uint8_t server = unitSheathState(guid);
     auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
     if (!cr || !gameHandler_ || instanceId == 0 || server > 2) return server;
-    auto entity = gameHandler_->getEntityManager().getEntity(guid);
+    auto entity = gameHandler_->getEntityManager().getEntity(unitGuidFor(guid));
     if (!entity || !entity->isUnit()) return server;
     auto unit = std::static_pointer_cast<game::Unit>(entity);
     uint32_t anim = 0;
@@ -1042,8 +1067,16 @@ void EntitySpawner::playSheathSound(const ItemDbcRow& item, bool drawing, const 
 void EntitySpawner::syncUnitSheath(uint64_t guid, uint32_t instanceId) {
     // A player drawn as a form: the weapons belong to the character's own
     // (hidden) model, never to the bear or the sheep that stands in for it.
-    if (auto morph = playerMorphs_.find(guid); morph != playerMorphs_.end())
-        instanceId = morph->second.nativeInstanceId;
+    // A race illusion is a character that holds them itself, under its key.
+    if (auto morph = playerMorphs_.find(guid); morph != playerMorphs_.end()) {
+        if (morph->second.character) {
+            const uint32_t drawn = morph->second.instanceId;
+            guid = morphSpawnKey(guid);
+            instanceId = drawn;
+        } else {
+            instanceId = morph->second.nativeInstanceId;
+        }
+    }
     auto it = unitSheathAttached_.find(guid);
     if (it == unitSheathAttached_.end() || instanceId == 0) return;
     auto* cr = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
@@ -1155,7 +1188,7 @@ bool EntitySpawner::attachUnitWeapons(uint64_t guid, uint32_t instanceId,
     auto visualsDbc = assetManager_->loadDBC("ItemVisuals.dbc");
     const auto* layouts = pipeline::getActiveDBCLayout();
     const std::array<uint32_t, 3>* enchants =
-        gameHandler_ ? gameHandler_->getOtherPlayerWeaponEnchants(guid) : nullptr;
+        gameHandler_ ? gameHandler_->getOtherPlayerWeaponEnchants(unitGuidFor(guid)) : nullptr;
     auto weaponItemVisual = [&](uint32_t displayId, int hand) -> uint32_t {
         const uint32_t own = pipeline::itemDisplayItemVisual(
             displayInfoDbc.get(), displayId, visualsDbc.get(),
@@ -1394,6 +1427,7 @@ void EntitySpawner::buildCreatureDisplayLookups() {
                 extra.equipDisplayId[eq] = cdie->getUInt32(i, cdieEquip0 + eq);
             }
             extra.bakeName = cdie->getString(i, bakeField);
+            if (numEquipSlots == 11 && bakeField > 0) extra.flags = cdie->getUInt32(i, bakeField - 1);
             if (!extra.bakeName.empty()) withBakeName++;
             humanoidExtraMap_[cdie->getUInt32(i, cdieL ? (*cdieL)["ID"] : 0)] = extra;
         }
@@ -1413,6 +1447,8 @@ void EntitySpawner::buildCreatureDisplayLookups() {
             }
             const uint32_t modelId = cmd->getUInt32(i, cmdL ? (*cmdL)["ID"] : 0);
             modelIdToPath_[modelId] = mdx;
+            // Column 1 in every expansion's file; flag 4 is a character model.
+            modelIdToFlags_[modelId] = cmd->getUInt32(i, 1);
             // The other half of a creature's size. Zero appears in the file
             // and means unset rather than invisible, so it keeps 1.0.
             const uint32_t scaleField = cmdL ? (*cmdL)["ModelScale"] : 4;

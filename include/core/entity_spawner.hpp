@@ -511,6 +511,7 @@ private:
         uint8_t hairColorId = 0;
         uint8_t facialHairId = 0;
         std::string bakeName;  // Pre-baked texture path if available
+        uint32_t flags = 0;    // CreatureDisplayInfoExtra.Flags (WotLK column 19)
         // Equipment display IDs (from columns 8-18)
         // 0=helm, 1=shoulder, 2=shirt, 3=chest, 4=belt, 5=legs, 6=feet, 7=wrist, 8=hands, 9=tabard, 10=cape
         uint32_t equipDisplayId[11] = {0};
@@ -519,6 +520,7 @@ private:
     std::unordered_map<uint32_t, HumanoidDisplayExtra> humanoidExtraMap_;  // extraDisplayId → humanoid data
     std::unordered_map<uint32_t, std::string> modelIdToPath_;   // modelId → M2 path (from CreatureModelData.dbc)
     std::unordered_map<uint32_t, float> modelIdToScale_;        // modelId → CreatureModelData.ModelScale
+    std::unordered_map<uint32_t, uint32_t> modelIdToFlags_;     // modelId → CreatureModelData.Flags
     // CharHairGeosets.dbc: key = (raceId<<16)|(sexId<<8)|variationId → geosetId (skinSectionId)
     std::unordered_map<uint32_t, uint16_t> hairGeosetMap_;
     // CharFacialHairStyles.dbc: key = (raceId<<16)|(sexId<<8)|variationId → {geoset100, geoset300, geoset200}
@@ -1005,8 +1007,38 @@ private:
         uint32_t displayId = 0;
         uint32_t instanceId = 0;        // the creature display drawn in the player's place
         uint32_t nativeInstanceId = 0;  // the character's own instance, hidden meanwhile
+        /// Drawn as a character of another race (characterIllusion): the
+        /// player's own look and gear, rebuilt under morphSpawnKey.
+        bool character = false;
+        /// The gear last put on that character, to follow equipment changes.
+        std::array<uint32_t, 19> equipment{};
+        bool dressed = false;
     };
     std::unordered_map<uint64_t, PlayerMorph> playerMorphs_;
+
+    /// Whether a display draws a player as a character of another race, and
+    /// which (Wow.exe 0x71A430): a player whose display is a character model
+    /// (CreatureModelData flag 4) with a CreatureDisplayInfoExtra carrying
+    /// flag 1 is composed as the Extra's race and sex with the player's own
+    /// skin, face, hair and facial hair (0x71D010 reads them from the
+    /// player's bytes) and the player's own visible equipment (0x6E09E0,
+    /// enabled by 0x7202C0 for exactly this case). The Culling of
+    /// Stratholme's human illusions (19723/19724) are such displays. Every
+    /// other display - Noggenfogger's skeleton, a form, a polymorph, an NPC
+    /// costume - is drawn as the creature display it is.
+    bool characterIllusion(uint32_t displayId, uint8_t& raceId, uint8_t& sexId);
+    /// The player's own visible gear, as the equipment pass wants it; false
+    /// when it is not known yet.
+    bool playerVisibleEquipment(uint64_t guid, std::array<uint32_t, 19>& displayIds,
+                                std::array<uint8_t, 19>& inventoryTypes) const;
+    /// Build the character a characterIllusion display draws (0 if it cannot be).
+    uint32_t buildCharacterIllusion(uint64_t guid, uint8_t raceId, uint8_t sexId);
+    /// Dress it in the player's current gear, if that changed.
+    void dressCharacterIllusion(uint64_t guid, PlayerMorph& morph);
+    void releaseCharacterIllusion(uint64_t guid, uint32_t instanceId);
+    /// The unit a render key stands for: the player, for the morph key of a
+    /// race illusion's character; the key itself otherwise.
+    uint64_t unitGuidFor(uint64_t guid) const;
     /// Wanted display per player (0 = turn back), until it is drawn.
     std::unordered_map<uint64_t, uint32_t> pendingPlayerMorphs_;
     /// The morph display is built by the ordinary creature spawn path under
