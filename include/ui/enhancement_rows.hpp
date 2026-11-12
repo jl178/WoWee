@@ -706,16 +706,26 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .asBool = &Enhancements::colorGrade},
     {.key = "enhanceddaylight", .label = "Enhanced daylight", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
-     .tooltip = "Azeroth and Kalimdor lit with the reference client's own light for each\n"
-                "zone: twelve keys a day with a slow dawn and a long golden\n"
-                "evening, a whiter sun, a brighter sky. Where the reference client has no\n"
-                "match, the day is shifted by its average. Dungeons and\n"
-                "Outland are unchanged.",
+     .tooltip = "Azeroth and Kalimdor lit the way the enhanced client lights each\n"
+                "kind of zone: a slower dawn and a long golden evening, a whiter\n"
+                "sun, a brighter sky, forests, deserts, snow and swamps each\n"
+                "graded their own way. Dungeons and Outland are unchanged.",
      .choices = "", .stockValue = 0, .recommendedValue = 0, .saveKey = "enhanced_daylight",
-     .controls = "LightingManager: the reference client's keyframes for the lights "
-                 "enhanced_lighting_table.hpp matches, the measured trend "
-                 "(enhanced_palette.hpp) for the rest, before the band blend",
+     .controls = "LightingManager: the enhanced lighting table's keyframes "
+                 "(enhanced_lighting_table.hpp) for the lights it links, the measured "
+                 "trend (enhanced_palette.hpp) for the rest, before the band blend",
      .asBool = &Enhancements::enhancedDaylight},
+    {.key = "enhancedlightingtable", .label = "Enhanced daylight table", .kind = SettingKind::Enum,
+     .minValue = 0, .maxValue = 1, .step = 1, .category = kEnhPageEnhanced, .section = "",
+     .tooltip = "Which per-zone light the row above uses. Wowee's own is built\n"
+                "at start-up from your 3.3.5 data and a few tuned numbers per\n"
+                "kind of zone. A local table is one you made yourself and put\n"
+                "in the data's override folder (wowee/enhanced_lighting_table.bin).",
+     .choices = "Local table if present, else Wowee's own|Wowee's own",
+     .stockValue = 0, .recommendedValue = 0, .saveKey = "enhanced_lighting_table",
+     .controls = "LightingManager::setEnhancedTable: which of the two tables built at "
+                 "start-up profileForSlot reads; nothing is rebuilt",
+     .asInt = &Enhancements::enhancedLightingTable},
     {.key = "sunhaze", .label = "Sun haze (enhanced)", .kind = SettingKind::Bool,
      .minValue = 0, .maxValue = 0, .step = 0, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "Air over the whole view, thickest near the ground: the distance\n"

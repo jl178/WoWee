@@ -111,6 +111,10 @@ struct Enhancements {
     /// two continents: a whiter sun, brighter fill light, a brighter and
     /// bluer sky and haze (enhanced_palette.hpp). Off is Light.dbc's colours.
     bool  enhancedDaylight = false;
+    /// Which per-light table that row reads (LightingManager::EnhancedTable):
+    /// 0 a local table in the client data's override folder if there is
+    /// one, else Wowee's own (built from 3.3.5's data); 1 Wowee's own always.
+    int   enhancedLightingTable = 0;
     /// The reference client's global fog layer over the whole view: air thickest
     /// near the ground, lit by the sky and, mostly forward, by the sun, so
     /// the distance pales and a low sun glows gold (enhanced_haze.frag).

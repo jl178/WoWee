@@ -4,12 +4,14 @@
 /// "Enhanced daylight" row on maps 0 and 1 (docs/re/enhanced-lighting.md
 /// section 2b).
 ///
-/// The table is Blizzard's data, converted, so it is not in the source tree.
-/// tools/enhanced_lighting_gen.py writes it from a 3.3.5 install and the reference client's
-/// DB2 exports to the client data's override folder, where LightingManager
-/// reads it as `wowee\enhanced_lighting_table.bin`
-/// (<data>/override/wowee/enhanced_lighting_table.bin). Without it the row uses the
-/// averaged trend (enhanced_palette.hpp) everywhere.
+/// Two tables have this layout. Wowee's own is built at start-up from 3.3.5's
+/// DBCs and assets/enhanced_lighting_params.json (enhanced_lighting_emulation.hpp,
+/// section 2f). A local one - the reference client's data converted, so never
+/// in the source tree - may sit in the client data's override folder, where
+/// LightingManager reads it as `wowee\enhanced_lighting_table.bin`
+/// (<data>/override/wowee/enhanced_lighting_table.bin); the "Enhanced
+/// daylight table" setting says which the row reads. Lights neither links
+/// take the averaged trend (enhanced_palette.hpp).
 ///
 /// Each link names a 3.3.5 light and one of its LightParams slots (clear or
 /// storm) and the profile that replaces that slot's bands: up to 16 keys

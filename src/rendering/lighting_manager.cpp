@@ -3,6 +3,7 @@
 #include "rendering/lighting_manager.hpp"
 #include "rendering/enhanced_palette.hpp"
 #include "rendering/enhanced_lighting_table.hpp"
+#include "rendering/enhanced_lighting_emulation.hpp"
 #include "rendering/light_coords.hpp"
 #include "rendering/light_band_block.hpp"
 #include "rendering/stock_day_night.hpp"
@@ -18,6 +19,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <fstream>
+#include <sstream>
 #include <type_traits>
 
 namespace wowee {
@@ -240,30 +243,113 @@ bool LightingManager::loadLightParamsDbc(pipeline::AssetManager* assetManager) {
 
 void LightingManager::loadEnhancedProfiles(pipeline::AssetManager* assetManager) {
     namespace fl = enhanced_lighting_table;
-    enhancedProfiles_.clear();
-    fl::Table table;
+    localEnhancedProfiles_.clear();
+    builtinEnhancedProfiles_.clear();
+    buildEnhancedEmulation(assetManager);
+
+    // A local table, if the user has one: it comes before Wowee's own while
+    // the setting is LocalFirst (setEnhancedTable).
     std::vector<uint8_t> data = assetManager->readFileOptional(fl::kFileName);
     if (data.empty()) {
         // A table written before the rename to the enhanced naming, under its
         // old name, until it is regenerated (core/legacy_settings_migration.hpp).
         data = assetManager->readFileOptional(core::kLegacyLightTableFile);
         if (!data.empty()) {
-            LOG_INFO("Enhanced lighting table: read from its old name, ",
-                     core::kLegacyLightTableFile, "; tools/enhanced_lighting_gen.py "
-                     "writes it as wowee/enhanced_lighting_table.bin");
+            LOG_INFO("Enhanced lighting table: local table read from its old name, ",
+                     core::kLegacyLightTableFile);
         }
     }
+    fl::Table table;
     if (data.empty()) {
-        LOG_INFO("Enhanced lighting table: no <data>/override/wowee/enhanced_lighting_table.bin "
-                 "(tools/enhanced_lighting_gen.py writes it); the enhanced daylight uses "
-                 "the averaged trend everywhere");
+        LOG_INFO("Enhanced lighting table: no local table "
+                 "(<data>/override/wowee/enhanced_lighting_table.bin)");
+    } else if (!fl::parse(data, table)) {
+        LOG_WARNING("Enhanced lighting table: the local table is not a valid table; not used");
+    } else {
+        profilesFromTable(table, localEnhancedProfiles_);
+        LOG_INFO("Enhanced lighting table: local table, ", localEnhancedProfiles_.size(),
+                 " light slots");
+    }
+    selectEnhancedTable();
+}
+
+void LightingManager::buildEnhancedEmulation(pipeline::AssetManager* assetManager) {
+    namespace em = enhanced_lighting_emulation;
+    const char* pathEnv = std::getenv("WOWEE_ENHANCED_LIGHTING_PARAMS");
+    const std::string path = (pathEnv && *pathEnv) ? pathEnv : em::kParamsFile;
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        LOG_WARNING("Enhanced lighting: ", path, " not found; Wowee's own table is not built");
         return;
     }
-    if (!fl::parse(data, table)) {
-        LOG_WARNING("Enhanced lighting table: the file is not a valid "
-                    "table; the enhanced daylight uses the averaged trend everywhere");
+    std::stringstream text;
+    text << file.rdbuf();
+    em::Params params;
+    std::string error;
+    if (!em::parseParams(text.str(), params, error)) {
+        LOG_WARNING("Enhanced lighting: ", path, ": ", error, "; Wowee's own table is not built");
         return;
     }
+
+    std::vector<em::ZoneBox> boxes;
+    if (auto dbc = assetManager->loadDBC("WorldMapArea.dbc"); dbc && dbc->isLoaded()) {
+        const auto* layout = pipeline::getActiveDBCLayout();
+        const auto* l = layout ? layout->getLayout("WorldMapArea") : nullptr;
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            em::ZoneBox b;
+            b.mapId = dbc->getUInt32(i, l ? (*l)["MapID"] : 1);
+            b.areaId = dbc->getUInt32(i, l ? (*l)["AreaID"] : 2);
+            if (b.areaId == 0) continue;  // a continent's own map
+            b.left = dbc->getFloat(i, l ? (*l)["LocLeft"] : 4);
+            b.right = dbc->getFloat(i, l ? (*l)["LocRight"] : 5);
+            b.top = dbc->getFloat(i, l ? (*l)["LocTop"] : 6);
+            b.bottom = dbc->getFloat(i, l ? (*l)["LocBottom"] : 7);
+            boxes.push_back(b);
+        }
+    } else {
+        LOG_WARNING("Enhanced lighting: no WorldMapArea.dbc; every light takes the default class");
+    }
+
+    std::vector<em::Light> lights;
+    for (const auto& [id, v] : lightsById_) {
+        em::Light l;
+        l.id = id;
+        l.mapId = v->mapId;
+        l.isMapDefault = v->isMapDefault;
+        l.worldX = v->position.x;
+        l.worldY = v->position.y;
+        l.clearParams = v->lightParamsIds[LightVolume::SLOT_CLEAR];
+        l.stormParams = v->lightParamsIds[LightVolume::SLOT_STORM];
+        lights.push_back(l);
+    }
+    auto stockSet = [this](uint32_t paramsId, em::StockSet& out) {
+        auto it = lightParamsProfiles_.find(paramsId);
+        if (it == lightParamsProfiles_.end()) return false;
+        const LightParamsProfile& p = it->second;
+        for (uint32_t c = 0; c < enhanced_lighting_table::kColorChannels; ++c) {
+            out.colors[c] = {p.colorBands[c].numKeyframes, p.colorBands[c].times, p.colorBands[c].packed};
+        }
+        for (uint32_t f = 0; f < out.floats.size(); ++f) {
+            out.floats[f] = {p.floatBands[f].numKeyframes, p.floatBands[f].times, p.floatBands[f].values};
+        }
+        return true;
+    };
+    const enhanced_lighting_table::Table table = em::build(params, lights, boxes, stockSet);
+    profilesFromTable(table, builtinEnhancedProfiles_);
+    LOG_INFO("Enhanced lighting: Wowee's own table, ", params.classes.size(), " zone classes, ",
+             table.profiles.size(), " profiles, ", builtinEnhancedProfiles_.size(), " light slots");
+    // For comparing against the Python recipe (tools/enhanced_lighting_build.py).
+    if (const char* dump = std::getenv("WOWEE_ENHANCED_LIGHTING_DUMP"); dump && *dump) {
+        const std::vector<uint8_t> bytes = em::serialize(table);
+        std::ofstream(dump, std::ios::binary)
+            .write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        LOG_INFO("Enhanced lighting: wrote Wowee's own table to ", dump);
+    }
+}
+
+void LightingManager::profilesFromTable(const enhanced_lighting_table::Table& table,
+                                        std::map<uint32_t, LightParamsProfile>& out) const {
+    namespace fl = enhanced_lighting_table;
     for (const fl::Link& link : table.links) {
         auto vit = lightsById_.find(link.lightId);
         if (vit == lightsById_.end() || link.slot >= LightVolume::SLOT_COUNT) continue;
@@ -310,9 +396,39 @@ void LightingManager::loadEnhancedProfiles(pipeline::AssetManager* assetManager)
         }
         // The air (enhanced_lighting_table.hpp), the reference client's global fog layer.
         profile.airDensity = src.airDensity;
-        enhancedProfiles_[link.lightId * 8u + link.slot] = profile;
+        out[link.lightId * 8u + link.slot] = profile;
     }
-    LOG_INFO("Enhanced lighting table: ", enhancedProfiles_.size(), " light slots from the table");
+}
+
+void LightingManager::setEnhancedTable(int which) {
+    if (which == enhancedTableSetting_) return;
+    enhancedTableSetting_ = which;
+    selectEnhancedTable();
+}
+
+void LightingManager::selectEnhancedTable() {
+    static const std::string env = [] {
+        const char* e = std::getenv("WOWEE_ENHANCED_LIGHTING");
+        return std::string(e ? e : "");
+    }();
+    if (env == "none") {
+        enhancedProfiles_ = &noEnhancedProfiles_;
+    } else if (env == "local") {
+        enhancedProfiles_ = &localEnhancedProfiles_;
+    } else if (env == "builtin" || enhancedTableSetting_ == static_cast<int>(EnhancedTable::Builtin) ||
+               localEnhancedProfiles_.empty()) {
+        enhancedProfiles_ = &builtinEnhancedProfiles_;
+    } else {
+        enhancedProfiles_ = &localEnhancedProfiles_;
+    }
+    LOG_INFO("Enhanced lighting table in use: ", enhancedTableName(), " (", enhancedProfiles_->size(),
+             " light slots)");
+}
+
+const char* LightingManager::enhancedTableName() const {
+    if (enhancedProfiles_ == &localEnhancedProfiles_) return "local";
+    if (enhancedProfiles_ == &builtinEnhancedProfiles_) return "builtin";
+    return "none";
 }
 
 const LightParamsProfile* LightingManager::profileForSlot(const LightVolume* volume,
@@ -321,8 +437,8 @@ const LightParamsProfile* LightingManager::profileForSlot(const LightVolume* vol
     if (fromEnhanced) *fromEnhanced = false;
     if (!volume) return nullptr;
     if (enhancedActive_) {
-        auto fit = enhancedProfiles_.find(volume->lightId * 8u + slot);
-        if (fit != enhancedProfiles_.end()) {
+        auto fit = enhancedProfiles_->find(volume->lightId * 8u + slot);
+        if (fit != enhancedProfiles_->end()) {
             if (fromEnhanced) *fromEnhanced = true;
             return &fit->second;
         }

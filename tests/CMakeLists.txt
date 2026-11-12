@@ -1747,6 +1747,14 @@ wowee_add_test(test_enhanced_look
     SOURCES test_enhanced_look.cpp)
 target_compile_definitions(test_enhanced_look PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
+# ── test_enhanced_lighting_emulation ─────────────────────────
+# Wowee's own enhanced lighting table: the parameter file, the zone classes,
+# the grade, the key limit and the WFL2 round trip, on made-up data.
+wowee_add_test(test_enhanced_lighting_emulation
+    SOURCES test_enhanced_lighting_emulation.cpp
+            ${CMAKE_SOURCE_DIR}/src/rendering/enhanced_lighting_emulation.cpp)
+target_compile_definitions(test_enhanced_lighting_emulation PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
 # ── test_legacy_settings_migration ──────────────────────────
 # A settings.cfg saved before the rename to the enhanced naming loads with every
 # enhancement row as saved (core/legacy_settings_migration.hpp), a new key

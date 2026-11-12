@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <glm/glm.hpp>
+#include "rendering/enhanced_lighting_table.hpp"
 
 namespace wowee {
 namespace pipeline { class DBCFile; class AssetManager; }
@@ -346,9 +347,23 @@ public:
     /// LightingManager::update.
     void setFogSkyBlend(float blend) { fogSkyBlend_ = blend; }
     /// WoW enhanced daylight on maps 0 and 1: its own keyframes for every
-    /// light enhanced_lighting_table.hpp matches, the averaged trend
-    /// (enhanced_palette.hpp) for the rest.
+    /// light the enhanced lighting table (enhanced_lighting_table.hpp) links,
+    /// the averaged trend (enhanced_palette.hpp) for the rest.
     void setEnhancedDaylight(bool on) { enhancedDaylight_ = on; }
+    /// Which enhanced lighting table the row reads.
+    enum class EnhancedTable : int {
+        /// A local table in the client data's override folder
+        /// (<data>/override/wowee/enhanced_lighting_table.bin) if there is
+        /// one, else Wowee's own, built from 3.3.5's data at start-up.
+        LocalFirst = 0,
+        /// Wowee's own (enhanced_lighting_emulation.hpp) even with a local one.
+        Builtin = 1,
+    };
+    /// The "Enhanced daylight table" setting. WOWEE_ENHANCED_LIGHTING=local,
+    /// builtin or none (the trend everywhere) overrides it, for comparisons.
+    void setEnhancedTable(int which);
+    /// Which table the row reads now: "local", "builtin" or "none".
+    [[nodiscard]] const char* enhancedTableName() const;
     /// Whether enhanced daylight is lighting the frame: the row on, on a map
     /// the reference client re-authored (0 or 1), not under water.
     [[nodiscard]] bool isEnhancedActive() const { return enhancedActive_; }
@@ -356,8 +371,8 @@ public:
     /// then added to the ambient as light without holding the sum at one
     /// (enhanced_palette::linearLightDirect).
     void setHdrScene(bool on) { hdrScene_ = on; }
-    /// How many of 3.3.5's lights have reference keyframes (0 before initialize).
-    [[nodiscard]] size_t enhancedLightCount() const { return enhancedProfiles_.size(); }
+    /// How many light slots the table in use links (0 before initialize).
+    [[nodiscard]] size_t enhancedLightCount() const { return enhancedProfiles_->size(); }
     /// Long view: the fog may end past the far clip (see update()).
     void setLongView(bool on) { longView_ = on; }
     /// The far field's reach (far_field::kReach), or 0: with the long view,
@@ -477,10 +492,16 @@ private:
                                              LightVolume::ParamsSlot slot,
                                              bool* fromEnhanced = nullptr) const;
 
-    /// enhanced_lighting_table.hpp's table, read from the client data's override
-    /// folder, as profiles built over the stock ones (channels the reference client leaves
-    /// empty keep 3.3.5's bands). No file: none, and the trend everywhere.
+    /// The enhanced lighting tables as profiles built over the stock ones
+    /// (channels a table leaves out keep 3.3.5's bands): a local one read
+    /// from the client data's override folder, if there is one, and Wowee's
+    /// own, built from 3.3.5's DBCs and assets/enhanced_lighting_params.json
+    /// (enhanced_lighting_emulation.hpp). setEnhancedTable picks one.
     void loadEnhancedProfiles(pipeline::AssetManager* assetManager);
+    void buildEnhancedEmulation(pipeline::AssetManager* assetManager);
+    void profilesFromTable(const enhanced_lighting_table::Table& table,
+                           std::map<uint32_t, LightParamsProfile>& out) const;
+    void selectEnhancedTable();
 
     /** world/dnc.db: the day and night intensity keys, by time of day. */
     bool loadDayNightCycle(pipeline::AssetManager* assetManager);
@@ -547,8 +568,13 @@ private:
     bool hdrScene_ = false;
     /// enhancedDaylight_ and the map being drawn is one the reference client re-authored.
     bool enhancedActive_ = false;
-    /// The reference client's keyframes by 3.3.5 light id * 8 + slot (loadEnhancedProfiles).
-    std::map<uint32_t, LightParamsProfile> enhancedProfiles_;
+    /// The tables' profiles by 3.3.5 light id * 8 + slot (loadEnhancedProfiles):
+    /// the local table's, Wowee's own, and the one the row reads.
+    std::map<uint32_t, LightParamsProfile> localEnhancedProfiles_;
+    std::map<uint32_t, LightParamsProfile> builtinEnhancedProfiles_;
+    const std::map<uint32_t, LightParamsProfile> noEnhancedProfiles_;
+    const std::map<uint32_t, LightParamsProfile>* enhancedProfiles_ = &noEnhancedProfiles_;
+    int enhancedTableSetting_ = static_cast<int>(EnhancedTable::LocalFirst);
     bool longView_ = false;
     float longViewReach_ = 0.0f;
     float fogStrength_ = 1.0f;

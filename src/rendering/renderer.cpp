@@ -1734,6 +1734,7 @@ void Renderer::applyEnhancementsToSubsystems() {
         lightingManager->setFogStrength(e.fogStrength);
         lightingManager->setFogSkyBlend(e.fogSkyBlend);
         lightingManager->setEnhancedDaylight(e.enhancedDaylight);
+        lightingManager->setEnhancedTable(e.enhancedLightingTable);
         lightingManager->setLongView(e.longView);
         lightingManager->setLongViewReach(e.farField ? far_field::kReach : 0.0f);
     }
