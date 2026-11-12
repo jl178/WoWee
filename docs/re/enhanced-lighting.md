@@ -183,9 +183,10 @@ not in the source tree (the repository is public). `tools/enhanced_lighting_gen.
 `<data>/override/wowee/enhanced_lighting_table.bin` (125 KB; layout in
 `include/rendering/enhanced_lighting_table.hpp`), and `LightingManager` reads it
 through the AssetManager as `wowee\enhanced_lighting_table.bin`, as an override pack
-file. Without it the log says so once and the row uses the averaged trend
-everywhere; a file that fails its checks is treated the same way. The test
-reads a made-up two-key table, not the reference client's.
+file. Such a local table is optional: without one (or with one that fails
+its checks) the row reads Wowee's own table, built at start-up from 3.3.5's
+data (section 2f). The test reads a made-up two-key table, not the
+reference client's.
 
 **Code.** `LightingManager::loadEnhancedProfiles` builds, at load, one profile
 per linked light and slot over the slot's stock profile; `profileForSlot` returns it while the row is on, on maps 0 and 1,
@@ -484,6 +485,107 @@ under the reference client's higher 10:00 sun (44 degrees against the stock ligh
 that view says whether darker is right. And the crowns' chroma is about
 +20% (+15% with the leaf light off). Sheets in the session scratchpad:
 `fgap/sheet_y5.png` (the reference client | before | now), `fgap/sheet_y5_regress.png`.
+
+## 2f. Wowee's own table: 3.3.5's light, re-graded per zone class
+
+The converted table of section 2b is Blizzard's data and stays a local
+file. So that the row has per-zone light everywhere, the client builds a
+table of its own at start-up, in the same `WFL2` layout, from nothing but
+3.3.5's DBCs (Light, LightParams, LightIntBand, LightFloatBand,
+WorldMapArea) and `assets/enhanced_lighting_params.json`
+(`include/rendering/enhanced_lighting_emulation.hpp`;
+`tools/enhanced_lighting_build.py` is the same recipe in Python, to write
+the table to a file, compare it and fit the parameters).
+
+**Recipe.** Per 3.3.5 light on maps 0 and 1 and per weather slot:
+
+- *Zone class.* The smallest WorldMapArea box holding the light's centre
+  (outside every box, the nearest) gives its AreaTable zone; the parameter
+  file lists zones per class: default (the map defaults and anything
+  unlisted), temperate forest, plains (Westfall, Barrens, Mulgore, Arathi,
+  Durotar), dark forest, twilight forest (Teldrassil, Darnassus, Moonglade),
+  desert, snow, swamp, coastal.
+- *Keys.* Every time 3.3.5's bands for the set have a key, plus the four
+  band times (0:00, 6:00, 12:30, 19:00), at most 16.
+- *Grade.* At each key 3.3.5's colour is re-graded,
+  `out = level*Y + saturation*(rgb - Y) + Y*(warmth*W + tint*G)`, Y the
+  luminance, W orange-vs-blue and G green-vs-magenta (no luminance of
+  their own). Sun, ambient, sky (SkyTop..SkySmog) and fog colour have a
+  grade per class and band; the cloud colours one grade per band over all
+  classes; the sun sprite a move toward white per band. Every parameter is
+  eased linearly between the band times. The sky channels carry the
+  table's exposure (x1.3), taken out as it is read, like a local table's.
+- *Fog and air.* The fog end scaled and the fog start fraction offset per
+  class and band (both fit to within 6% of no change); the class's air
+  density for the sun haze (0.001/yd in every class).
+
+681 numbers: 9 classes x 4 bands x 18, 9 air densities, the 4 band hours
+and 20 shared. Most sit near no change (level and saturation 0.9-1.1);
+the big moves are the sun's saturation at 12:30 (0.6-0.7 in the default,
+temperate forest and desert classes, 0.37 on the plains, 0.3 in swamps:
+the whiter sun of section 2), the default class's noon sun level (1.36),
+the twilight forest's ambient (level 0.4-0.65, a deeper violet) and the
+sun sprite toward white (0.4-0.7).
+
+**Fitted, not copied.** `enhanced_lighting_build.py fit --target <a local
+WFL2 table>` fits the grades by Huber-weighted least squares against the
+target's clear-slot colours every half hour (as our table interpolates
+them), the map defaults weighted x10, held toward no change by a ridge.
+Only the parameters are written; the zone lists and band hours are ours.
+3.3.5's storm sets are mostly one flat key, which no grade turns into a
+day, so they take the clear slot's grade and are left out of the fit.
+
+**Precedence.** A local table in the client data's override folder
+(`wowee\enhanced_lighting_table.bin`, or its old name) is read if there is
+one; the "Enhanced daylight table" setting picks: *Local table if present,
+else Wowee's own* (the default) or *Wowee's own*. Both are built at start-up
+and the setting only switches between them. `WOWEE_ENHANCED_LIGHTING=local`,
+`builtin` or `none` (the trend everywhere) overrides it for comparisons;
+`WOWEE_ENHANCED_LIGHTING_PARAMS=<file>` reads another parameter file and
+`WOWEE_ENHANCED_LIGHTING_DUMP=<file>` writes the built table (the C++ and
+Python builds agree to one step in 255 on every key).
+
+**How close** (against Jered's local table as the target; 2026-11-12).
+Table colours, clear slot, mean RGB distance every half hour (0-255,
+display units), per light / of the class means:
+
+| class | 3.3.5 as is | ours |
+|---|---|---|
+| default (Light 1 and Kalimdor's) | 35.7 / 34.9 | 20.3 / 18.5 |
+| temperate forest | 27.2 / 14.8 | 24.3 / 9.3 |
+| plains | 32.7 / 23.2 | 25.0 / 11.1 |
+| dark forest | 37.5 / 19.3 | 34.5 / 12.7 |
+| twilight forest | 22.7 / 22.2 | 17.8 / 10.0 |
+| desert | 32.3 / 19.7 | 25.0 / 9.2 |
+| snow | 38.5 / 31.2 | 30.3 / 16.6 |
+| swamp | 22.3 / 17.3 | 19.4 / 9.1 |
+| coastal | 24.1 / 19.1 | 22.3 / 13.1 |
+| all | 31.5 / 20.0 | 26.5 / 11.0 |
+
+The class means close by half; single lights much less, because the
+reference client re-authored lights one by one (Westfall's sun, Teldrassil's
+ambient, Felwood's and the Plaguelands' replaced outright), which no class
+grade can follow without being that light's own data.
+
+Rendered (Enhanced preset, the harness of section 2d; mean |RGB| difference
+per pixel from the local table's frame, and luminance difference):
+
+| view | ours | no table (trend) |
+|---|---|---|
+| Goldshire inn 9:22 / crossroads / 15:23 | 1.7 / 2.4 / 3.3 | 7.1 / 8.7 / 8.0 |
+| toward / away from the sun | 3.2 / 2.5 | 6.1 / 9.0 |
+| Elwynn forest 10:00 / Goldshire 17:51 | 2.2 / 3.1 | 7.8 / 10.5 |
+| Barrens noon | 6.9 (-0.026 L) | 8.3 (+0.003) |
+| Westfall 6:18 into the sun | 20.6 (-0.043) | 29.1 (-0.031) |
+| Darnassus / Dolanaar noon | 4.3 / 4.2 | 14.2 / 23.2 |
+
+Against the reference client's own captures (the three matched Goldshire
+views, section 2d's region table): region gap sum 237.6 ours, 247.8 the
+local table, 293.1 no table; crowns' chroma +17% / +19% / +44%. The
+remaining gap is Westfall's dawn: the reference client turned its sun from
+3.3.5's orange to a pale gold-green, and with it the morning sky; ours keeps
+it warm. Westfall shares the plains grade with the Barrens, whose sun went
+the other way less far.
 
 ## 3. Colour grading
 
