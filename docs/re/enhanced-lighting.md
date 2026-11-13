@@ -1143,6 +1143,36 @@ channel over 0.97 in the QA framing):
 | fixed-mask crown gap, three views | +25.7% | +20.5% |
 | evening / forest against y5 | | -8.3% / -6.9% (the canopy air kept dark) |
 
+**Dawn rays, and the shade kept where no beam is** (after 90aa0ac).
+
+- *The canopy's air.* Cutting the sky light of all shaded air under a
+  canopy took Elwynn's evening and forest views 8.3% and 6.9% under y5. The
+  cut now applies only beside a beam (some of the inner ring lit); deep in
+  the shade, with no beam near, the air keeps its sky light. Evening -5.3%,
+  forest -3.0% (dbcb6e7, before the beams: -5.2% / -3.0%); the evening
+  shade's r/L 1.412, b/L 0.707.
+- *Dawn.* The light the shadow maps are cast from stands about 15 degrees
+  up at 6:15-6:30, easing onto a sun three or four degrees up, so every
+  cell near the ground under the trees is in its shadow and no shadow map
+  can say what the sun itself reaches. Past 40 yards (full by 60), toward a
+  sun under about 15 degrees, the mist now takes its sunlight from the
+  sun's own direction, marched over the sky height field (12 steps of 6
+  yards: blocked where the top of what stands there, or the ground, is
+  over the ray; the field's tops and ground maps are bound to the inject
+  as bindings 8 and 9), and the far air's forward lobe sits on the sprite.
+  Rays break between the trunks and over the tree lines toward the low sun
+  - Brill at 6:24 against the reference's Tirisfal still, Elwynn at 6:30
+  and 19:30 - while the surfaces and the near air keep the light they had.
+  The field spans 256 yards round the camera, so a ridge further off than
+  that casts nothing yet.
+
+Westfall 6:18 into the sun stays 0.2% white (0.2% at Strong with full
+glow); into the sun at the crossroads 0.22%; Barrens 0.546; the crown gap
+(fixed mask) +24.4% against +25.7% off. The inject pass with the shafts
+on against off, two alternating rounds on a quiet GPU (Iris Xe, 1280x540):
+0.553 -> 0.662 ms in Elwynn's forest at 6:30 (the dawn march included),
+0.508 -> 0.605 at 10:00.
+
 ## 6. Global illumination ("Secondary Lighting")
 
 reference-era shaders with no names in the community listfile

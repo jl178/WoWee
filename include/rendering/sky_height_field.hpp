@@ -74,6 +74,9 @@ public:
     [[nodiscard]] VkDescriptorSetLayout setLayout() const { return setLayout_; }
     /// The front's set.
     [[nodiscard]] VkDescriptorSet set() const { return sets_[front_]; }
+    /// The front's view of one map (the fog volume's dawn rays read the tops
+    /// and the ground through its own set).
+    [[nodiscard]] VkImageView frontView(Map m) const { return targets_[front_][m].view; }
     /// For the shader: the front's corner in world x, y, the height depth 0
     /// stands for, and 1 once it holds a drawing (0 before: no sky term).
     [[nodiscard]] glm::vec4 params() const;

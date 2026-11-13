@@ -6963,6 +6963,23 @@ void Renderer::renderVolumetricFog() {
     in.layerBase = fogLayerBase_;
     in.sunLobe = lightingManager ? lightingManager->getLightingParams().sunDisc : 1.0f;
     enhancedShaftInputs(lightingManager.get(), weather.get(), indoorFactor_, enh_.lightShaftStrength, in);
+    // The dawn rays: with the shafts on, toward a sun under about 15
+    // degrees, the far air takes its sunlight from the sun's own direction,
+    // marched over the sky height field (volumetric_fog_inject.comp,
+    // docs/re/enhanced-lighting.md 5c). Only while the field holds a drawing.
+    VkImageView skyTops = VK_NULL_HANDLE;
+    VkImageView skyGround = VK_NULL_HANDLE;
+    if (in.shaftStrength > 0.0f && skyFrame_ && skyField_ && skyField_->readable() && lightingManager) {
+        const glm::vec3 toSun = glm::normalize(lightingManager->getLightingParams().sunDir);
+        in.dawnRays = glm::smoothstep(-0.02f, 0.03f, toSun.z) * (1.0f - glm::smoothstep(0.15f, 0.30f, toSun.z));
+        if (in.dawnRays > 0.0f) {
+            in.toSun = toSun;
+            in.skyField = skyField_->params();
+            skyTops = skyField_->frontView(SkyHeightField::kTops);
+            skyGround = skyField_->frontView(SkyHeightField::kGround);
+        }
+    }
+    volumetricFog_->setSkyViews(frame, skyTops, skyGround);
     volumetricFog_->record(currentCmd, frame, perFrameDescSets[frame], in);
     if (vkCtx) vkCtx->gpuMark(currentCmd, "volumetric fog integrate");
 

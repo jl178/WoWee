@@ -38,6 +38,8 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 drift;
     vec4 jitter;
     ivec4 dims;
+    vec4 skyField;
+    vec4 dawn;
     vec4 shafts;
 } vol;
 

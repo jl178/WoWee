@@ -27,6 +27,8 @@ struct VolumeParamsGPU {
     glm::vec4 drift;          // xyz = how far the mist has blown, w = noise amount
     glm::vec4 jitter;         // xyz = where in its cell this frame samples, w = history weight
     glm::ivec4 dims;          // xyz = volume size
+    glm::vec4 skyField;       // the sky height field: corner xy, height of depth 0, 1 when drawn
+    glm::vec4 dawn;           // xyz toward the sun's sprite, w = the far air's share of it
     glm::vec4 shafts;         // x = canopy shaft strength (0 = none), y = night share,
                               // z = shade probe radius (yd), w = 1 / reach (yd)
 };
@@ -207,13 +209,15 @@ bool VolumetricFog::createPipelines(VkDescriptorSetLayout perFrameLayout,
     //   5  this slot's running sum, written by integrate
     //   6  this slot's sun visibility, written by inject (canopy shafts)
     //   7  the other slot's, last frame's, read by inject
-    constexpr uint32_t kBindings = 8;
+    //   8, 9 the sky height field's tops and ground (the dawn rays)
+    constexpr uint32_t kBindings = 10;
     VkDescriptorSetLayoutBinding b[kBindings]{};
     const VkDescriptorType types[kBindings] = {
         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
     };
     for (uint32_t i = 0; i < kBindings; i++) {
         b[i].binding = i;
@@ -260,7 +264,7 @@ bool VolumetricFog::createPipelines(VkDescriptorSetLayout perFrameLayout,
 
     VkDescriptorPoolSize poolSizes[3] = {
         {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_FRAMES},
-        {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_FRAMES * 4},
+        {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_FRAMES * 6},
         {.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = MAX_FRAMES * 3},
     };
     VkDescriptorPoolCreateInfo poolCI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -343,6 +347,36 @@ void VolumetricFog::setShadowView(uint32_t frame, VkImageView view) {
     w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w.pImageInfo = &shadow;
     vkUpdateDescriptorSets(ctx_->getDevice(), 1, &w, 0, nullptr);
+    if (!skyViews_[frame][0] || !skyViews_[frame][1]) writeSkyViews(frame);
+}
+
+void VolumetricFog::setSkyViews(uint32_t frame, VkImageView tops, VkImageView ground) {
+    if (frame >= MAX_FRAMES || (skyViews_[frame][0] == tops && skyViews_[frame][1] == ground)) return;
+    skyViews_[frame][0] = tops;
+    skyViews_[frame][1] = ground;
+    if (!ctx_ || computeSets_[frame] == VK_NULL_HANDLE || !volumesReady_) return;
+    writeSkyViews(frame);
+}
+
+void VolumetricFog::writeSkyViews(uint32_t frame) {
+    // A shadow map stands in where there is no field: the binding must name
+    // a readable depth view, and the shader does not read it then.
+    VkDescriptorImageInfo info[2];
+    for (int i = 0; i < 2; ++i) {
+        info[i] = {.sampler = depthSampler_,
+                   .imageView = skyViews_[frame][i] ? skyViews_[frame][i] : shadowViews_[frame],
+                   .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    }
+    VkWriteDescriptorSet w[2]{};
+    for (uint32_t i = 0; i < 2; i++) {
+        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[i].dstSet = computeSets_[frame];
+        w[i].dstBinding = 8 + i;
+        w[i].descriptorCount = 1;
+        w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[i].pImageInfo = &info[i];
+    }
+    vkUpdateDescriptorSets(ctx_->getDevice(), 2, w, 0, nullptr);
 }
 
 void VolumetricFog::writeComputeSets() {
@@ -390,6 +424,7 @@ void VolumetricFog::writeComputeSets() {
         w[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[7].pImageInfo = &visHistory;
         vkUpdateDescriptorSets(ctx_->getDevice(), 8, w, 0, nullptr);
+        writeSkyViews(f);
     }
 }
 
@@ -482,6 +517,8 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
         const char* v = std::getenv("WOWEE_FOG_HALF_RATE");
         return !(v && v[0] == '0');
     }();
+    p.skyField = in.skyField;
+    p.dawn = glm::vec4(in.toSun, glm::clamp(in.dawnRays, 0.0f, 1.0f));
     p.shafts = in.shaftStrength > 0.0f
         ? glm::vec4(in.shaftStrength, glm::clamp(in.shaftNight, 0.0f, 1.0f), in.shaftProbe,
                     1.0f / std::max(in.shaftReach, 1.0f))

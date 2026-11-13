@@ -70,6 +70,8 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 drift;          // xyz = how far the mist has blown, w = noise amount
     vec4 jitter;         // xyz = sample point inside the cell, w = history weight
     ivec4 dims;          // xyz = size, w = 0 every cell lit, 1 or 2 only odd or even slices
+    vec4 skyField;       // the sky height field: corner xy, height of depth 0, w = 1 when drawn
+    vec4 dawn;           // xyz toward the sun's sprite, w = the far air's share of it
     vec4 shafts;         // the reference client's canopy shafts: x = strength (0 = stock), y = how far it
                          // is night (the moonlight's share), z = probe radius in yards,
                          // w = 1 / the yards over which they fade out with distance
@@ -82,6 +84,12 @@ layout(set = 1, binding = 3) uniform sampler3D uHistory;
 // (written only while they are on) and last frame's, read round a cell.
 layout(set = 1, binding = 6, r32f) uniform writeonly image3D uVisibilityOut;
 layout(set = 1, binding = 7) uniform sampler3D uVisibilityHistory;
+// The sky height field round the camera (SkyHeightField): the tops of what
+// stands, seen from above, and the ground alone - for the dawn rays.
+layout(set = 1, binding = 8) uniform sampler2D uSkyTops;
+layout(set = 1, binding = 9) uniform sampler2D uSkyGround;
+const float kSkySpan = 256.0;   // sky_field::kSpan
+const float kSkyDepth = 400.0;  // sky_field::kDepth
 
 // How far along the view slice coordinate s lies: 0 at the near edge, the
 // slice count at the far one, spaced so each slice is a fixed fraction deeper
@@ -207,6 +215,26 @@ vec2 shadeAround(vec3 p) {
         if (i < 4) { shaded.x += s; taps.x += 1.0; } else { shaded.y += s; taps.y += 1.0; }
     }
     return vec2(taps.x > 0.0 ? shaded.x / taps.x : 0.0, taps.y > 0.0 ? shaded.y / taps.y : 0.0);
+}
+
+// Whether the sun's own light reaches p, toward the sprite rather than along
+// the light the shadow map is cast from: at dawn that light still stands
+// about 15 degrees up, easing onto a sun three or four degrees up, and the
+// air near the ground under the trees is all in its shadow. Marched over the
+// sky height field (12 steps of 6 yards toward the sun): blocked where the
+// top of what stands there, or the ground, is over the ray. -1 where the
+// field does not cover p.
+float dawnSunVisibility(vec3 p) {
+    if (vol.skyField.w < 0.5) return -1.0;
+    vec3 dir = normalize(vol.dawn.xyz);
+    for (int i = 1; i <= 12; ++i) {
+        vec3 q = p + dir * (float(i) * 6.0);
+        vec2 uv = (q.xy - vol.skyField.xy) / kSkySpan;
+        if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return i == 1 ? -1.0 : 1.0;
+        float d = min(textureLod(uSkyTops, uv, 0.0).r, textureLod(uSkyGround, uv, 0.0).r);
+        if (q.z < vol.skyField.z - kSkyDepth * d - 0.5) return 0.0;
+    }
+    return 1.0;
 }
 
 // The local lights that reach any cell of this workgroup, in their original
@@ -338,7 +366,15 @@ void main() {
     // (docs/re/enhanced-lighting.md 2e). Elsewhere the stock light stays
     // beside the sun and keeps the wider lobe.
     bool enhancedSun = (localLightMeta.z & 128) != 0;
-    float cosSun = dot(travel, toCamera);
+    // Dawn rays (vol.dawn.w, under the enhanced light toward a sun under
+    // about 15 degrees): past 40 yards the air takes its sunlight from the
+    // sun's own direction (dawnSunVisibility), and its forward lobe sits on
+    // the sprite - so rays break over a tree line or a rise toward the low
+    // sun, as the reference's do ("rays pop over a ridge at dawn"), while
+    // the surfaces and the near air keep the light they had.
+    float dawnFar = vol.dawn.w * smoothstep(40.0, 60.0, depth);
+    vec3 lobeTravel = dawnFar > 0.0 ? normalize(mix(travel, -normalize(vol.dawn.xyz), dawnFar)) : travel;
+    float cosSun = dot(lobeTravel, toCamera);
     float phase = enhancedSun ? mix(1.0, phaseHG(cosSun, 0.9), 0.5)
                              : mix(1.0, phaseHG(cosSun, 0.75), 0.65);
     // And within about 20 degrees of the disc the lobe gives way to even
@@ -361,6 +397,10 @@ void main() {
     vec3 light = fogColor.rgb * vol.lighting.z;
     // One tap of the map, shared by the mist's sunlight and the shafts below.
     float lit = (sunUp > 0.0 || vol.shafts.x > 0.0) ? sunVisibility(p) : 0.0;
+    if (dawnFar > 0.0) {
+        float dawnLit = dawnSunVisibility(p);
+        if (dawnLit >= 0.0) lit = mix(lit, dawnLit, dawnFar);
+    }
     if (vol.shafts.x > 0.0) imageStore(uVisibilityOut, cell, vec4(lit));
     if (sunUp > 0.0) {
         // Under the enhanced light the mist's own sunlight (not the canopy
@@ -392,13 +432,18 @@ void main() {
             // probe radii out, the light does not reach: high under a closed
             // canopy, low in the open.
             vec2 rings = shadeAround(p);
-            float shade = 0.5 * (rings.x + rings.y);
             // The canopy's own air: shaded, with shade all round it. Its
             // sky light (the fog colour) is cut by day, so a beam reads
             // against dark air rather than a lifted veil (the reference
             // stills' dark blue-green air either side of a shaft). Not to
             // black: the leaves keep their colour, and the air its depth.
-            float under = (1.0 - lit) * smoothstep(0.5, 0.95, shade) * reach * day;
+            //
+            // Only beside a beam: some of the inner ring lit. Deep in the
+            // shade, with no beam near, the air keeps its sky light - cutting
+            // it everywhere under a canopy took Elwynn's evening and forest
+            // views 8% and 7% darker.
+            float nearBeam = 1.0 - smoothstep(0.75, 1.0, rings.x);
+            float under = (1.0 - lit) * smoothstep(0.5, 0.95, rings.y) * nearBeam * reach * day;
             light -= fogColor.rgb * (vol.lighting.z * kCanopyAirCut * under);
             if (lit > 0.0) {
                 // A lit cell in a gap: most of both rings in shade. A whole
