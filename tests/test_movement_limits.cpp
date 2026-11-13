@@ -258,3 +258,28 @@ TEST_CASE("a flight step that ends in the ground slides along it", "[movement][f
         CHECK(flightStepAgainstGround(holed, from, to, 2.0f) == to);
     }
 }
+
+// The character's movement is taken in steps of at most 1/30 s, as many as
+// the frame holds: one clamped step ran a 7.0 yd/s run at 30/fps of its speed
+// under 30 fps (measured 5.83 yd/s at 28 fps, 7.00 at 30), with the legs and
+// the turn at full speed.
+TEST_CASE("a long frame moves the character the whole frame's distance") {
+    using namespace wowee::rendering::movement;
+    for (float fps : {240.0f, 60.0f, 30.0f, 29.0f, 25.0f, 20.0f, 15.0f, 10.0f, 7.5f}) {
+        const float dt = 1.0f / fps;
+        const int n = physicsSteps(dt);
+        const float step = physicsStepSeconds(dt);
+        INFO("fps " << fps);
+        CHECK(step <= kMaxPhysicsStep + 1e-6f);
+        CHECK(n * step == Catch::Approx(dt).epsilon(1e-5));
+        CHECK(7.0f * n * step / dt == Catch::Approx(7.0f).epsilon(1e-5));
+    }
+    CHECK(physicsSteps(1.0f / 60.0f) == 1);
+    CHECK(physicsSteps(1.0f / 30.0f) == 1);
+    CHECK(physicsSteps(1.0f / 25.0f) == 2);
+    CHECK(physicsSteps(0.0f) == 1);
+    CHECK(physicsStepSeconds(0.0f) == 0.0f);
+    // A hitch past four steps still moves at most four steps' worth.
+    CHECK(physicsSteps(0.5f) == kMaxPhysicsSteps);
+    CHECK(physicsSteps(0.5f) * physicsStepSeconds(0.5f) == Catch::Approx(kMaxPhysicsSteps * kMaxPhysicsStep));
+}

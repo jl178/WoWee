@@ -34,8 +34,6 @@ namespace rendering {
 
 namespace {
 
-constexpr float kMaxPhysicsDelta = 1.0f / 30.0f;
-
 /// WoW's own key bone id for the head, as the M2 skeleton names it.
 constexpr int32_t kKeyBoneHead = 6;
 
@@ -2789,9 +2787,28 @@ void CameraController::updateOrbitCamera(float deltaTime, FrameInput& f,
 }
 
 void CameraController::updateThirdPersonCamera(float deltaTime, FrameInput& f) {
+    // The frame's movement in steps of at most 1/30 s (movement::physicsSteps),
+    // so the ground covered is the speed times the frame at any frame rate.
+    // A single step clamped to 1/30 s ran the character at 30/fps of its
+    // speed under 30 fps (5.8 yd/s for a 7.0 run at 25 fps) while its legs,
+    // its turn and the server's clock ran at full speed. What happens once a
+    // frame happens on the first step: the jump key's press; a hop out of the
+    // water on any step is reported for the frame.
+    const int steps = movement::physicsSteps(deltaTime);
+    const float stepSeconds = movement::physicsStepSeconds(deltaTime);
+    const bool jumpPressed = f.nowJump;
+    bool surfaceHop = false;
     glm::vec3 prevTargetPos(0.0f);
-    glm::vec3 targetPos = moveFollowedCharacter(deltaTime, f, prevTargetPos);
-    groundFollowedCharacter(deltaTime, f, targetPos, prevTargetPos);
+    glm::vec3 targetPos(0.0f);
+    for (int i = 0; i < steps; ++i) {
+        f.physicsDeltaTime = stepSeconds;
+        f.nowJump = jumpPressed && i == 0;
+        targetPos = moveFollowedCharacter(stepSeconds, f, prevTargetPos);
+        surfaceHop = surfaceHop || surfaceHopThisFrame_;
+        groundFollowedCharacter(stepSeconds, f, targetPos, prevTargetPos);
+    }
+    f.nowJump = jumpPressed;
+    surfaceHopThisFrame_ = surfaceHop;
     // Landing: flying down onto real ground, or skimming it, without climbing.
     // Grounding has just put the feet on the floor if they were within reach
     // of it; on a floor that was actually found, that is touching down.
@@ -3009,8 +3026,11 @@ void CameraController::update(float deltaTime) {
     if (!enabled || !camera) {
         return;
     }
-    // Keep physics integration stable during render hitches to avoid floor tunneling.
-    const float physicsDeltaTime = std::min(deltaTime, kMaxPhysicsDelta);
+    // Keep physics integration stable during render hitches to avoid floor
+    // tunneling: a step is at most 1/30 s. The character's own movement is
+    // taken in as many such steps as the frame holds (updateThirdPersonCamera);
+    // the free camera keeps the one clamped step.
+    const float physicsDeltaTime = std::min(deltaTime, movement::kMaxPhysicsStep);
     intoxicationTime_ += deltaTime;
     stepViewMoves(deltaTime);
 

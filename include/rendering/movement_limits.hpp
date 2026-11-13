@@ -18,6 +18,32 @@ inline constexpr float kMaxWalkableSlopeDegrees = 50.0f;
 inline constexpr float kMinWalkableNormalZ = 0.642787635f; // cos(50 degrees)
 inline constexpr float kMaxStepUp = 0.60f;
 
+/// The longest step the character's movement is integrated in. A longer frame
+/// is cut into equal steps no longer than this, so the collision and the floor
+/// pick never see a stride past what they hold at 30 fps.
+inline constexpr float kMaxPhysicsStep = 1.0f / 30.0f;
+
+/// The most steps one frame is cut into. A frame longer than this many steps
+/// (under 7.5 fps: a hitch, a loading stall) moves the character only that
+/// far, rather than throw it a whole hitch's distance in one frame.
+inline constexpr int kMaxPhysicsSteps = 4;
+
+/// How many steps a frame of `frameSeconds` is moved in. The frame used to
+/// be clamped to one 1/30 s step, so under 30 fps the character covered only
+/// 30/fps of the ground the server's speed gives it - 5.8 yd/s at a 7.0 run
+/// and 25 fps - while turning, the animation and everyone else ran at full
+/// speed: the run speed rose and fell with the frame rate.
+inline int physicsSteps(float frameSeconds) {
+    if (!(frameSeconds > kMaxPhysicsStep)) return 1;
+    return std::min(kMaxPhysicsSteps, static_cast<int>(std::ceil(frameSeconds / kMaxPhysicsStep - 1e-4f)));
+}
+
+/// The length of each of those steps.
+inline float physicsStepSeconds(float frameSeconds) {
+    if (!(frameSeconds > 0.0f)) return 0.0f;
+    return std::min(frameSeconds / static_cast<float>(physicsSteps(frameSeconds)), kMaxPhysicsStep);
+}
+
 inline bool isWalkableNormal(float normalZ) {
     return normalZ >= kMinWalkableNormalZ;
 }
