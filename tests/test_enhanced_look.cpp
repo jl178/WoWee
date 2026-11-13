@@ -547,3 +547,19 @@ TEST_CASE("The reference client's sun shadows: its row, the Enhanced preset, the
     ss << f.rdbuf();
     CHECK(ss.str().find("(localLightMeta.z & 512) != 0") != std::string::npos);
 }
+
+TEST_CASE("Enhanced sun glow: off under a dense zone fog, whole in clear air", "[enhanced][sun]") {
+    // Darkshore's fog ends at 306 yards and Tirisfal's at 181: no glow.
+    CHECK(enhanced_palette::clearAirGlow(181.0f) == Catch::Approx(0.0f));
+    CHECK(enhanced_palette::clearAirGlow(306.0f) == Catch::Approx(0.0f));
+    // Goldshire and the Barrens (500), Westfall (444): the glow as tuned.
+    CHECK(enhanced_palette::clearAirGlow(444.0f) == Catch::Approx(1.0f));
+    CHECK(enhanced_palette::clearAirGlow(500.0f) == Catch::Approx(1.0f));
+    // Rising in between, never falling.
+    float prev = 0.0f;
+    for (float e = 300.0f; e <= 450.0f; e += 5.0f) {
+        const float g = enhanced_palette::clearAirGlow(e);
+        CHECK(g >= prev);
+        prev = g;
+    }
+}

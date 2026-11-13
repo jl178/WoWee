@@ -78,6 +78,25 @@ inline float sunIrradianceScale(const glm::vec3& stockTravel, const glm::vec3& t
     return r < 0.5f ? 0.5f : (r > 1.5f ? 1.5f : r);
 }
 
+/// The light's fog end (yards) under which the sun glow is off - a zone fog
+/// that takes the sky, as Darkshore's (306) and Tirisfal's (181) do - and
+/// over which it is whole (Goldshire and the Barrens 500, Westfall 444).
+inline constexpr float kGlowFogDense = 320.0f;
+inline constexpr float kGlowFogClear = 430.0f;
+
+/// How much of the low-sun glow the air allows: the dome's halo round the
+/// sun (skybox.frag), the sun's light on the sky and the dusk glow
+/// (enhanced_haze.frag) all add light as if a clear sky lay behind the far
+/// air. Under a dense zone fog that sky is the fog, and together they took
+/// Darkshore's coast toward an evening sun to a white sheet (luminance
+/// 0.93, saturation 0.05) where the reference still is a dim pink mist
+/// (0.37-0.47, saturation 0.29). docs/re/enhanced-lighting.md 9f.
+inline float clearAirGlow(float fogEnd) {
+    float t = (fogEnd - kGlowFogDense) / (kGlowFogClear - kGlowFogDense);
+    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    return t * t * (3.0f - 2.0f * t);
+}
+
 /// WOWEE_ENHANCED_AMBIENT=0 leaves the ambient flat, for side-by-side
 /// comparison (read once).
 inline bool ambientRampOn() {

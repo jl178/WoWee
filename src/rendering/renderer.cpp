@@ -4500,7 +4500,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                     useOriginalSkybox);
                 skyParams.sunOcclusion = sunOcclusion_;
                 skyParams.sunGain = vkCtx->isHdrScene() ? enhanced_tonemap::tuning().sunGain : 1.0f;
-                skyParams.enhancedSunGlow = enh_.enhancedDaylight && lightingManager ? lightingManager->getLightingParams().sunDisc : 0.0f;
+                skyParams.enhancedSunGlow = enh_.enhancedDaylight && lightingManager ? lightingManager->getLightingParams().sunDisc * enhanced_palette::clearAirGlow(lightingManager->getLightingParams().fogEnd) : 0.0f;
                 // The stock order (0x7f09b0): stars, sun and moons, the
                 // additive dome and the clouds, then the LightSkybox models.
                 // The dome is opaque here and drawn first; the stars and the
@@ -4696,7 +4696,7 @@ void Renderer::renderWorld(game::World* world, game::GameHandler* gameHandler) {
                 useOriginalSkybox);
             skyParams.sunOcclusion = sunOcclusion_;
             skyParams.sunGain = vkCtx->isHdrScene() ? enhanced_tonemap::tuning().sunGain : 1.0f;
-            skyParams.enhancedSunGlow = enh_.enhancedDaylight && lightingManager ? lightingManager->getLightingParams().sunDisc : 0.0f;
+            skyParams.enhancedSunGlow = enh_.enhancedDaylight && lightingManager ? lightingManager->getLightingParams().sunDisc * enhanced_palette::clearAirGlow(lightingManager->getLightingParams().fogEnd) : 0.0f;
             // The stock order (0x7f09b0): stars, sun and moons, the additive
             // dome and the clouds, then the LightSkybox models (see the
             // parallel path).

@@ -12,6 +12,7 @@
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/contact_shadow_pass.hpp"
 #include "rendering/lighting_manager.hpp"
+#include "rendering/enhanced_palette.hpp"
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/weather.hpp"
@@ -241,7 +242,10 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
         air.b = enh_.enhancedDaylight ? kEnhancedDuskGlow : 0.0f;
         // Both scaled by the Sun glow row (1 the tuned look); the haze holds
         // them under its own caps at any setting.
-        const float glow = glm::clamp(enh_.sunGlow, 0.0f, 1.0f);
+        // And by how clear the air is (enhanced_palette::clearAirGlow): under
+        // a dense zone fog the sky behind the far air is the fog itself.
+        float glow = glm::clamp(enh_.sunGlow, 0.0f, 1.0f);
+        if (lightingManager) glow *= enhanced_palette::clearAirGlow(lightingManager->getLightingParams().fogEnd);
         air.g *= glow;
         air.b *= glow;
         if (sunHaze_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.8f * wx, hazeFlags, air)) {

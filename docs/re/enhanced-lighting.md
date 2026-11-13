@@ -2485,6 +2485,51 @@ in luminance and the trunk in front of the camera 27.7 -> 31.4; from 130
 yards out at 0.3 they are 41.2 and 27.6 (as without the glow) and the warm
 light is in the far gaps between the trees.
 
+**Under a zone fog (the press stills).** Five official stills of the
+reference client (Darkshore, Tirisfal, Darnassus, Ashenvale, Orgrimmar;
+local only) were matched by place and hour and measured by fifths of the
+frame (median luminance, hue, saturation, blue/red), with each frame's mean,
+spread and white share. Ranked by gap:
+
+| still | reference | Wowee (046a047) | gap |
+|---|---|---|---|
+| Darkshore, toward an evening sun over the sea | a dim pink mist: sky bands 0.29-0.47, hue 8-9, saturation 0.26-0.33; mean 0.40 | a white sheet: 0.78-0.93, hue 27-29, saturation 0.05-0.22; mean 0.50 | largest |
+| Tirisfal, dawn over Brill | green fog: hue 88-99 above the trees | gold: hue 34-46 (fog colour 0.13, 0.12, 0.14) | second |
+| Darnassus, dusk | blue-violet, hue 220-242, mean 0.33 | purple, hue 262-265, mean 0.21 | third |
+| Orgrimmar, low sun | warm, mean 0.40, saturation 0.66-0.75 | warm, mean 0.25, saturation 0.36-0.63 (a shaded framing) | |
+| Ashenvale, forest by day | blue-green, saturation 0.70-0.87 | blue-green, 0.57-0.67 | smallest |
+
+Darkshore, by ablation toward its 18:48 sun: the Sun glow row off takes the
+band by the sun 0.93 -> 0.74 and its saturation 0.05 -> 0.22; the sun haze
+off the same (the glow is the haze's); HDR off 0.83; the mist and shafts off
+0.93 (the glow alone keeps it white). The low-sun sky light and the dusk
+glow (`enhanced_haze.frag`), and the dome's halo (`skybox.frag`), all add
+the sun's light as if a clear sky lay behind the far air. Under a dense
+zone fog that sky is the fog. 3.3.5's fog ends: Darkshore 306 yards,
+Tirisfal 181, Darnassus 389, Ashenvale 361, Westfall 444, Goldshire and
+the Barrens 500.
+
+**Ported:** all three take `enhanced_palette::clearAirGlow(fogEnd)`, 0 at a
+fog end of 320 yards and under, 1 from 430, so the views the glow was set
+against (Goldshire, the Barrens, Westfall) keep it whole. Darkshore toward
+the sun: mean 0.497 -> 0.402 (still 0.400), the band by the sun 0.93 ->
+0.70 and saturation 0.05 -> 0.28 (still 0.37, 0.29), its hue 28 -> 21
+(still 9). What is left is the mist and shafts' in-scatter: with them off
+the band is 0.34. The bars on the same tree (046a047 -> now): the Barrens
+0.545 -> 0.548, Goldshire into the sun 0.26% -> 0.25%, Westfall 6:18 white
+0.02% -> 0.02%, eve / forest against y5 -5.1% / -2.6% -> -5.2% / -2.9%,
+Darnassus / Dolanaar 0.192 / 0.256 -> 0.192 / 0.255, crown gap +13.6% ->
++13.2%, evening shaded road 1.414 / 0.697 -> 1.419 / 0.695.
+
+Not done: Tirisfal's green and Darnassus's blue-violet. The reference
+client's own light data has Tirisfal's dawn fog a dark purple-grey too, so
+its green is not in the fog colour but in its volumetric fog. A trial
+grade toward green in Wowee's own table (a `tirisfal` class) turned the
+sky cyan (hue 176-210), its base being blue. The view also ran on the
+local table, which the "Local table if present" default prefers, so the
+own table's grade needs its own fit, measured with the row on "Wowee's
+own".
+
 ## 10. Not done, and why
 
 - The reference client's ZoneLight polygons (section 2b), and its keyframes for the 11
