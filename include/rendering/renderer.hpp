@@ -399,6 +399,15 @@ private:
     DepthLightPassState contactShadows_;
     DepthLightPassState ambientOcclusion_;
     DepthLightPassState sunHaze_;
+    /// The canopy shafts' beams drawn a pixel at a time (shaft_beams.frag):
+    /// decided with the others; the mist then leaves the pass its share
+    /// (renderVolumetricFog), which says here whether this frame's volume
+    /// holds what the pass reads, and how far it is night.
+    DepthLightPassState shaftBeams_;
+    bool shaftBeamsReady_ = false;
+    float shaftBeamsNight_ = 0.0f;
+    /// The share of the beams the mist's cells keep (WOWEE_SHAFT_BEAMS, 0).
+    [[nodiscard]] static float shaftBeamsInCells();
     [[nodiscard]] bool depthLightPassPossible() const;
     /// `blend` is a ContactShadowPass::Blend, as an int so this header
     /// needs only the forward declaration.

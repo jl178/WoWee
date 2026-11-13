@@ -126,6 +126,11 @@ public:
         /// one by night and by day, and the gain the beams left take as far
         /// as they are held. The identity leaves the mist as it was.
         glm::vec4 shaftLines{1.0f, 0.0f, 0.0f, 1.0f};
+        /// The share of the canopy shafts' light the cells keep. 1: all of
+        /// it, the beams as soft as a cell. Less, and the rest is left for
+        /// the per-pixel pass (shaft_beams.frag), which the renderer must
+        /// then draw this frame: beamSet(), after record().
+        float beamsInCells = 1.0f;
     };
 
     VolumetricFog() = default;
@@ -192,6 +197,15 @@ public:
     /// rewritten with the stand-in at its next setSkyViews, before its record.
     void forgetSkyViews();
 
+    /// The per-pixel beam pass's set 2 (shaft_beams.frag): the layout, null
+    /// when it could not be made, and this slot's set - null unless this
+    /// slot's last record() left the pass its share (FrameInputs::
+    /// beamsInCells under 1, with the shafts on) and the volumes still stand.
+    [[nodiscard]] VkDescriptorSetLayout beamSetLayout() const { return beamSetLayout_; }
+    [[nodiscard]] VkDescriptorSet beamSet(uint32_t frame) const {
+        return (volumesReady_ && frame < MAX_FRAMES && beamsThisFrame_[frame]) ? beamSets_[frame] : VK_NULL_HANDLE;
+    }
+
     /// Forget the previous frames, after a teleport or a loading screen:
     /// reprojecting air from somewhere else would smear it across the view.
     void resetHistory() { historyValid_ = false; }
@@ -226,6 +240,14 @@ private:
     /// of taps in a small volume instead of in the shadow map, whose scattered
     /// taps cost the Iris Xe 4 to 20 ms (docs/re/enhanced-lighting.md 5c).
     Volume visibility_[MAX_FRAMES];
+    /// What a yard of each cell's air would scatter as part of a canopy
+    /// beam were the light to reach it, and in the first slice the stretch
+    /// of each column that holds any: read by the per-pixel beam pass, which
+    /// takes the shadow's edge from the shadow maps itself.
+    Volume beam_[MAX_FRAMES];
+    VkDescriptorSetLayout beamSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSet beamSets_[MAX_FRAMES] = {};
+    bool beamsThisFrame_[MAX_FRAMES] = {};
     glm::uvec3 size_{0};
     bool volumesReady_ = false;
     bool formatSupported_ = true;

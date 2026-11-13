@@ -1292,6 +1292,43 @@ the moon's streaks cost what the sun's do, 0.25 ms, only while the moon is
 in view by night. `WOWEE_SHAFT_LINES=1,0,0,1 WOWEE_MOON_SHAFTS=0` is the mist
 before.
 
+**Crisp beams** (Jered on be1b11d: "grainy and not crisp"). A beam built in
+the mist's cells is as soft as a cell: at Medium a cell is twenty pixels of
+a 2516-wide view and a sixth of its distance deep, each blended with nine
+tenths of its last frame, and the gap test spreads it 2.5 yards more. The
+detail map's 0.07-yard texel never showed. So the cells now keep only what
+is smooth about a beam, and its edge is drawn a pixel at a time
+(`shaft_beams.frag`, a ContactShadowPass added to the scene after the haze):
+
+- *The envelope.* The inject writes, for every cell in reach whether the
+  light reaches it or not, what a yard of its air would scatter as part of
+  a beam - strength, gap, crown band, lobe, density - into a second small
+  volume (`VolumetricFog::beam_`, history-blended as the cells are), and
+  leaves the beam's light out of the cells (`FrameInputs::beamsInCells`, 0;
+  the dawn rays' share, marched over the sky height field, stays in them).
+  The integrate pass adds, in that volume's first slice, the slice
+  coordinates between which each column holds any.
+- *The march.* Each pixel reads its column's span (one filtered read says
+  there is none, and the pixel is discarded) and marches only that stretch,
+  the envelope times one compare of the detail map (the world map past it).
+- *No grain.* A shadow is the same all along the light, so what a ray meets
+  depends only on how far it has moved across the light. The steps are
+  taken at fixed values of that distance, the same for every pixel, the
+  spacing doubling (eased) so no pixel takes more than sixteen. Pixels in
+  line with the light read the same points: what sixteen steps miss shows
+  as fine rays along the light, not as speckle. A per-quad dither over the
+  same steps was a 2-pixel stipple over every beam. The 2x2 quad shares the
+  steps, four each, pooled through the fine derivatives where the four
+  marches end together.
+
+Measured (lab, Iris Xe, 2516x986, Enhanced, the upscaler off): Elwynn's
+forest at 1:00 and 10:00 and Goldshire at 1:56 show separate hard-edged
+rays where they showed one soft column; the pass costs 0.7-1.0 ms of a
+23-25 ms frame in Goldshire and 0.8-1.5 ms in the forest (sixteen steps a
+pixel with no sharing: 0.9-2.9). Enhanced -> Classic -> Medium -> Classic ->
+Low under validation: clean. `WOWEE_SHAFT_BEAMS=1` is the beams in the cells,
+as before; `WOWEE_SHAFT_BEAMS_DEBUG=1` draws what the march finds.
+
 ## 6. Global illumination ("Secondary Lighting")
 
 reference-era shaders with no names in the community listfile

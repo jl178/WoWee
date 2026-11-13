@@ -1276,6 +1276,7 @@ void Renderer::shutdown() {
     softParticlePass_.reset();
     // The ambient pass reads the bounce grid's set: the pass goes first.
     ambientOcclusion_.pass.reset();
+    shaftBeams_.pass.reset();
     bounceGrid_.reset();
     skyField_.reset();
     // The water continuation's views and framebuffers (the device is idle:
@@ -6987,8 +6988,13 @@ void Renderer::renderVolumetricFog() {
         in.dawnRays = glm::smoothstep(-0.02f, 0.03f, toSun.z) * (1.0f - glm::smoothstep(0.15f, 0.30f, toSun.z));
         if (in.dawnRays > 0.0f) in.toSun = toSun;
     }
+    // The beams' edges are drawn a pixel at a time when that pass runs this
+    // frame (decideContactShadows); the cells then keep only their share.
+    if (shaftBeams_.frame) in.beamsInCells = shaftBeamsInCells();
     volumetricFog_->setSkyViews(frame, skyTops, skyGround);
     volumetricFog_->record(currentCmd, frame, perFrameDescSets[frame], in);
+    shaftBeamsReady_ = volumetricFog_->beamSet(frame) != VK_NULL_HANDLE;
+    shaftBeamsNight_ = in.shaftNight;
     if (vkCtx) vkCtx->gpuMark(currentCmd, "volumetric fog integrate");
 
     // What it was built from, every few seconds, for the report that says the

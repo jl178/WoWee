@@ -80,6 +80,8 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 lines;          // the shafts as lines (enhanced_shafts::Lines): x = the share of the air's
                          // sky light kept by night, y, z = how far a beam is held to a thin one by
                          // night and by day, w = the gain the beams left take, as far as held
+    vec4 beams;          // x = the share of the canopy shafts' light the cells keep: 1 all of it,
+                         // less when the rest is drawn a pixel at a time (shaft_beams.frag)
 } vol;
 
 layout(set = 1, binding = 1) uniform sampler2D uShadowDepth;
@@ -93,6 +95,13 @@ layout(set = 1, binding = 7) uniform sampler3D uVisibilityHistory;
 // stands, seen from above, and the ground alone - for the dawn rays.
 layout(set = 1, binding = 8) uniform sampler2D uSkyTops;
 layout(set = 1, binding = 9) uniform sampler2D uSkyGround;
+// The canopy shafts drawn a pixel at a time (shaft_beams.frag, vol.beams.x
+// under 1): r is what a yard of this cell's air would scatter toward the
+// camera as part of a beam were the light to reach it - everything of a beam
+// but the shadow's edge, which that pass reads from the shadow maps itself,
+// per pixel. This frame's, and last frame's as history.
+layout(set = 1, binding = 10, rgba16f) uniform writeonly image3D uBeamOut;
+layout(set = 1, binding = 11) uniform sampler3D uBeamHistory;
 const float kSkySpan = 256.0;   // sky_field::kSpan
 const float kSkyDepth = 400.0;  // sky_field::kDepth
 
@@ -352,8 +361,11 @@ void main() {
                                  volumetricParams.z);
             if (all(greaterThanEqual(prev, vec3(0.0))) && all(lessThanEqual(prev, vec3(1.0)))) {
                 imageStore(uCellsOut, cell, textureLod(uHistory, prev, 0.0));
-                if (vol.shafts.x > 0.0)
+                if (vol.shafts.x > 0.0) {
                     imageStore(uVisibilityOut, cell, textureLod(uVisibilityHistory, prev, 0.0));
+                    if (vol.beams.x < 1.0)
+                        imageStore(uBeamOut, cell, vec4(textureLod(uBeamHistory, prev, 0.0).r, 0.0, 0.0, 0.0));
+                }
                 return;
             }
         }
@@ -450,6 +462,10 @@ void main() {
     // shade near a lit cell and nothing changes. By night the same from the
     // moonlight: the light the shadow map is cast from, in the night's own
     // colour.
+    // What the per-pixel beams take from this cell (uBeamOut), before the
+    // air's density.
+    float beamEnvelope = 0.0;
+    bool beamsPerPixel = vol.shafts.x > 0.0 && vol.beams.x < 1.0;
     if (vol.shafts.x > 0.0) {
         vec3 down = travel.z > 0.0 ? -travel : travel;
         float reach = 1.0 - clamp(depth * vol.shafts.w - 1.0, 0.0, 1.0);
@@ -483,7 +499,9 @@ void main() {
             float tallTrees = (shadeAll > 0.0 && nearBeam < 1.0) ? smoothstep(55.0, 70.0, standingOver(p)) : 0.0;
             float under = shadeAll * max(nearBeam, tallTrees);
             light -= fogColor.rgb * (vol.lighting.z * kCanopyAirCut * under);
-            if (lit > 0.0) {
+            // With the beams drawn a pixel at a time the cell answers for the
+            // light reaching it or not: that pass decides, per pixel.
+            if (lit > 0.0 || beamsPerPixel) {
                 // A lit cell in a gap: most of both rings in shade. A whole
                 // beam qualifies, not only its rim - the outer ring reaches
                 // past a gap several yards across - while a cell at the edge
@@ -543,7 +561,12 @@ void main() {
                 // day; the moonbeams keep more of the night's blue.
                 float thin = mix(0.35, 0.6, 1.0 - vol.shafts.y);
                 vec3 beam = mix(lightColor.rgb, vec3(dot(lightColor.rgb, vec3(0.2126, 0.7152, 0.0722))), thin);
-                light += beam * (vol.shafts.x * lit * gap * reach * lobe * weight);
+                float amount = vol.shafts.x * gap * reach * lobe * weight;
+                // The cells keep their share; the dawn rays' light is marched
+                // over the sky height field, which only the cells do.
+                float inCells = beamsPerPixel ? mix(vol.beams.x, 1.0, dawnFar) : 1.0;
+                light += beam * (amount * lit * inCells);
+                beamEnvelope = amount * (1.0 - inCells);
             }
         }
     }
@@ -575,6 +598,7 @@ void main() {
     light += local * vol.lighting.y;
 
     vec4 result = vec4(light * density, density);
+    float beamOut = beamEnvelope * density;
 
     // The same air last frame, found by projecting this point into last
     // frame's view. Anything that falls outside it is new to the view and
@@ -587,9 +611,11 @@ void main() {
                                  volumetricParams.z);
             if (all(greaterThanEqual(prev, vec3(0.0))) && all(lessThanEqual(prev, vec3(1.0)))) {
                 result = mix(result, textureLod(uHistory, prev, 0.0), vol.jitter.w);
+                if (beamsPerPixel) beamOut = mix(beamOut, textureLod(uBeamHistory, prev, 0.0).r, vol.jitter.w);
             }
         }
     }
+    if (beamsPerPixel) imageStore(uBeamOut, cell, vec4(beamOut, 0.0, 0.0, 0.0));
 
     imageStore(uCellsOut, cell, result);
 }

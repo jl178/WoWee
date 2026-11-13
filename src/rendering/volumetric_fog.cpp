@@ -34,6 +34,8 @@ struct VolumeParamsGPU {
     glm::vec4 wind;           // xyz = the wisps' offset in noise cells, w = their share
     glm::vec4 lines;          // the shafts as lines: night sky-light share, night and day
                               // line hold, the held beams' gain (enhanced_shafts::Lines)
+    glm::vec4 beams;          // x = the share of the canopy shafts the cells keep (1: all;
+                              // the rest is drawn a pixel at a time, shaft_beams.frag)
 };
 
 constexpr uint32_t kInjectGroup = 4;     // 4x4x4, volumetric_fog_inject.comp.glsl
@@ -214,7 +216,10 @@ bool VolumetricFog::createPipelines(VkDescriptorSetLayout perFrameLayout,
     //   7  the other slot's, last frame's, read by inject
     //   8, 9 the sky height field's tops and ground (the dawn rays, and
     //        how tall the trees round a shaft stand)
-    constexpr uint32_t kBindings = 10;
+    //   10 this slot's beam envelope, written by inject and, its span, by
+    //      integrate (the per-pixel canopy shafts)
+    //   11 the other slot's, last frame's, read by inject
+    constexpr uint32_t kBindings = 12;
     VkDescriptorSetLayoutBinding b[kBindings]{};
     const VkDescriptorType types[kBindings] = {
         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -222,6 +227,7 @@ bool VolumetricFog::createPipelines(VkDescriptorSetLayout perFrameLayout,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
     };
     for (uint32_t i = 0; i < kBindings; i++) {
         b[i].binding = i;
@@ -266,13 +272,14 @@ bool VolumetricFog::createPipelines(VkDescriptorSetLayout perFrameLayout,
         return false;
     }
 
+    // The compute sets, and the per-pixel beam pass's (one sampler each).
     VkDescriptorPoolSize poolSizes[3] = {
         {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_FRAMES},
-        {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_FRAMES * 6},
-        {.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = MAX_FRAMES * 3},
+        {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_FRAMES * 8},
+        {.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = MAX_FRAMES * 4},
     };
     VkDescriptorPoolCreateInfo poolCI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    poolCI.maxSets = MAX_FRAMES;
+    poolCI.maxSets = MAX_FRAMES * 2;
     poolCI.poolSizeCount = 3;
     poolCI.pPoolSizes = poolSizes;
     if (vkCreateDescriptorPool(device, &poolCI, nullptr, &descPool_) != VK_SUCCESS) {
@@ -287,6 +294,26 @@ bool VolumetricFog::createPipelines(VkDescriptorSetLayout perFrameLayout,
     if (vkAllocateDescriptorSets(device, &setAlloc, computeSets_) != VK_SUCCESS) {
         LOG_ERROR("VolumetricFog: failed to allocate descriptor sets");
         return false;
+    }
+    // The beam pass's set: the envelope, filtered, for the fragment stage.
+    // Without it the beams stay in the cells, as they were.
+    VkDescriptorSetLayoutBinding beamBinding{};
+    beamBinding.binding = 0;
+    beamBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    beamBinding.descriptorCount = 1;
+    beamBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo beamLayoutCI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    beamLayoutCI.bindingCount = 1;
+    beamLayoutCI.pBindings = &beamBinding;
+    if (vkCreateDescriptorSetLayout(device, &beamLayoutCI, nullptr, &beamSetLayout_) == VK_SUCCESS) {
+        VkDescriptorSetLayout beamLayouts[MAX_FRAMES] = {beamSetLayout_, beamSetLayout_};
+        setAlloc.pSetLayouts = beamLayouts;
+        if (vkAllocateDescriptorSets(device, &setAlloc, beamSets_) != VK_SUCCESS) {
+            LOG_WARNING("VolumetricFog: no sets for the per-pixel beams - they stay in the cells");
+            for (auto& set : beamSets_) set = VK_NULL_HANDLE;
+        }
+    } else {
+        beamSetLayout_ = VK_NULL_HANDLE;
     }
 
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
@@ -312,7 +339,8 @@ bool VolumetricFog::createVolumes(glm::uvec3 size) {
     constexpr VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
         if (!createVolume(scatter_[i], size, usage) || !createVolume(integrated_[i], size, usage) ||
-            !createVolume(visibility_[i], size, usage, VK_FORMAT_R32_SFLOAT)) {
+            !createVolume(visibility_[i], size, usage, VK_FORMAT_R32_SFLOAT) ||
+            !createVolume(beam_[i], size, usage)) {
             destroyVolumes();
             return false;
         }
@@ -322,6 +350,8 @@ bool VolumetricFog::createVolumes(glm::uvec3 size) {
                       reinterpret_cast<uint64_t>(integrated_[i].image), "volumetric fog integrated");
         setObjectName(ctx_->getDevice(), VK_OBJECT_TYPE_IMAGE,
                       reinterpret_cast<uint64_t>(visibility_[i].image), "volumetric fog sun visibility");
+        setObjectName(ctx_->getDevice(), VK_OBJECT_TYPE_IMAGE,
+                      reinterpret_cast<uint64_t>(beam_[i].image), "volumetric fog beam envelope");
     }
     size_ = size;
     return true;
@@ -332,6 +362,7 @@ void VolumetricFog::destroyVolumes() {
         destroyVolume(scatter_[i]);
         destroyVolume(integrated_[i]);
         destroyVolume(visibility_[i]);
+        destroyVolume(beam_[i]);
     }
     size_ = glm::uvec3(0);
     volumesReady_ = false;
@@ -450,6 +481,31 @@ void VolumetricFog::writeComputeSets() {
         w[7].pImageInfo = &visHistory;
         vkUpdateDescriptorSets(ctx_->getDevice(), 8, w, 0, nullptr);
         writeSkyViews(f);
+
+        VkDescriptorImageInfo beamOut{.sampler = VK_NULL_HANDLE, .imageView = beam_[f].view,
+                                      .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo beamHistory{.sampler = sampler_, .imageView = beam_[other].view,
+                                          .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo beamRead{.sampler = sampler_, .imageView = beam_[f].view,
+                                       .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet bw[3]{};
+        for (auto& x : bw) {
+            x.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            x.descriptorCount = 1;
+        }
+        bw[0].dstSet = computeSets_[f];
+        bw[0].dstBinding = 10;
+        bw[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        bw[0].pImageInfo = &beamOut;
+        bw[1].dstSet = computeSets_[f];
+        bw[1].dstBinding = 11;
+        bw[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bw[1].pImageInfo = &beamHistory;
+        bw[2].dstSet = beamSets_[f];
+        bw[2].dstBinding = 0;
+        bw[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bw[2].pImageInfo = &beamRead;
+        vkUpdateDescriptorSets(ctx_->getDevice(), beamSets_[f] != VK_NULL_HANDLE ? 3 : 2, bw, 0, nullptr);
     }
 }
 
@@ -558,6 +614,9 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
                     1.0f / std::max(in.shaftReach, 1.0f))
         : glm::vec4(0.0f);
     p.dims = glm::ivec4(size_, (halfRate && history) ? 1 + static_cast<int>(frameCounter_ & 1u) : 0);
+    const bool perPixel = in.shaftStrength > 0.0f && in.beamsInCells < 1.0f && beamSets_[frame] != VK_NULL_HANDLE;
+    p.beams = glm::vec4(perPixel ? glm::clamp(in.beamsInCells, 0.0f, 1.0f) : 1.0f, 0.0f, 0.0f, 0.0f);
+    beamsThisFrame_[frame] = perPixel;
     std::memcpy(paramsMapped_[frame], &p, sizeof(p));
 
     // Everything that last touched these volumes: last frame's inject and
@@ -604,6 +663,7 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
     after.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
     after.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
     after.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+    // (The per-pixel beam pass reads its envelope from the fragment stage.)
     dep.pMemoryBarriers = &after;
     cmdPipelineBarrier2(cmd, dep);
 
@@ -625,8 +685,11 @@ void VolumetricFog::shutdown() {
         destroy(ctx_->getAllocator(), paramsUBO_[i], paramsAlloc_[i]);
         paramsMapped_[i] = nullptr;
         computeSets_[i] = VK_NULL_HANDLE;
+        beamSets_[i] = VK_NULL_HANDLE;
+        beamsThisFrame_[i] = false;
     }
     destroy(device, descPool_);
+    destroy(device, beamSetLayout_);
     destroy(device, injectPipeline_);
     destroy(device, integratePipeline_);
     destroy(device, pipelineLayout_);

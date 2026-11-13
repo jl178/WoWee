@@ -41,10 +41,20 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 skyField;
     vec4 dawn;
     vec4 shafts;
+    vec4 wind;
+    vec4 lines;
+    vec4 beams;   // x under 1: the canopy shafts are drawn a pixel at a time (shaft_beams.frag)
 } vol;
 
 layout(set = 1, binding = 4) uniform sampler3D uCells;
 layout(set = 1, binding = 5, rgba16f) uniform writeonly image3D uIntegratedOut;
+// What each cell would scatter as part of a canopy beam (the inject's
+// uBeamOut). This pass adds, in the first slice's g and b, the slice
+// coordinates between which the column holds any - so the per-pixel pass
+// leaves a column with no beam after one read, and spends its steps only on
+// the stretch that has one.
+layout(set = 1, binding = 10, rgba16f) uniform image3D uBeam;
+const float kBeamFloor = 2e-4;
 
 float sliceDepth(float s) {
     return volumetricParams.y * exp(s / (volumetricParams.w * volumetricParams.z));
@@ -90,7 +100,17 @@ void main() {
     vec3 ceiling = max(kMistCeiling * fogColor.rgb + kMistCeilingSun * lightColor.rgb, vec3(0.02));
     float transmittance = 1.0;
     float front = sliceDepth(0.0);
+    bool beams = vol.shafts.x > 0.0 && vol.beams.x < 1.0;
+    float beamFirst = -1.0, beamLast = -1.0, beamNear = 0.0;
     for (int z = 0; z < vol.dims.z; ++z) {
+        if (beams) {
+            float e = imageLoad(uBeam, ivec3(column, z)).r;
+            if (z == 0) beamNear = e;
+            if (e > kBeamFloor) {
+                if (beamFirst < 0.0) beamFirst = float(z);
+                beamLast = float(z);
+            }
+        }
         float back = sliceDepth(float(z + 1));
         float span = (back - front) * slant;
         front = back;
@@ -107,5 +127,13 @@ void main() {
 
         imageStore(uIntegratedOut, ivec3(column, z),
                    vec4(capped ? softCeiling(scattered, ceiling) : scattered, transmittance));
+    }
+    // A filtered read at slice coordinate s takes the cells either side of
+    // it, so a cell z counts from z - 0.5 to z + 1.5.
+    if (beams) {
+        imageStore(uBeam, ivec3(column, 0),
+                   beamFirst < 0.0 ? vec4(beamNear, 0.0, 0.0, 0.0)
+                                   : vec4(beamNear, max(beamFirst - 0.5, 0.0),
+                                          min(beamLast + 1.5, float(vol.dims.z)), 0.0));
     }
 }

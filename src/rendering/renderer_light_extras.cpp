@@ -161,6 +161,27 @@ void Renderer::decideContactShadows() {
     decideDepthLightPass(enh_.sunHaze && indoorFactor_ < 0.99f, sunHaze_,
                          "assets/shaders/enhanced_haze.frag.spv", "Sun haze",
                          static_cast<int>(ContactShadowPass::Blend::OverTransmittance));
+    // The canopy shafts' beams, a pixel at a time (shaft_beams.frag): with
+    // the mist on under the enhanced light, outdoors, the sun's shadows on.
+    // The mist's cells then keep only kShaftBeamsInCells of the beams
+    // (renderVolumetricFog) and this pass draws the rest, added to the scene
+    // (its alpha is 1). WOWEE_SHAFT_BEAMS=1 leaves them all in the cells, as
+    // they were; a value under 1 is the share kept there.
+    shaftBeamsReady_ = false;
+    const VkDescriptorSetLayout beamLayout = volumetricFog_ ? volumetricFog_->beamSetLayout() : VK_NULL_HANDLE;
+    decideDepthLightPass(shaftBeamsInCells() < 1.0f && beamLayout != VK_NULL_HANDLE && volumetricFog_->isOn() &&
+                             lightingManager && lightingManager->isEnhancedActive() && shadowsEnabled &&
+                             indoorFactor_ < 0.99f,
+                         shaftBeams_, "assets/shaders/shaft_beams.frag.spv", "Shaft beams",
+                         static_cast<int>(ContactShadowPass::Blend::OverTransmittance), beamLayout);
+}
+
+float Renderer::shaftBeamsInCells() {
+    static const float share = [] {
+        const char* e = std::getenv("WOWEE_SHAFT_BEAMS");
+        return (e && *e) ? glm::clamp(std::strtof(e, nullptr), 0.0f, 1.0f) : 0.0f;
+    }();
+    return share;
 }
 
 void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
@@ -253,6 +274,19 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
         air.b *= glow;
         if (sunHaze_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.8f * wx, hazeFlags, air)) {
             vkCtx->gpuMark(cmd, "sun haze");
+        }
+    }
+    // After everything that scales the scene's light: the beams are added.
+    if (shaftBeams_.frame && !shaftBeams_.done && shaftBeams_.pass) {
+        shaftBeams_.done = true;
+        const VkDescriptorSet beamSet =
+            (shaftBeamsReady_ && volumetricFog_) ? volumetricFog_->beamSet(vkCtx->getCurrentFrame()) : VK_NULL_HANDLE;
+        // WOWEE_SHAFT_BEAMS_DEBUG=1 draws the columns marched and what they found (flag 4).
+        static const bool kBeamDebug = std::getenv("WOWEE_SHAFT_BEAMS_DEBUG") != nullptr;
+        if (beamSet != VK_NULL_HANDLE &&
+            shaftBeams_.pass->record(cmd, target, perFrame, invViewProj, 1.0f, kBeamDebug ? 4 : 0,
+                                     glm::vec4(shaftBeamsNight_, 0.0f, 0.0f, 0.0f), beamSet)) {
+            vkCtx->gpuMark(cmd, "shaft beams");
         }
     }
 }
