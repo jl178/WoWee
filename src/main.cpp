@@ -38,6 +38,10 @@
 #if !defined(__ANDROID__)
 #define WOWEE_HAS_BACKTRACE 1
 #include <execinfo.h>
+#include <fcntl.h>
+#include <setjmp.h>
+#include <ucontext.h>
+#include <iterator>
 #endif
 #endif
 
@@ -63,32 +67,200 @@ static void releaseMouseGrab() {}
 #endif
 
 #ifdef WOWEE_HAS_BACKTRACE
-static void crashHandlerSigaction(int sig, siginfo_t* info, void* /*ucontext*/) {
-    releaseMouseGrab();
-    void* frames[64];
-    int n = backtrace(frames, 64);
+// The crash report, written from inside the signal handler with nothing but
+// async-signal-safe calls: write(2), open(2), and backtrace_symbols_fd, which
+// writes straight to a descriptor without allocating.
+//
+// It used to call fprintf and fopen, and backtrace() cold. The first
+// backtrace() of a process loads libgcc_s, which allocates - and a crash in
+// the Vulkan driver took the handler down inside backtrace(), so no stack was
+// written at all. backtrace() is now called once at start-up
+// (installCrashHandler), the handler runs on its own stack, and a fault while
+// unwinding jumps back out, so the report still gives the faulting
+// instruction and whatever frames were found instead of a second crash.
+namespace {
+volatile sig_atomic_t g_inCrashHandler = 0;
+volatile sig_atomic_t g_unwinding = 0;
+sigjmp_buf g_unwindJump;
+void* g_crashFrames[128];
+alignas(16) char g_crashStack[64 * 1024];
+
+void crashWrite(int fd, const char* s) {
+    if (fd < 0 || !s) return;
+    size_t len = 0;
+    while (s[len]) ++len;
+    while (len > 0) {
+        const ssize_t w = write(fd, s, len);
+        if (w <= 0) return;
+        s += w;
+        len -= static_cast<size_t>(w);
+    }
+}
+
+/// Hex without printf, which is not async-signal-safe.
+void crashWriteHex(int fd, uintptr_t v) {
+    constexpr int kDigits = static_cast<int>(sizeof(uintptr_t) * 2);
+    char buf[2 + kDigits + 1];
+    buf[0] = '0';
+    buf[1] = 'x';
+    for (int i = 0; i < kDigits; ++i) {
+        const unsigned nib = static_cast<unsigned>((v >> ((kDigits - 1 - i) * 4)) & 0xfu);
+        buf[2 + i] = static_cast<char>(nib < 10 ? '0' + nib : 'a' + (nib - 10));
+    }
+    buf[2 + kDigits] = '\0';
+    crashWrite(fd, buf);
+}
+
+void crashWriteInt(int fd, int v) {
+    char buf[16];
+    int i = static_cast<int>(sizeof(buf)) - 1;
+    buf[i] = '\0';
+    unsigned u = v < 0 ? 0u - static_cast<unsigned>(v) : static_cast<unsigned>(v);
+    do { buf[--i] = static_cast<char>('0' + u % 10); u /= 10; } while (u && i > 1);
+    if (v < 0) buf[--i] = '-';
+    crashWrite(fd, buf + i);
+}
+
+uintptr_t crashProgramCounter(void* ucontext) {
+#if defined(__linux__) && defined(__x86_64__)
+    if (ucontext) return static_cast<uintptr_t>(static_cast<ucontext_t*>(ucontext)->uc_mcontext.gregs[REG_RIP]);
+#elif defined(__linux__) && defined(__aarch64__)
+    if (ucontext) return static_cast<uintptr_t>(static_cast<ucontext_t*>(ucontext)->uc_mcontext.pc);
+#else
+    (void)ucontext;
+#endif
+    return 0;
+}
+
+void crashReport(int fd, int sig, void* faultAddr, uintptr_t pc, int frameCount, bool unwindFaulted) {
+    if (fd < 0) return;
     const char* sigName = (sig == SIGSEGV) ? "SIGSEGV" :
+                          (sig == SIGBUS)  ? "SIGBUS"  :
+                          (sig == SIGILL)  ? "SIGILL"  :
                           (sig == SIGABRT) ? "SIGABRT" :
                           (sig == SIGFPE)  ? "SIGFPE"  : "UNKNOWN";
-    void* faultAddr = info ? info->si_addr : nullptr;
-    fprintf(stderr, "\n=== CRASH: signal %s (%d) faultAddr=%p ===\n",
-            sigName, sig, faultAddr);
-    backtrace_symbols_fd(frames, n, STDERR_FILENO);
-    FILE* f = fopen("/tmp/wowee_debug.log", "a");
-    if (f) {
-        fprintf(f, "\n=== CRASH: signal %s (%d) faultAddr=%p ===\n",
-                sigName, sig, faultAddr);
-        fflush(f);
-        backtrace_symbols_fd(frames, n, fileno(f));
-        fclose(f);
+    crashWrite(fd, "\n=== CRASH: signal ");
+    crashWrite(fd, sigName);
+    crashWrite(fd, " (");
+    crashWriteInt(fd, sig);
+    crashWrite(fd, ") faultAddr=");
+    crashWriteHex(fd, reinterpret_cast<uintptr_t>(faultAddr));
+    crashWrite(fd, " pc=");
+    crashWriteHex(fd, pc);
+    crashWrite(fd, " ===\n");
+    // The faulting instruction first, as module+offset: the one frame there
+    // is even when nothing under it can be unwound.
+    if (pc) {
+        void* at = reinterpret_cast<void*>(pc);
+        crashWrite(fd, "faulting instruction:\n");
+        backtrace_symbols_fd(&at, 1, fd);
     }
-    // Re-raise with default handler
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = SIG_DFL;
-    sigaction(sig, &sa, nullptr);
+    if (unwindFaulted) crashWrite(fd, "(the unwinder faulted; the stack below is as far as it got)\n");
+    if (frameCount > 0) {
+        crashWrite(fd, "stack:\n");
+        backtrace_symbols_fd(g_crashFrames, frameCount, fd);
+    } else {
+        crashWrite(fd, "stack: none could be unwound\n");
+    }
+}
+
+/// The stack, into g_crashFrames. In a function of its own, with nothing
+/// live across the sigsetjmp but statics: the handler's arguments are not
+/// safe to read after a siglongjmp back into its frame.
+[[gnu::noinline]] int crashCollectFrames(bool& faulted) {
+    static volatile int count = 0;
+    static volatile bool jumped = false;
+    if (sigsetjmp(g_unwindJump, 1) == 0) {
+        g_unwinding = 1;
+        count = backtrace(g_crashFrames, static_cast<int>(std::size(g_crashFrames)));
+        g_unwinding = 0;
+    } else {
+        // backtrace() fills the buffer as it walks, so the frames found
+        // before the fault are there.
+        jumped = true;
+        int n = 0;
+        while (n < static_cast<int>(std::size(g_crashFrames)) && g_crashFrames[n]) ++n;
+        count = n;
+    }
+    faulted = jumped;
+    return count;
+}
+
+void crashHandlerSigaction(int sig, siginfo_t* info, void* ucontext) {
+    // A fault inside backtrace() below lands here again (SA_NODEFER); the
+    // walk is abandoned and the report goes on with what it had found.
+    if (g_unwinding) {
+        g_unwinding = 0;
+        siglongjmp(g_unwindJump, 1);
+    }
+    // Any other fault while reporting: give up on the report and die of the
+    // signal rather than loop.
+    if (g_inCrashHandler) {
+        signal(sig, SIG_DFL);
+        raise(sig);
+        _exit(128 + sig);
+    }
+    g_inCrashHandler = 1;
+
+    void* faultAddr = info ? info->si_addr : nullptr;
+    const uintptr_t pc = crashProgramCounter(ucontext);
+
+    bool unwindFaulted = false;
+    const int frameCount = crashCollectFrames(unwindFaulted);
+
+    crashReport(STDERR_FILENO, sig, faultAddr, pc, frameCount, unwindFaulted);
+    const int debugFd = open("/tmp/wowee_debug.log", O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
+    crashReport(debugFd, sig, faultAddr, pc, frameCount, unwindFaulted);
+    if (debugFd >= 0) close(debugFd);
+    // The report is on disk; what follows is not async-signal-safe and is
+    // tried only now. A fault in it dies of the signal (g_inCrashHandler).
+    releaseMouseGrab();
+    // The lines the logger was still holding, before the report goes after
+    // them: a second or two of the log sits in its buffer, and the crash of
+    // 2026-11-13 lost the rebuild that led to it that way. Not if the lock
+    // is held - the fault may have come from inside the logger.
+    wowee::core::Logger::getInstance().flushForCrash();
+    // And the session's own log, the file a report comes with.
+    if (const char* logPath = wowee::core::Logger::filePathForCrashReport()) {
+        const int logFd = open(logPath, O_WRONLY | O_APPEND | O_CLOEXEC);
+        crashReport(logFd, sig, faultAddr, pc, frameCount, unwindFaulted);
+        if (logFd >= 0) close(logFd);
+    }
+
+    // Die of the signal with the default action, so the core is still made.
+    signal(sig, SIG_DFL);
     raise(sig);
 }
+
+void installCrashHandler() {
+    // backtrace() loads libgcc_s and allocates the first time it runs; done
+    // here, so the handler's call is only a walk of the stack.
+    {
+        void* warm[2];
+        (void)backtrace(warm, 2);
+    }
+    // Its own stack, so an overflow of the main one can still be reported.
+    stack_t ss{};
+    ss.ss_sp = g_crashStack;
+    ss.ss_size = sizeof(g_crashStack);
+    ss.ss_flags = 0;
+    sigaltstack(&ss, nullptr);
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = crashHandlerSigaction;
+    // SA_NODEFER: a fault inside the handler has to reach it again, to jump
+    // out of the unwinder. Held blocked instead, a recurring SIGSEGV kills
+    // the process on the spot with nothing written.
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGBUS,  &sa, nullptr);
+    sigaction(SIGILL,  &sa, nullptr);
+    sigaction(SIGABRT, &sa, nullptr);
+    sigaction(SIGFPE,  &sa, nullptr);
+}
+}  // namespace
 #else
 static void crashHandler(int sig) {
     releaseMouseGrab();
@@ -153,16 +325,9 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
     g_emergencyDisplay = XOpenDisplay(nullptr);
 #endif
 #ifdef WOWEE_HAS_BACKTRACE
-    // Use sigaction for SIGSEGV/SIGABRT/SIGFPE to get si_addr (faulting address)
-    {
-        struct sigaction sa;
-        memset(&sa, 0, sizeof(sa));
-        sa.sa_sigaction = crashHandlerSigaction;
-        sa.sa_flags = SA_SIGINFO;
-        sigaction(SIGSEGV, &sa, nullptr);
-        sigaction(SIGABRT, &sa, nullptr);
-        sigaction(SIGFPE,  &sa, nullptr);
-    }
+    // SIGSEGV/SIGBUS/SIGILL/SIGABRT/SIGFPE, with the faulting address and
+    // pc; see crashHandlerSigaction.
+    installCrashHandler();
     std::signal(SIGTERM, [](int) { std::_Exit(1); });
     std::signal(SIGINT,  [](int) { std::_Exit(1); });
 #elif defined(__ANDROID__)

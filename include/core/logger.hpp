@@ -125,7 +125,18 @@ public:
     /// from sitting in the buffer afterwards, so a warning still reaches the
     /// file within a frame or two of being written.
     void flushIfStale();
+
+    /// The log file's path, once it is open, else null. A plain buffer that
+    /// never changes after it is written, so a signal handler can read it and
+    /// append a crash report with open(2) and write(2).
+    static const char* filePathForCrashReport();
+
+    /// Write out what is buffered, from the crash handler, if the lock is
+    /// free. Not async-signal-safe; called after the report is already
+    /// written elsewhere, so the worst a fault here costs is this file's copy.
+    void flushForCrash();
 private:
+    static void rememberFilePath(const std::string& at);
     void flushSuppressedLocked();
     void ensureFile();
 };

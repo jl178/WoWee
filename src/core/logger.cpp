@@ -131,6 +131,7 @@ void Logger::ensureFile() {
     if (!runningFromAppBundle()) {
         std::filesystem::create_directories("logs", ec);
         fileStream.open(std::string("logs/") + logFile, std::ios::out | std::ios::trunc);
+        if (fileStream.is_open()) rememberFilePath(std::filesystem::absolute("logs/" + logFile, ec).string());
     }
 
     // Beside the working directory when that is writable, which is how this is
@@ -147,6 +148,7 @@ void Logger::ensureFile() {
         const std::filesystem::path at = fallback / logFile;
         fileStream.open(at, std::ios::out | std::ios::trunc);
         if (fileStream.is_open()) {
+            rememberFilePath(at.string());
             // Said on the console, because the file it names is the one thing
             // someone reading this needs and it is not where they will look.
             std::fprintf(stderr, "wowee: writing the log to %s\n",
@@ -231,6 +233,28 @@ void Logger::emitLineLocked(LogLevel level, const std::string& rawMessage) {
             unflushed_ = true;
         }
     }
+}
+
+namespace {
+// Filled once, when the file opens, and only read after that - by the crash
+// handler, which can do nothing with a std::string or a lock.
+char g_logFilePath[1024] = {};
+}  // namespace
+
+void Logger::rememberFilePath(const std::string& s) {
+    if (s.empty() || s.size() >= sizeof(g_logFilePath)) return;
+    std::memcpy(g_logFilePath, s.c_str(), s.size() + 1);
+}
+
+const char* Logger::filePathForCrashReport() {
+    return g_logFilePath[0] ? g_logFilePath : nullptr;
+}
+
+void Logger::flushForCrash() {
+    if (!mutex.try_lock()) return;
+    if (fileStream.is_open()) fileStream.flush();
+    unflushed_ = false;
+    mutex.unlock();
 }
 
 void Logger::flushIfStale() {
