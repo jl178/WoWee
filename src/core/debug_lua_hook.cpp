@@ -408,6 +408,29 @@ int luaDebugUnitMotion(lua_State* L) {
     return 10;
 }
 
+/// WoweeDebug_ViewInfo() - camera fov (deg), aspect, camera x, y, z, the
+/// player model's draw scale, its anim id, anim time and duration (ms).
+int luaDebugViewInfo(lua_State* L) {
+    auto* renderer = Application::getInstance().getRenderer();
+    auto* cam = renderer ? renderer->getCamera() : nullptr;
+    auto* cr = renderer ? renderer->getCharacterRenderer() : nullptr;
+    if (!cam || !cr) return 0;
+    const uint32_t inst = renderer->getCharacterInstanceId();
+    uint32_t anim = 0;
+    float t = 0.0f, d = 0.0f;
+    cr->getAnimationState(inst, anim, t, d);
+    lua_pushnumber(L, cam->getFovDegrees());
+    lua_pushnumber(L, cam->getAspectRatio());
+    lua_pushnumber(L, cam->getPosition().x);
+    lua_pushnumber(L, cam->getPosition().y);
+    lua_pushnumber(L, cam->getPosition().z);
+    lua_pushnumber(L, cr->getInstanceScale(inst));
+    lua_pushinteger(L, anim);
+    lua_pushnumber(L, t);
+    lua_pushnumber(L, d);
+    return 9;
+}
+
 int luaDebugProfileTag(lua_State* L) {
     setProfileTag(luaL_checkstring(L, 1));
     return 0;
@@ -487,6 +510,7 @@ void debugLuaHookTick(addons::LuaEngine* engine, SDL_Window* window) {
     lua_register(L, "WoweeDebug_UseObject", luaDebugUseObject);
     lua_register(L, "WoweeDebug_RightClickCorpse", luaDebugRightClickCorpse);
     lua_register(L, "WoweeDebug_UnitMotion", luaDebugUnitMotion);
+    lua_register(L, "WoweeDebug_ViewInfo", luaDebugViewInfo);
     gEngine = engine;
     ++pass;
     if (relogRequested()) {
