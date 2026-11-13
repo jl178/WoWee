@@ -355,16 +355,37 @@ void VolumetricFog::setShadowView(uint32_t frame, VkImageView view) {
 }
 
 void VolumetricFog::setSkyViews(uint32_t frame, VkImageView tops, VkImageView ground) {
-    if (frame >= MAX_FRAMES || (skyViews_[frame][0] == tops && skyViews_[frame][1] == ground)) return;
+    if (frame >= MAX_FRAMES) return;
+    if (skyViews_[frame][0] == tops && skyViews_[frame][1] == ground && !skyViewsStale_[frame]) return;
     skyViews_[frame][0] = tops;
     skyViews_[frame][1] = ground;
+    // Off, the set keeps what it had; writeComputeSets writes these when the
+    // volumes are next built.
     if (!ctx_ || computeSets_[frame] == VK_NULL_HANDLE || !volumesReady_) return;
     writeSkyViews(frame);
+}
+
+// The field's views are destroyed after this, and a view that is only
+// remembered is as dangerous as one that is bound: a quality change rewrites
+// every binding from what is remembered (writeComputeSets). With the volume
+// off nothing called setSkyViews, so the field went and its views stayed
+// here - Enhanced, then Classic, then any preset with the mist wrote two
+// freed views, and the driver walked off the end of the stack reading one
+// (anv_descriptor_set_write_image_view, 2026-11-13).
+void VolumetricFog::forgetSkyViews() {
+    for (uint32_t f = 0; f < MAX_FRAMES; f++) {
+        if (!skyViews_[f][0] && !skyViews_[f][1]) continue;
+        skyViews_[f][0] = VK_NULL_HANDLE;
+        skyViews_[f][1] = VK_NULL_HANDLE;
+        skyViewsStale_[f] = true;
+    }
 }
 
 void VolumetricFog::writeSkyViews(uint32_t frame) {
     // A shadow map stands in where there is no field: the binding must name
     // a readable depth view, and the shader does not read it then.
+    skyViewsStale_[frame] = false;
+    if (shadowViews_[frame] == VK_NULL_HANDLE && (!skyViews_[frame][0] || !skyViews_[frame][1])) return;
     VkDescriptorImageInfo info[2];
     for (int i = 0; i < 2; ++i) {
         info[i] = {.sampler = depthSampler_,

@@ -5,6 +5,7 @@
 
 #include "rendering/bounce_grid_gpu.hpp"
 #include "rendering/sky_height_field.hpp"
+#include "rendering/volumetric_fog.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
@@ -135,6 +136,8 @@ void Renderer::decideContactShadows() {
         sky = skyField_->ensure(vkCtx, shadowRenderPass);
         skyOffFrames_ = 0;
     } else if (skyField_ && ++skyOffFrames_ > 8) {
+        // The mist's inject binds the field's maps too, and remembers them.
+        if (volumetricFog_) volumetricFog_->forgetSkyViews();
         std::shared_ptr<SkyHeightField> prev(std::move(skyField_));
         vkCtx->deferAfterAllFrameFences([prev]() mutable { prev.reset(); });
         skyOffFrames_ = 0;

@@ -184,6 +184,14 @@ public:
     /// map stands in so the binding is valid). Called as setShadowView is.
     void setSkyViews(uint32_t frame, VkImageView tops, VkImageView ground);
 
+    /// The sky height field is being retired: its views are forgotten for
+    /// both slots, so nothing writes them again once they are destroyed -
+    /// not a quality change's rewrite of every binding, and not while this
+    /// volume is off and setSkyViews is not being called. Nothing is written
+    /// here (the other slot's set may be in flight); each slot's set is
+    /// rewritten with the stand-in at its next setSkyViews, before its record.
+    void forgetSkyViews();
+
     /// Forget the previous frames, after a teleport or a loading screen:
     /// reprojecting air from somewhere else would smear it across the view.
     void resetHistory() { historyValid_ = false; }
@@ -228,6 +236,8 @@ private:
 
     VkImageView shadowViews_[MAX_FRAMES] = {};
     VkImageView skyViews_[MAX_FRAMES][2] = {};
+    /// The slot's set still names views forgetSkyViews dropped.
+    bool skyViewsStale_[MAX_FRAMES] = {};
     void writeSkyViews(uint32_t frame);
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
