@@ -209,7 +209,8 @@ bool VolumetricFog::createPipelines(VkDescriptorSetLayout perFrameLayout,
     //   5  this slot's running sum, written by integrate
     //   6  this slot's sun visibility, written by inject (canopy shafts)
     //   7  the other slot's, last frame's, read by inject
-    //   8, 9 the sky height field's tops and ground (the dawn rays)
+    //   8, 9 the sky height field's tops and ground (the dawn rays, and
+    //        how tall the trees round a shaft stand)
     constexpr uint32_t kBindings = 10;
     VkDescriptorSetLayoutBinding b[kBindings]{};
     const VkDescriptorType types[kBindings] = {

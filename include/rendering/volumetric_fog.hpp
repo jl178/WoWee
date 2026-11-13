@@ -108,9 +108,9 @@ public:
         /// Yards from the camera over which the shafts are full, fading out
         /// over as many again.
         float shaftReach = 60.0f;
-        /// The sky height field for the dawn rays (SkyHeightField::params:
-        /// its corner x, y, the height its depth 0 stands for, 1 when it holds
-        /// a drawing), 0s for none.
+        /// The sky height field for the dawn rays and the trees' height
+        /// round a shaft (SkyHeightField::params: its corner x, y, the height
+        /// its depth 0 stands for, 1 when it holds a drawing), 0s for none.
         glm::vec4 skyField{0.0f};
         /// Toward the sun's sprite, and how far the far air takes its sun
         /// from the sprite's own direction (0 by day and with no field).
@@ -168,10 +168,10 @@ public:
     void setShadowView(uint32_t frame, VkImageView view);
 
     /// The sky height field's front maps this slot's inject reads for the
-    /// dawn rays (SkyHeightField: the tops of what stands, and the ground),
-    /// or null for none (FrameInputs::skyField.w is then 0 and they are not
-    /// read; a shadow map stands in so the binding is valid). Called as
-    /// setShadowView is.
+    /// dawn rays and how tall the trees round a shaft stand (SkyHeightField:
+    /// the tops of what stands, and the ground), or null for none
+    /// (FrameInputs::skyField.w is then 0 and they are not read; a shadow
+    /// map stands in so the binding is valid). Called as setShadowView is.
     void setSkyViews(uint32_t frame, VkImageView tops, VkImageView ground);
 
     /// Forget the previous frames, after a teleport or a loading screen:

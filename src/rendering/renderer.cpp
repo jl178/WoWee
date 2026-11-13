@@ -6967,17 +6967,18 @@ void Renderer::renderVolumetricFog() {
     // degrees, the far air takes its sunlight from the sun's own direction,
     // marched over the sky height field (volumetric_fog_inject.comp,
     // docs/re/enhanced-lighting.md 5c). Only while the field holds a drawing.
+    // The shafts read the field as well, at any hour: how tall the trees
+    // round a shaft stand, so a beam under Ashenvale's stands the height of
+    // its clearing, and the shade under them is dark (5c, tall canopies).
     VkImageView skyTops = VK_NULL_HANDLE;
     VkImageView skyGround = VK_NULL_HANDLE;
     if (in.shaftStrength > 0.0f && skyFrame_ && skyField_ && skyField_->readable() && lightingManager) {
+        in.skyField = skyField_->params();
+        skyTops = skyField_->frontView(SkyHeightField::kTops);
+        skyGround = skyField_->frontView(SkyHeightField::kGround);
         const glm::vec3 toSun = glm::normalize(lightingManager->getLightingParams().sunDir);
         in.dawnRays = glm::smoothstep(-0.02f, 0.03f, toSun.z) * (1.0f - glm::smoothstep(0.15f, 0.30f, toSun.z));
-        if (in.dawnRays > 0.0f) {
-            in.toSun = toSun;
-            in.skyField = skyField_->params();
-            skyTops = skyField_->frontView(SkyHeightField::kTops);
-            skyGround = skyField_->frontView(SkyHeightField::kGround);
-        }
+        if (in.dawnRays > 0.0f) in.toSun = toSun;
     }
     volumetricFog_->setSkyViews(frame, skyTops, skyGround);
     volumetricFog_->record(currentCmd, frame, perFrameDescSets[frame], in);

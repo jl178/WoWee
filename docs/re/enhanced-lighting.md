@@ -1173,6 +1173,48 @@ on against off, two alternating rounds on a quiet GPU (Iris Xe, 1280x540):
 0.553 -> 0.662 ms in Elwynn's forest at 6:30 (the dawn march included),
 0.508 -> 0.605 at 10:00.
 
+**Tall canopies: Ashenvale and Teldrassil** (after 29acfdc). No beams
+formed at Astranaar, Dolanaar or the zones' teleport points. A debug
+build colouring every cell of the volume by its sun visibility (world map
+red, detail map blue) found no sunlit air at all within 120 yards of the
+Ashenvale and Shadowglen teleport points at 11:00, 15:30 or by moonlight,
+and no sun on the ground either: those trees' leaf cards, alpha-tested at
+0.5 from the full-size texture, close the canopy in the shadow maps as in
+the stock art, so there is nothing for a shaft to be made of (with the
+shadows off the same build lights every cell). Where the canopy does open
+- the road through Ashenvale at (2500, -480), the clearings by Dolanaar -
+two things kept the beams from reading:
+
+- *The crown band.* A beam was full to 10 yards over the ground and gone
+  by 24, Elwynn's oaks. Ashenvale's and Teldrassil's trees top out near 80
+  yards (the sky height field), so the lit column through a clearing
+  ended in mid-air a third of the way up. The band now runs from two
+  fifths of the height of what stands round the gap to its top - the
+  higher of the field's tops 11 yards either side (two taps each, only for
+  a lit cell in a gap) - and never below 10-24, so Elwynn's is unchanged.
+- *The air round it.* Under trees whose tops stand 55 to 70 yards and more
+  over the ground (the field's top over its ground at the cell, two taps),
+  the shaded air loses its sky light everywhere, not only beside a beam: a
+  teal haze as bright as the beam took it in the clearing. Elwynn's trees
+  stand under that and keep theirs.
+
+The sky height field (the tops and the ground) is now bound to the inject
+whenever the shafts are on, not only at dawn. Tried and dropped: rings
+scaled with the crowns' height (a broad veil over every clearing), and a
+hole test at crown height from the field's undersides (it found most of
+Ashenvale's road open and took Elwynn's crown gap from +24% to +14%).
+
+Measured (the lab, 1280x540, Enhanced): Ashenvale road views 10-14%
+darker in the shade with the beams standing out on it, a soft column
+through the Dolanaar clearing, the moonbeams over the road brighter
+against it; Elwynn's evening -5.2% and forest -3.0% against y5 (were
+-5.3 / -3.0), Barrens 0.547, into the sun at the crossroads 0.24% white.
+The inject pass, same executable, the shader alone: 0.608 -> 0.763 ms in
+Elwynn's forest at 10:00 (two alternating rounds). Much of it is the
+compiled code rather than the taps: an earlier, larger version cost the
+same with its reads switched off at run time, and the undersides map
+(a third binding, eight taps a cell) cost 0.1 ms more and was dropped.
+
 ## 6. Global illumination ("Secondary Lighting")
 
 reference-era shaders with no names in the community listfile

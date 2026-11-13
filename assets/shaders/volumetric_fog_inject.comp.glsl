@@ -178,6 +178,15 @@ float sunVisibility(vec3 p) {
     return w >= 1.0 ? detail : mix(worldSunVisibility(p), detail, w);
 }
 
+// How high what stands over p's ground reaches (the sky height field's top
+// over its ground there, yards); 0 with no field. Two taps.
+float standingOver(vec3 p) {
+    if (vol.skyField.w < 0.5) return 0.0;
+    vec2 uv = (p.xy - vol.skyField.xy) / kSkySpan;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return 0.0;
+    return kSkyDepth * (textureLod(uSkyGround, uv, 0.0).r - textureLod(uSkyTops, uv, 0.0).r);
+}
+
 // Where a world point lies in last frame's volume, as texture coordinates;
 // false if outside it.
 bool lastFrameCell(vec3 p, out vec3 prev) {
@@ -443,7 +452,17 @@ void main() {
             // it everywhere under a canopy took Elwynn's evening and forest
             // views 8% and 7% darker.
             float nearBeam = 1.0 - smoothstep(0.75, 1.0, rings.x);
-            float under = (1.0 - lit) * smoothstep(0.5, 0.95, rings.y) * nearBeam * reach * day;
+            //
+            // And all through the shade under tall trees (crowns topping
+            // 55 to 70 yards and more, the sky height field): Ashenvale's and
+            // Teldrassil's forests are closed overhead nearly everywhere,
+            // and with their air at full sky light a beam in a clearing
+            // stood against a teal haze as bright as itself - the
+            // reference's Ashenvale is dark blue air either side of one.
+            // Elwynn's oaks stand under that and keep their sky light.
+            float shadeAll = (1.0 - lit) * smoothstep(0.5, 0.95, rings.y) * reach * day;
+            float tallTrees = (shadeAll > 0.0 && nearBeam < 1.0) ? smoothstep(55.0, 70.0, standingOver(p)) : 0.0;
+            float under = shadeAll * max(nearBeam, tallTrees);
             light -= fogColor.rgb * (vol.lighting.z * kCanopyAirCut * under);
             if (lit > 0.0) {
                 // A lit cell in a gap: most of both rings in shade. A whole
@@ -463,8 +482,20 @@ void main() {
                 // Under the crowns, not in them: the sunlit air among the
                 // leaves high in a canopy is dappled all through, and at
                 // beam strength it laid a pale veil over the crowns looking up
-                // at noon. Full to 10 yards over the ground, gone by 24.
-                gap *= 1.0 - smoothstep(10.0, 24.0, p.z - vol.medium.y);
+                // at noon. Full to 10 yards over the ground, gone by 24 -
+                // Elwynn's oaks - or, under taller trees, full to where the
+                // crowns round the gap begin and gone at their tops (the sky
+                // height field, the higher of two points 11 yards either
+                // side, the crowns' foot taken at two fifths of it):
+                // Ashenvale's and Teldrassil's reach 80 yards, and their
+                // beams stand the height of the clearing rather than ending
+                // in mid-air 24 yards up.
+                float crownTop = 24.0;
+                if (gap > 0.0) {
+                    crownTop = max(crownTop, max(standingOver(p + vec3(8.0, 8.0, 0.0)),
+                                                 standingOver(p - vec3(8.0, 8.0, 0.0))));
+                }
+                gap *= 1.0 - smoothstep(max(10.0, 0.4 * crownTop), crownTop, p.z - vol.medium.y);
                 // And a few yards out: a lit hole in the crown over the camera
                 // is no shaft from here, only a pale cast over the view.
                 gap *= smoothstep(3.0, 10.0, depth);
