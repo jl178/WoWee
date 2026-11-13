@@ -11,6 +11,8 @@
 #include "rendering/volumetric_fog_math.hpp"
 
 #include <glm/glm.hpp>
+#include <algorithm>
+#include <cmath>
 #include <vector>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -106,4 +108,61 @@ TEST_CASE("Fog inject groups cover every cell once, one slice parity a group", "
                 }
         for (int h : hits) REQUIRE(h == 1);
     }
+}
+
+// The mist's wind (mist_wind.hpp): each zone class blows its own way, and
+// the offsets it carries move smoothly, wrap on the noise's period without
+// leaving it, and ease from one zone's air into the next.
+#include "rendering/mist_wind.hpp"
+
+TEST_CASE("the mist's wind by zone", "[volumetric_fog]") {
+    namespace mw = wowee::rendering::mist_wind;
+    REQUIRE(mw::kindOf(40) == mw::ZoneKind::Plains);          // Westfall
+    REQUIRE(mw::kindOf(10) == mw::ZoneKind::DarkForest);      // Duskwood
+    REQUIRE(mw::kindOf(331) == mw::ZoneKind::DarkForest);     // Ashenvale
+    REQUIRE(mw::kindOf(141) == mw::ZoneKind::TwilightForest); // Teldrassil
+    REQUIRE(mw::kindOf(999999) == mw::ZoneKind::Default);
+    // Dust across Westfall outruns the mist creeping through Duskwood.
+    const float west = glm::length(mw::velocity(mw::windOf(mw::ZoneKind::Plains), 0.0f));
+    const float dusk = glm::length(mw::velocity(mw::windOf(mw::ZoneKind::DarkForest), 0.0f));
+    CHECK(west > 3.0f * dusk);
+    CHECK(west < 4.0f);  // slow: a few yards a second
+    // A storm stirs it, within kStormBoost.
+    const float storm = glm::length(mw::velocity(mw::windOf(mw::ZoneKind::Plains), 1.0f));
+    CHECK(storm > west);
+    CHECK(storm <= west * (1.0f + mw::kStormBoost) + 1e-3f);
+}
+
+TEST_CASE("the mist's offsets move smoothly and wrap", "[volumetric_fog]") {
+    namespace mw = wowee::rendering::mist_wind;
+    const mw::Wind w = mw::windOf(mw::ZoneKind::Plains);
+    const glm::vec3 vel = mw::velocity(w, 0.0f);
+    mw::Offsets o;
+    float t = 0.0f;
+    for (int i = 0; i < 200000; ++i) {  // an hour at 60 fps
+        const mw::Offsets before = o;
+        o = mw::advance(o, vel, w.churn, t, 1.0f / 60.0f);
+        t += 1.0f / 60.0f;
+        for (int k = 0; k < 3; ++k) {
+            REQUIRE(o.banks[k] >= 0.0f);
+            REQUIRE(o.banks[k] < mw::kPeriodCells);
+            REQUIRE(o.wisps[k] >= 0.0f);
+            REQUIRE(o.wisps[k] < mw::kPeriodCells);
+            // A frame's step is a small part of a noise cell, but for the
+            // wrap, which lands on the same lattice point.
+            float db = std::abs(o.banks[k] - before.banks[k]);
+            float dw = std::abs(o.wisps[k] - before.wisps[k]);
+            db = std::min(db, std::abs(db - mw::kPeriodCells));
+            dw = std::min(dw, std::abs(dw - mw::kPeriodCells));
+            REQUIRE(db < 0.01f);
+            REQUIRE(dw < 0.05f);
+        }
+    }
+    // A zone line eases the wind over seconds rather than snapping it.
+    const mw::Wind dusk = mw::windOf(mw::ZoneKind::DarkForest);
+    const mw::Wind step = mw::ease(w, dusk, 1.0f / 60.0f, 4.0f);
+    CHECK(std::abs(step.speed - w.speed) < 0.02f);
+    mw::Wind settled = w;
+    for (int i = 0; i < 60 * 30; ++i) settled = mw::ease(settled, dusk, 1.0f / 60.0f, 4.0f);
+    CHECK(std::abs(settled.speed - dusk.speed) < 0.01f);
 }

@@ -1215,6 +1215,34 @@ compiled code rather than the taps: an earlier, larger version cost the
 same with its reads switched off at run time, and the undersides map
 (a third binding, eight taps a cell) cost 0.1 ms more and was dropped.
 
+**Fog drift** (the reference client's notes: each zone its own wind, dust
+across Westfall, mist through Duskwood). 3.3.5 carries no wind to read -
+the foliage sways on one constant direction (m2.vert's kWindDir) and the
+weather falls on a fixed drift - so the table is ours
+(`include/rendering/mist_wind.hpp`), by the zone classes the Enhanced
+lighting already groups (`assets/enhanced_lighting_params.json`): Westfall,
+the Barrens and Mulgore 2.6 yd/s east off the sea; deserts 3; snow 2;
+coasts 1.8 onshore; Elwynn 0.8 with the foliage; Duskwood and Ashenvale
+0.55, Teldrassil 0.45, swamps 0.3, these last turning over most. Rain,
+snow or sand blow it up to 2.5 times as fast at full intensity.
+
+The mist's banks (40 yards) ride that wind, and a finer octave of wisps (8
+yards, 18-28% of the density by class) rides 1.6 times it plus a slow
+churn of its own, a rise and a turn, so the air evolves through a beam
+rather than sliding past as one sheet. Both offsets are accumulated on
+the CPU from the eased wind (a zone line turns the air over about four
+seconds) and wrapped on the noise lattice's own period (the hash reads
+its cell modulo 256), so they never jump and never lose precision however
+long a session runs. Nothing faster than a few yards a second, nothing
+finer than 8 yards: the history (0.9) carries it without a shimmer - two
+frames 0.1 s apart differ by 0.37-0.66 (of 255) in mean luminance at
+Darkshire, Sentinel Hill and Elwynn's forest, as before (0.42-0.67).
+
+Elwynn evening -5.0%, forest -2.6% against y5; Barrens 0.546; Westfall
+6:18 into the sun 0.2% white (0.2% at Strong); into the sun at the
+crossroads 0.22%. The inject pass 0.767 -> 0.785 ms in Elwynn's forest
+(one more noise octave).
+
 ## 6. Global illumination ("Secondary Lighting")
 
 reference-era shaders with no names in the community listfile

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rendering/mist_wind.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -116,6 +117,10 @@ public:
         /// from the sprite's own direction (0 by day and with no field).
         glm::vec3 toSun{0.0f, 0.0f, 1.0f};
         float dawnRays = 0.0f;
+        /// The zone's wind the mist drifts on (mist_wind::windOf), and how
+        /// far weather stirs it (0-1: rain, snow or sand at its intensity).
+        mist_wind::Wind wind{};
+        float storm = 0.0f;
     };
 
     VolumetricFog() = default;
@@ -235,6 +240,11 @@ private:
     glm::vec3 prevCameraPos_{0.0f};
     bool historyValid_ = false;
     uint32_t frameCounter_ = 0;
+    // The mist's wind, eased, and the noise offsets it has carried.
+    mist_wind::Wind wind_{};
+    mist_wind::Offsets windOffsets_{};
+    float windTime_ = 0.0f;
+    bool windTimeValid_ = false;
     int lastRecordedFrame_ = -1;
 };
 

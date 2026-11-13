@@ -31,6 +31,7 @@ struct VolumeParamsGPU {
     glm::vec4 dawn;           // xyz toward the sun's sprite, w = the far air's share of it
     glm::vec4 shafts;         // x = canopy shaft strength (0 = none), y = night share,
                               // z = shade probe radius (yd), w = 1 / reach (yd)
+    glm::vec4 wind;           // xyz = the wisps' offset in noise cells, w = their share
 };
 
 constexpr uint32_t kInjectGroup = 4;     // 4x4x4, volumetric_fog_inject.comp.glsl
@@ -502,9 +503,17 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
                          glm::clamp(in.layerFloor, 0.0f, 1.0f));
     p.lighting = glm::vec4(in.sunScatter, in.localLightScatter, in.ambientScatter,
                            glm::clamp(in.sunLobe, 0.0f, 1.0f));
-    // A slow breeze, a yard a second, so the mist drifts rather than sits.
-    const float t = in.time;
-    p.drift = glm::vec4(t * 0.9f, t * 0.45f, t * 0.12f, glm::clamp(in.noiseAmount, 0.0f, 1.0f));
+    // The zone's wind (mist_wind.hpp), eased over a few seconds so a zone
+    // line or a storm turns the air rather than snapping it, and the noise
+    // offsets it carries accumulated, so the field never jumps.
+    const float dt = windTimeValid_ ? glm::clamp(in.time - windTime_, 0.0f, 0.25f) : 0.0f;
+    windTime_ = in.time;
+    windTimeValid_ = true;
+    wind_ = mist_wind::ease(wind_, in.wind, dt, 4.0f);
+    const glm::vec3 vel = mist_wind::velocity(wind_, in.storm);
+    windOffsets_ = mist_wind::advance(windOffsets_, vel, wind_.churn, in.time, dt);
+    p.drift = glm::vec4(windOffsets_.banks, glm::clamp(in.noiseAmount, 0.0f, 1.0f));
+    p.wind = glm::vec4(windOffsets_.wisps, glm::clamp(wind_.wisps, 0.0f, 0.5f));
     const uint32_t seq = (frameCounter_ % 16) + 1;
     p.jitter = glm::vec4(halton(seq, 2), halton(seq, 3), halton(seq, 5), history ? 0.9f : 0.0f);
     // Half the slices are lit afresh each frame, alternating; the other half

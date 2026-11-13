@@ -6963,6 +6963,11 @@ void Renderer::renderVolumetricFog() {
     in.layerBase = fogLayerBase_;
     in.sunLobe = lightingManager ? lightingManager->getLightingParams().sunDisc : 1.0f;
     enhancedShaftInputs(lightingManager.get(), weather.get(), indoorFactor_, enh_.lightShaftStrength, in);
+    // The zone's wind for the mist's drift (mist_wind.hpp), stirred by the
+    // weather falling in it.
+    in.wind = mist_wind::windOf(mist_wind::kindOf(getCurrentZoneId()));
+    if (weather && weather->isEnabled() && weather->getWeatherType() != Weather::Type::NONE)
+        in.storm = glm::clamp(weather->getIntensity(), 0.0f, 1.0f);
     // The dawn rays: with the shafts on, toward a sun under about 15
     // degrees, the far air takes its sunlight from the sun's own direction,
     // marched over the sky height field (volumetric_fog_inject.comp,

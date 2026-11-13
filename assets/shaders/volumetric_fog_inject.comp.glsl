@@ -67,7 +67,7 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 medium;         // x = density, y = layer base, z = 1 / layer height, w = floor
     vec4 lighting;       // x = sun scatter, y = local light scatter, z = ambient scatter,
                          // w = the forward lobe's share (0 under a sky with no sun disc)
-    vec4 drift;          // xyz = how far the mist has blown, w = noise amount
+    vec4 drift;          // xyz = how far the banks have blown, in noise cells (mist_wind.hpp), w = noise amount
     vec4 jitter;         // xyz = sample point inside the cell, w = history weight
     ivec4 dims;          // xyz = size, w = 0 every cell lit, 1 or 2 only odd or even slices
     vec4 skyField;       // the sky height field: corner xy, height of depth 0, w = 1 when drawn
@@ -75,6 +75,8 @@ layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 shafts;         // the reference client's canopy shafts: x = strength (0 = stock), y = how far it
                          // is night (the moonlight's share), z = probe radius in yards,
                          // w = 1 / the yards over which they fade out with distance
+    vec4 wind;           // xyz = how far the wisps have blown and churned, in their noise cells,
+                         // w = their share of the density (mist_wind.hpp)
 } vol;
 
 layout(set = 1, binding = 1) uniform sampler2D uShadowDepth;
@@ -104,7 +106,10 @@ vec3 rayAt(vec2 uv) {
     return mix(top, bottom, uv.y);
 }
 
+// On the lattice's own period (mist_wind::kPeriodCells), so the offsets the
+// wind accumulates wrap without a seam however long a session runs.
 float hash13(vec3 p) {
+    p = mod(p, 256.0);
     p = fract(p * 0.1031);
     p += dot(p, p.zyx + 31.32);
     return fract((p.x + p.y) * p.z);
@@ -128,15 +133,22 @@ float valueNoise3D(vec3 x) {
 
 // Extinction per yard. Densest at the layer's base - the ground the camera
 // stands over - thinning with height to a floor that never quite clears, and
-// broken into drifting banks forty yards or so across. Thinned to nothing
-// over the back two thirds of the volume's depth: this is the near air, where
-// shafts can be seen, and the zone's distance fog is the haze past it.
+// broken into banks forty yards or so across that drift on the zone's wind
+// (mist_wind.hpp: dust across Westfall, mist creeping through Duskwood), and
+// finer wisps eight yards across on more of it, turning over on their own,
+// so the air moves through the beams rather than sliding past as one sheet.
+// Both slow - a few yards a second at most - and soft-edged, so the history
+// carries them without a shimmer. Thinned to nothing over the back two
+// thirds of the volume's depth: this is the near air, where shafts can be
+// seen, and the zone's distance fog is the haze past it.
 float airDensity(vec3 p, float depth) {
     float above = max(p.z - vol.medium.y, 0.0);
     float layer = mix(vol.medium.w, 1.0, exp(-above * vol.medium.z));
-    vec3 q = (p + vol.drift.xyz) / 40.0;
-    float n = valueNoise3D(q) * 0.65 + valueNoise3D(q * 2.6 + 11.7) * 0.35;
+    vec3 q = p / 40.0 + vol.drift.xyz;
+    float n = valueNoise3D(q) * 0.65 + valueNoise3D(q * 2.0 + 11.0) * 0.35;
     float banks = mix(1.0, 2.0 * n, vol.drift.w);
+    float wisp = valueNoise3D(p * (5.0 / 40.0) + vol.wind.xyz);
+    banks *= 1.0 + vol.wind.w * (2.0 * wisp - 1.0);
     float far = sliceDepth(volumetricParams.w);
     float near = 1.0 - smoothstep(0.35 * far, far, depth);
     return vol.medium.x * layer * banks * near;
