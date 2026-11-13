@@ -120,6 +120,13 @@ struct Enhancements {
     /// the distance pales and a low sun glows gold (enhanced_haze.frag).
     /// Off is stock: Light.dbc's distance fog alone.
     bool  sunHaze = false;
+    /// How strongly the enhanced light's canopy shafts show in the mist
+    /// (enhanced_shafts.hpp): 0 subtle, 1 normal, 2 strong. Only with the
+    /// light shafts on under the enhanced daylight; the stock client has none.
+    int   lightShaftStrength = 1;
+    /// How strongly the sun haze's low-sun sky light and dusk glow show
+    /// (enhanced_haze.frag's air.g and air.b): 1 the tuned look, 0 none.
+    float sunGlow = 1.0f;
     /// Bloom over the highlights, 0 off (fxaa.frag bloomAt). The reference client ships
     /// its Bloom Intensity at the maximum; stock has only the glow.
     float bloom = 0.0f;

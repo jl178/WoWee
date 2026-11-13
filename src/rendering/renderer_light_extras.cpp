@@ -239,6 +239,11 @@ void Renderer::recordContactShadowPass(VkCommandBuffer cmd) {
         if (vkCtx->isHdrScene()) air.g = kEnhancedLowSunSkyLight;
         // The dusk glow toward a sun under 15 degrees (enhanced_haze.frag).
         air.b = enh_.enhancedDaylight ? kEnhancedDuskGlow : 0.0f;
+        // Both scaled by the Sun glow row (1 the tuned look); the haze holds
+        // them under its own caps at any setting.
+        const float glow = glm::clamp(enh_.sunGlow, 0.0f, 1.0f);
+        air.g *= glow;
+        air.b *= glow;
         if (sunHaze_.pass->record(cmd, target, perFrame, invViewProj, 1.0f - 0.8f * wx, hazeFlags, air)) {
             vkCtx->gpuMark(cmd, "sun haze");
         }

@@ -1087,6 +1087,62 @@ and forest views and the crown gap (+26% -> +17%); Barrens 0.547, Westfall
 6:18 0.04% white, into the sun 0.24%. E keeps less of that. The road's
 gaps are not the mist's to close.
 
+**Beams at a glance** (Jered's round, 456cd6c). Looking toward the sun
+through a canopy he saw no shafts: the reference frames show distinct,
+warm beams from the canopy gaps down to a lit patch on the ground, against
+dark air, and the reference's own stills (Ashenvale's single tall beam in
+a dark clearing, Tirisfal's low sun through conifers) say the same: the
+look is the edge and the contrast, not a brighter glow. What held them
+back here, and what changed:
+
+- *Too little light in a beam.* Seen across, a beam is a few yards of air:
+  at 3.5 times the mist's sun scatter it added about 0.02 to the frame.
+  The beams now scatter 6 times (Normal), and a whole beam counts, not
+  only its rim: the gap test reads two level rings, 2.5 and 7.5 yards out,
+  and a lit cell is in a gap when the outer ring is mostly in shade
+  (`smoothstep(0.55, 0.9)`) and some of the inner ring is lit (a hole of a
+  yard or two among the leaves is under a cell across and only blurred into
+  a veil). Under the crowns, not in them (full to 10 yards over the ground,
+  gone by 24), and from a few yards out (3 to 10).
+- *Soft edges.* Near the player each cell's visibility now comes from the
+  detail map of the sun's shadows (0.07 yd a texel, one bilinear compare),
+  the world map's 0.26-yard texel only past it; the detail map is bound to
+  the compute stage for it.
+- *A lifted veil.* The canopy's own shaded air, with shade all round it,
+  keeps half its sky light by day, so a beam reads against dark air.
+- *The lobe.* A forward lobe of g 0.5 at 0.7 of the light, visible from the
+  side as well, held down only at the disc itself (within about 5 degrees):
+  the twenty-degree pull-back took every beam looking into a low sun.
+- *The streaks.* The screen-space sun shafts toward a low sun count the
+  orange sky by it as a source (thresholds 0.35-0.75 instead of 0.55-0.95,
+  eased in as the sun goes from 20 degrees to 3): at dawn the gaps in
+  Elwynn's trees cast no streak at all.
+
+At dawn in Goldshire and Elwynn (sun 3-6 degrees) the ground and the air
+near it are wholly in the trees' shadow, cast from the light's direction
+(about 15 degrees up then, easing onto the sun), so there is no lit air for
+a beam; the streaks carry the dawn look there. Teldrassil's canopy, and
+Astranaar's open square, show none either.
+
+New rows on the Enhanced page: **Light shaft strength** (Subtle, Normal,
+Strong: the beams x0.5, x1, x1.8 and the streaks x0.6, x1, x1.4) and **Sun
+glow** (0-1, 1 the tuned look: the haze's low-sun sky light and dusk glow,
+scaled on the CPU). Above 1 it whitens a dawn sky - Westfall's 6:18 view at
+2 was 18.8% white, at 1.25 with Strong shafts 5.7% - so the row only dims. Measured (lab, 1280x540; white = min
+channel over 0.97 in the QA framing):
+
+| | shafts off | Normal |
+|---|---|---|
+| Westfall 6:18 into the sun (QA framing), white | 0.1% (mist off) | 0.3%; Strong with Sun glow 1: 0.3% |
+| Goldshire into the sun (ring.py, max channel > 0.92) | 0.31% | 0.12-0.24% |
+| Barrens road at noon, mean | 0.497 | 0.497 (bright.py ground 0.545) |
+| Goldshire inn's hall, mean | 0.237 | 0.239 |
+| Goldshire inn 9:22, mean / top third (sat, L, hue; reference 0.355, 0.283, 57) | 0.307 | 0.330 / 0.359, 0.290, 60 |
+| Goldshire 15:23, mean / top third (reference 0.41, 0.32, 39) | 0.296 | 0.312 / 0.354, 0.302, 45 |
+| Goldshire 23:00 (moonbeams), mean | 0.127 | 0.169 |
+| fixed-mask crown gap, three views | +25.7% | +20.5% |
+| evening / forest against y5 | | -8.3% / -6.9% (the canopy air kept dark) |
+
 ## 6. Global illumination ("Secondary Lighting")
 
 reference-era shaders with no names in the community listfile

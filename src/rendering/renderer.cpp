@@ -367,7 +367,8 @@ bool Renderer::createPerFrameResources() {
     bindings[6].binding = 6;
     bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[6].descriptorCount = 1;
-    bindings[6].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // Compute too: the fog volume's inject reads it for crisp canopy beams.
+    bindings[6].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
     bindings[6].pImmutableSamplers = &shadowSampler;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
@@ -6894,7 +6895,7 @@ float Renderer::volumetricFogExtinction() const {
 
 namespace {
 void enhancedShaftInputs(const LightingManager* lightingManager, const Weather* weather,
-                        float indoorFactor, VolumetricFog::FrameInputs& in) {
+                        float indoorFactor, int strengthSetting, VolumetricFog::FrameInputs& in) {
     // The reference client's canopy shafts (docs/re/enhanced-lighting.md 5c): under its
     // light only (maps 0 and 1, above water), outdoors, and with the sky's
     // sun or moon showing through the cloud. Off, the mist is the stock one.
@@ -6907,7 +6908,7 @@ void enhancedShaftInputs(const LightingManager* lightingManager, const Weather* 
                                         glm::clamp(lp.cloudDensity, 0.0f, 1.0f));
     const float precip = weather ? glm::clamp(weather->getIntensity(), 0.0f, 1.0f) : 0.0f;
     const float night = 1.0f - leaf_light::dayWeight(glm::normalize(lp.sunDir).z);
-    const float k = tune.strength * outdoor * throughCloud * (1.0f - 0.8f * precip) *
+    const float k = tune.strength * enhanced_shafts::strengthScale(strengthSetting) * outdoor * throughCloud * (1.0f - 0.8f * precip) *
                     glm::mix(1.0f, tune.nightScale, night);
     if (k <= 1e-3f) return;
     in.shaftStrength = k;
@@ -6961,7 +6962,7 @@ void Renderer::renderVolumetricFog() {
     in.density = fogExtinction_;
     in.layerBase = fogLayerBase_;
     in.sunLobe = lightingManager ? lightingManager->getLightingParams().sunDisc : 1.0f;
-    enhancedShaftInputs(lightingManager.get(), weather.get(), indoorFactor_, in);
+    enhancedShaftInputs(lightingManager.get(), weather.get(), indoorFactor_, enh_.lightShaftStrength, in);
     volumetricFog_->record(currentCmd, frame, perFrameDescSets[frame], in);
     if (vkCtx) vkCtx->gpuMark(currentCmd, "volumetric fog integrate");
 
@@ -6971,7 +6972,11 @@ void Renderer::renderVolumetricFog() {
     if (globalTime - lastFogLog > 5.0) {
         lastFogLog = globalTime;
         LOG_INFO("volumetricFog: extinction=", fogExtinction_, "/yd (target ", target,
-                 ") layerBase=", fogLayerBase_, " lights=", currentFrameData.localLightMeta.x);
+                 ") layerBase=", fogLayerBase_, " lights=", currentFrameData.localLightMeta.x,
+                 " shafts=", in.shaftStrength, " night=", in.shaftNight,
+                 " light=(", currentFrameData.lightColor.r, ",", currentFrameData.lightColor.g, ",",
+                 currentFrameData.lightColor.b, ") dir.z=", currentFrameData.lightDir.z,
+                 " detail=", currentFrameData.detailShadowParams.x);
     }
 }
 
@@ -7039,9 +7044,30 @@ void Renderer::recordSunShafts() {
                 // white (Jered's Goldshire road toward a high sun). Streaks
                 // through the canopy are well under it and keep their shape.
                 in.cap = kEnhancedShaftCap;
+                // The Light shaft strength row scales the streaks with the
+                // mist's beams (enhanced_shafts::screenScale), the cap with
+                // them a little less, so Strong is bolder streaks, not a
+                // brighter sky round the sun.
+                const float screen = enhanced_shafts::screenScale(enh_.lightShaftStrength);
+                strength *= screen;
+                in.cap = kEnhancedShaftCap * std::sqrt(screen);
+                // Toward a low sun the sky by it is orange, about 0.65 in
+                // luminance, under the stock threshold: at dawn through
+                // Elwynn's trees the gaps cast no streaks at all. Eased down
+                // as the sun goes from 20 degrees to 3.
+                const float low = 1.0f - glm::smoothstep(0.05f, 0.34f, sunDir.z);
+                in.sourceLow = glm::mix(in.sourceLow, 0.35f, low);
+                in.sourceHigh = glm::mix(in.sourceHigh, 0.75f, low);
+                in.sourceRadius = glm::mix(in.sourceRadius, 0.5f, low);
             }
             in.sunUV = sun.uv;
             in.strength = strength;
+            static double lastShaftLog = 0.0;
+            if (globalTime - lastShaftLog > 5.0) {
+                lastShaftLog = globalTime;
+                LOG_INFO("sunShafts: strength=", strength, " cap=", in.cap, " uv=(", sun.uv.x, ",", sun.uv.y,
+                         ") dayIntensity=", lp.dayIntensity, " sunZ=", sunDir.z);
+            }
         }
     }
     // Called every frame, strength zero included, so the composite knows

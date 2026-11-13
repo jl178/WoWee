@@ -20,6 +20,7 @@ constexpr uint32_t kMarchGroup = 8;  // 8x8, sun_shafts.comp.glsl
 struct MarchPush {
     glm::vec4 sun;   // xy = the sun's place on screen, z = width / height, w = strength
     glm::vec4 tint;  // rgb = the sun's colour, w = the rays' cap (0 none)
+    glm::vec4 source;  // x, y = the brightness that starts and fully counts as a source, z = their reach
 };
 
 }  // namespace
@@ -373,6 +374,7 @@ bool SunShafts::record(VkCommandBuffer cmd, uint32_t frame, VkImage swapchainIma
     push.sun = glm::vec4(in.sunUV, static_cast<float>(extent.width) / static_cast<float>(extent.height),
                          in.strength);
     push.tint = glm::vec4(in.tint, in.cap);
+    push.source = glm::vec4(in.sourceLow, in.sourceHigh, in.sourceRadius, 0.0f);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, marchPipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, marchLayout_, 0, 1, &marchSets_[frame], 0, nullptr);
     vkCmdPushConstants(cmd, marchLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);

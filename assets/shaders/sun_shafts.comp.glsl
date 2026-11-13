@@ -18,6 +18,8 @@ layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D uRays;
 layout(push_constant) uniform Push {
     vec4 sun;   // xy = the sun's place on screen, z = width / height, w = strength
     vec4 tint;  // rgb = the sun's colour, w = the most the rays add (0 = no limit)
+    vec4 source;  // x, y = brightness at which the frame starts to and fully counts as sky near
+                  // the sun; z = how far from the sun, in screen heights, sources fade out
 } push;
 
 const int kSamples = 48;
@@ -28,11 +30,9 @@ const int kSamples = 48;
 const float kDecay = 0.98;
 const float kReach = 0.8;
 // Brightness at which the frame starts to count as sky near the sun, and at
-// which it counts fully. In the swapchain's own values.
-const float kThresholdLow = 0.55;
-const float kThresholdHigh = 0.95;
-// How far from the sun, in screen heights, the sources fade out.
-const float kSourceRadius = 0.4;
+// which it counts fully, in the swapchain's own values, and how far from the
+// sun, in screen heights, the sources fade out: push.source (0.55, 0.95 and
+// 0.4 stock; SunShafts::FrameInputs).
 
 void main() {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
@@ -55,10 +55,10 @@ void main() {
         total += weight;
         if (at.x >= 0.0 && at.x <= 1.0 && at.y >= 0.0 && at.y <= 1.0) {
             vec3 c = textureLod(uFrame, at, 0.0).rgb;
-            float bright = smoothstep(kThresholdLow, kThresholdHigh,
+            float bright = smoothstep(push.source.x, push.source.y,
                                       dot(c, vec3(0.2126, 0.7152, 0.0722)));
             vec2 fromSun = (at - push.sun.xy) * vec2(push.sun.z, 1.0);
-            float nearSun = exp(-dot(fromSun, fromSun) / (kSourceRadius * kSourceRadius));
+            float nearSun = exp(-dot(fromSun, fromSun) / (push.source.z * push.source.z));
             gathered += c * (bright * nearSun * weight);
         }
         weight *= kDecay;

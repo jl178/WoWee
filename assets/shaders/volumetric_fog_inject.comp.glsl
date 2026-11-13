@@ -41,7 +41,24 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 localLightColorIntensity[64];
     ivec4 localLightMeta;
     vec4 volumetricParams;  // x = on, y = near, z = 1 / ln(far / near), w = slices
+    // The rest of the block as far as the detail map of the sun's shadows
+    // (shadow_filter.glsli), for crisp canopy beams near the camera.
+    mat4 rtViewProj;
+    vec4 rtCameraPos;
+    vec4 rtParams;
+    ivec4 localLightTileInfo;
+    vec4 localLightTileScale;
+    uvec4 localLightTiles[288];
+    mat4 nearLightSpaceMatrix;
+    vec4 nearShadowParams;
+    uvec4 nearShadowMask[32];
+    mat4 detailLightSpaceMatrix;
+    vec4 detailShadowParams;  // x = on, y = one texel in uv, z = 1 / depth range (yd), w = yards a texel
 };
+
+// The detail map of the sun's shadows (renderer binding 6): 0.07 yd a texel
+// over 72 yd round the player, the leaves cut out.
+layout(set = 0, binding = 6) uniform sampler2DShadow uDetailShadowMap;
 
 layout(set = 1, binding = 0) uniform VolumeParams {
     vec4 rayOrigin;      // xyz = camera position
@@ -121,7 +138,7 @@ float airDensity(vec3 p, float depth) {
 // use. One tap and no filter: the jitter and the history do the softening.
 // Fades out toward the edge of the map rather than ending on a wall of lit
 // air where its coverage stops.
-float sunVisibility(vec3 p) {
+float worldSunVisibility(vec3 p) {
     if (shadowParams.x < 0.5) return 1.0;
     vec4 ls = lightSpaceMatrix * vec4(p, 1.0);
     vec3 proj = ls.xyz / ls.w;
@@ -133,6 +150,24 @@ float sunVisibility(vec3 p) {
     float lit = (proj.z - 0.0005 <= stored) ? 1.0 : 0.0;
     vec2 edge = abs(proj.xy);
     return mix(lit, 1.0, smoothstep(0.8, 1.0, max(edge.x, edge.y)));
+}
+
+// With the canopy shafts on, near the player the detail map instead: one
+// bilinear compare at 0.07 yd a texel, where the world map's 0.26 yd texel,
+// taken once a cell and smeared by the jitter and the history, left a beam
+// a soft glow with no edge. Eased into the world map over the detail map's
+// outer tenth, as the surfaces do (shadow_filter.glsli detailShadowAt).
+float sunVisibility(vec3 p) {
+    if (shadowParams.x < 0.5) return 1.0;
+    if (vol.shafts.x <= 0.0 || detailShadowParams.x < 0.5) return worldSunVisibility(p);
+    vec4 ls = detailLightSpaceMatrix * vec4(p, 1.0);
+    vec2 uv = ls.xy * 0.5 + 0.5;
+    float edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
+    if (edge <= 0.01 || ls.z < 0.0 || ls.z > 1.0) return worldSunVisibility(p);
+    float w = smoothstep(0.01, 0.09, edge);
+    float z = ls.z - 2.0 * detailShadowParams.w * detailShadowParams.z;
+    float detail = texture(uDetailShadowMap, vec3(uv, z));
+    return w >= 1.0 ? detail : mix(worldSunVisibility(p), detail, w);
 }
 
 // Where a world point lies in last frame's volume, as texture coordinates;
@@ -156,20 +191,22 @@ bool lastFrameCell(vec3 p, out vec3 prev) {
 // shadow, toward 1 deep in the shade: what makes a lit cell part of a beam is
 // shaded air beside it - a gap in a canopy, not a field in the sun. Taps that
 // fall outside last frame's view are left out.
-float shadeAround(vec3 p) {
-    if (shadowParams.x < 0.5 || vol.jitter.w <= 0.0) return 0.0;
+vec2 shadeAround(vec3 p) {
+    if (shadowParams.x < 0.5 || vol.jitter.w <= 0.0) return vec2(0.0);
     float turn = 6.2831853 * vol.jitter.x;
     vec2 cs = vec2(cos(turn), sin(turn)) * vol.shafts.z;
-    vec3 ring[4] = vec3[4](vec3(cs, 0.0), vec3(-cs, 0.0), vec3(-cs.y, cs.x, 0.0), vec3(cs.y, -cs.x, 0.0));
-    float shaded = 0.0;
-    float taps = 0.0;
-    for (int i = 0; i < 4; ++i) {
+    vec2 ct = vec2(-cs.y, cs.x) * 3.0 * 0.7071 + cs * 3.0 * 0.7071;   // the outer ring, turned 45 degrees
+    vec3 ring[8] = vec3[8](vec3(cs, 0.0), vec3(-cs, 0.0), vec3(-cs.y, cs.x, 0.0), vec3(cs.y, -cs.x, 0.0),
+                           vec3(ct, 0.0), vec3(-ct, 0.0), vec3(-ct.y, ct.x, 0.0), vec3(ct.y, -ct.x, 0.0));
+    vec2 shaded = vec2(0.0);
+    vec2 taps = vec2(0.0);
+    for (int i = 0; i < 8; ++i) {
         vec3 prev;
         if (!lastFrameCell(p + ring[i], prev)) continue;
-        shaded += 1.0 - textureLod(uVisibilityHistory, prev, 0.0).r;
-        taps += 1.0;
+        float s = 1.0 - textureLod(uVisibilityHistory, prev, 0.0).r;
+        if (i < 4) { shaded.x += s; taps.x += 1.0; } else { shaded.y += s; taps.y += 1.0; }
     }
-    return taps > 0.0 ? shaded / taps : 0.0;
+    return vec2(taps.x > 0.0 ? shaded.x / taps.x : 0.0, taps.y > 0.0 ? shaded.y / taps.y : 0.0);
 }
 
 // The local lights that reach any cell of this workgroup, in their original
@@ -226,6 +263,9 @@ void gatherGroupLights() {
 }
 
 // Henyey-Greenstein, scaled so scattering evenly in every direction is 1.
+// How much of its sky light the canopy's shaded air loses by day, with the
+// canopy shafts on: the dark air a beam is seen against.
+const float kCanopyAirCut = 0.5;
 const float kEnhancedSunPullback = 0.85;
 
 float phaseHG(float cosTheta, float g) {
@@ -345,30 +385,61 @@ void main() {
     if (vol.shafts.x > 0.0) {
         vec3 down = travel.z > 0.0 ? -travel : travel;
         float reach = 1.0 - clamp(depth * vol.shafts.w - 1.0, 0.0, 1.0);
-        if (reach > 0.0 && lit > 0.0) {
-            // Most of the ring in shade: a lit cell in a narrow gap. A lit
-            // cell at the edge of one broad shadow (a house, one tree in a
-            // square) sees one or two taps of four in it and stays as it was, which
-            // kept a sunny glade from going milky all over.
-            float around = smoothstep(0.45, 1.0, shadeAround(p));
-            float cosL = dot(down, toCamera);
-            float lobe = phaseHG(cosL, 0.6);
-            // Pulled back round the disc further than the mist's own lobe,
-            // to a third of even scattering within about 8 degrees: there the
-            // sky and the glow are already the brightest thing on screen, and
-            // beams laid over them took more of the view to white.
-            lobe = mix(lobe, 0.3, pullback * smoothstep(0.906, 0.99, cosL));
-            lobe = mix(1.0, lobe, vol.lighting.w);
-            float day = sunUp * (1.0 - vol.shafts.y);
-            float weight = day + vol.shafts.y;
-            // Pale: a beam reads as the light's hue thinned toward white, as
-            // the reference client's do, not as a column of its full colour. By day most of
-            // the way: the morning sun's gold laid over Goldshire's crowns
-            // turned their green to gold (top third hue 43 against the reference client's
-            // 57). The moonbeams keep more of the night's blue.
-            float thin = mix(0.35, 0.7, 1.0 - vol.shafts.y);
-            vec3 beam = mix(lightColor.rgb, vec3(dot(lightColor.rgb, vec3(0.2126, 0.7152, 0.0722))), thin);
-            light += beam * (vol.shafts.x * lit * around * reach * lobe * weight);
+        float day = sunUp * (1.0 - vol.shafts.y);
+        float weight = day + vol.shafts.y;
+        if (reach > 0.0 && weight > 0.0) {
+            // How much of the air round this cell, on rings one and three
+            // probe radii out, the light does not reach: high under a closed
+            // canopy, low in the open.
+            vec2 rings = shadeAround(p);
+            float shade = 0.5 * (rings.x + rings.y);
+            // The canopy's own air: shaded, with shade all round it. Its
+            // sky light (the fog colour) is cut by day, so a beam reads
+            // against dark air rather than a lifted veil (the reference
+            // stills' dark blue-green air either side of a shaft). Not to
+            // black: the leaves keep their colour, and the air its depth.
+            float under = (1.0 - lit) * smoothstep(0.5, 0.95, shade) * reach * day;
+            light -= fogColor.rgb * (vol.lighting.z * kCanopyAirCut * under);
+            if (lit > 0.0) {
+                // A lit cell in a gap: most of both rings in shade. A whole
+                // beam qualifies, not only its rim - the outer ring reaches
+                // past a gap several yards across - while a cell at the edge
+                // of one broad shadow (a house, a lone tree) sees part of
+                // one ring shaded and stays as it was.
+                // The outer ring deep in shade: a gap in a closed canopy. The
+                // sunlit air among the crowns is dappled - its outer ring half
+                // lit - and passing it as a gap laid a pale veil over the
+                // crowns looking up at noon.
+                float gap = smoothstep(0.55, 0.9, rings.y);
+                // And a gap wide enough to show as a shaft: some of the inner
+                // ring lit. A hole of a yard or two among the leaves is under
+                // a cell across and only blurs into the veil.
+                gap *= 1.0 - smoothstep(0.7, 1.0, rings.x);
+                // Under the crowns, not in them: the sunlit air among the
+                // leaves high in a canopy is dappled all through, and at
+                // beam strength it laid a pale veil over the crowns looking up
+                // at noon. Full to 10 yards over the ground, gone by 24.
+                gap *= 1.0 - smoothstep(10.0, 24.0, p.z - vol.medium.y);
+                // And a few yards out: a lit hole in the crown over the camera
+                // is no shaft from here, only a pale cast over the view.
+                gap *= smoothstep(3.0, 10.0, depth);
+                float cosL = dot(down, toCamera);
+                // Forward, but visible from the side too: a shaft seen across
+                // is still a shaft.
+                float lobe = mix(1.0, phaseHG(cosL, 0.5), 0.7);
+                // Held down round the disc, where the sky and its glow are
+                // already the brightest thing on screen.
+                // Only at the disc itself: looking into a sun low through the
+                // trees is where the beams are, and the pull-back over the
+                // twenty degrees round it had taken every beam at dawn.
+                lobe = mix(lobe, 0.3, pullback * smoothstep(0.985, 0.998, cosL));
+                lobe = mix(1.0, lobe, vol.lighting.w);
+                // A beam is the light's hue thinned toward white, warm by
+                // day; the moonbeams keep more of the night's blue.
+                float thin = mix(0.35, 0.6, 1.0 - vol.shafts.y);
+                vec3 beam = mix(lightColor.rgb, vec3(dot(lightColor.rgb, vec3(0.2126, 0.7152, 0.0722))), thin);
+                light += beam * (vol.shafts.x * lit * gap * reach * lobe * weight);
+            }
         }
     }
 

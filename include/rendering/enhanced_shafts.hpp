@@ -18,12 +18,12 @@ namespace enhanced_shafts {
 /// sun scatter (0.8). 9 laid a gold veil over Goldshire's crowns facing the
 /// 9:22 sun (top third saturation 0.46 against the reference client's 0.36); at 3.5, with
 /// the beams paler by day, it is 0.38 and the 15:23 gold still the reference client's.
-inline constexpr float kStrength = 3.5f;
+inline constexpr float kStrength = 6.0f;
 
 /// The moonlight's shafts against the sun's, before its own (dim, blue)
 /// colour: the night light is a fraction of the day's. Strength times this
 /// is 17.5, about the moonbeams' strength from the start (18).
-inline constexpr float kNightScale = 5.0f;
+inline constexpr float kNightScale = 4.0f;
 
 /// How far round a cell, on a level ring, it looks for shade beside it:
 /// about a gap in the leaves.
@@ -32,6 +32,18 @@ inline constexpr float kProbeYards = 2.5f;
 /// Full to this many yards from the camera, gone at twice it: the shafts a
 /// player sees are the ones in the trees round them.
 inline constexpr float kReachYards = 60.0f;
+
+/// The Light shaft strength row (Enhancements::lightShaftStrength): Subtle,
+/// Normal, Strong.
+inline float strengthScale(int setting) {
+    return setting <= 0 ? 0.5f : (setting == 1 ? 1.0f : 1.8f);
+}
+
+/// The same row on the screen-space sun shafts (SunShafts): the streaks from
+/// the sun's place through the gaps in what stands before it.
+inline float screenScale(int setting) {
+    return setting <= 0 ? 0.6f : (setting == 1 ? 1.0f : 1.4f);
+}
 
 struct Tuning {
     float strength = kStrength;

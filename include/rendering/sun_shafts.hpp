@@ -48,6 +48,14 @@ public:
         /// enhanced haze sets it: the shafts screened over a sky the haze
         /// has already lit turned the sun's quarter of the screen white.
         float cap = 0.0f;
+        /// The brightness (luminance of the finished frame) at which the
+        /// sky by the sun starts to count as a source and counts fully, and
+        /// how far from the sun, in screen heights, sources fade out. The
+        /// stock values; the enhanced light lowers the thresholds toward a
+        /// low sun, whose sky is orange and darker than a noon sky.
+        float sourceLow = 0.55f;
+        float sourceHigh = 0.95f;
+        float sourceRadius = 0.4f;
     };
 
     SunShafts() = default;

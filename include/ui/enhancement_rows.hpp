@@ -735,6 +735,30 @@ inline constexpr EnhancementRow kEnhancementRows[] = {
      .controls = "the haze pass (enhanced_haze.frag, built on first use): one full-screen "
                  "pass after the opaque scene, src + dst * transmittance",
      .asBool = &Enhancements::sunHaze},
+    {.key = "lightshaftstrength", .label = "Light shaft strength", .kind = SettingKind::Enum,
+     .minValue = 0, .maxValue = 2, .step = 1, .category = kEnhPageEnhanced, .section = "",
+     .tooltip = "How strongly beams of sunlight show where the sun breaks\n"
+                "through gaps in a canopy and falls to the ground, and the\n"
+                "moonbeams at night. Strong shows them at a glance; Subtle\n"
+                "keeps them faint. Needs Light shafts and mist, and Enhanced\n"
+                "daylight.",
+     .choices = "Subtle|Normal|Strong", .stockValue = 1, .recommendedValue = 1,
+     .saveKey = "light_shaft_strength",
+     .controls = "VolumetricFog::FrameInputs::shaftStrength x0.5, x1 or x1.8 "
+                 "(enhanced_shafts::strengthScale) and the screen-space sun shafts' "
+                 "strength x0.6, x1 or x1.4 (screenScale); no extra work",
+     .enabledWhen = "lightshafts!=0",
+     .asInt = &Enhancements::lightShaftStrength},
+    {.key = "sunglow", .label = "Sun glow", .kind = SettingKind::Float,
+     .minValue = 0, .maxValue = 1, .step = 0.05f, .category = kEnhPageEnhanced, .section = "",
+     .tooltip = "How strongly the air glows warm toward a sun low in the sky,\n"
+                "at dawn and dusk: 1 is the full tuned look, lower softens it\n"
+                "and 0 turns it off. Needs Sun haze.",
+     .choices = "", .stockValue = 1, .recommendedValue = 1, .saveKey = "sun_glow",
+     .controls = "the sun haze pass's low-sun sky light and dusk glow (air.g, air.b), "
+                 "scaled; no extra work",
+     .enabledWhen = "sunhaze!=0",
+     .asFloat = &Enhancements::sunGlow},
     {.key = "bloom", .label = "Bloom", .kind = SettingKind::Float,
      .minValue = 0, .maxValue = 2, .step = 0.1f, .category = kEnhPageEnhanced, .section = "",
      .tooltip = "A soft halo round the brightest parts of the picture: sunlit\n"
