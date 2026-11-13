@@ -1841,6 +1841,15 @@ the work:
   yard of that height, facing more up than sideways, counts as ground. On
   Teldrassil's slopes a single half-yard texel stood a hand off the surface,
   and the pass took the ground for a model.
+- **What is a leaf is not decided column by column.** The two looks for
+  the underside lie along one diagonal on odd columns and the other on even
+  ones, and each pixel kept its own answer: where the diagonals disagreed -
+  a crown's edge, leaves near the camera - the leaves took the sky shade on
+  one column and kept the bounce light on the next, upright stripes two
+  pixels apart. They showed wherever foliage was lit, a moonbeam on a crown
+  most of all (Jered's "grainy" beams, be1b11d; the same with the upscaler
+  on or off, and gone only with the row off). The answer is now pooled with
+  the pixel beside it where that is the same surface, as the visibility is.
 
 Darnassus and Dolanaar at noon (frame mean / 5th percentile):
 

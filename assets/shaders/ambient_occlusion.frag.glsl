@@ -500,6 +500,7 @@ void main() {
     float skyInside = 0.0;
     float groundZ = 0.0;
     float above = 0.0;
+    float leaf = 0.0;
     if (bounceOn && (localLightMeta.z & 128) != 0 && pc.sky.w > 0.5 && d < 1.0) {
         vec2 se = min(skyUv, 1.0 - skyUv);
         float edge = kSkyReach[kSkyReaches - 1] / kSkySpan;
@@ -516,16 +517,28 @@ void main() {
                 const float r = 0.75 / kSkySpan;
                 vec2 o = (skyLane & 1) != 0 ? vec2(r, r) : vec2(r, -r);
                 float foot = min(skyFoot(skyUv + o), skyFoot(skyUv - o));
-                float leaf = smoothstep(1.0, 2.5, above) * smoothstep(1.5, 3.0, foot - groundZ) *
-                             smoothstep(-1.0, 0.0, skyTop(skyUv) - pos.z) * smoothstep(-1.5, -0.5, pos.z - foot);
-                skyInside *= 1.0 - leaf;
+                leaf = smoothstep(1.0, 2.5, above) * smoothstep(1.5, 3.0, foot - groundZ) *
+                       smoothstep(-1.0, 0.0, skyTop(skyUv) - pos.z) * smoothstep(-1.5, -0.5, pos.z - foot);
             }
         }
     }
+    float skyTol = kSkyQuadYards + kSkyQuadPerYard * dist;
+    // The two looks above lie along one diagonal on odd columns and the
+    // other on even ones, so what is a leaf was decided column by column:
+    // a crown's edge, and any leaf whose underside the two diagonals read
+    // differently, stood in upright stripes two pixels apart, the leaves
+    // taking the sky shade on one column and keeping the bounce light on the
+    // next - the grain on the foliage a moonbeam lights (Jered, be1b11d).
+    // Pooled with the pixel beside it, which looked along the other
+    // diagonal, where that is the same surface.
+    {
+        float leafBeside = otherH(leaf, oddX);
+        if (abs(otherH(dist, oddX) - dist) < skyTol) leaf = 0.5 * (leaf + leafBeside);
+    }
+    skyInside *= 1.0 - clamp(leaf, 0.0, 1.0);
     bool skyOn = skyInside > 0.0;
     float visSum = skyOn ? skyVisibilityLane(pos, skyUv, skyLane) : 0.0;
     float visW = skyOn ? 1.0 : 0.0;
-    float skyTol = kSkyQuadYards + kSkyQuadPerYard * dist;
     float dS = skyOn ? dist : -1e6;
     float vh = otherH(visSum, oddX), wh = otherH(visW, oddX), dhS = otherH(dS, oddX);
     bool takeSkyH = skyOn && abs(dhS - dist) < skyTol;
