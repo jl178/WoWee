@@ -374,7 +374,7 @@ bool SunShafts::record(VkCommandBuffer cmd, uint32_t frame, VkImage swapchainIma
     push.sun = glm::vec4(in.sunUV, static_cast<float>(extent.width) / static_cast<float>(extent.height),
                          in.strength);
     push.tint = glm::vec4(in.tint, in.cap);
-    push.source = glm::vec4(in.sourceLow, in.sourceHigh, in.sourceRadius, 0.0f);
+    push.source = glm::vec4(in.sourceLow, in.sourceHigh, in.sourceRadius, in.sourceOverSky);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, marchPipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, marchLayout_, 0, 1, &marchSets_[frame], 0, nullptr);
     vkCmdPushConstants(cmd, marchLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);

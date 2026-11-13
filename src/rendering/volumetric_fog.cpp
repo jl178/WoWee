@@ -32,6 +32,8 @@ struct VolumeParamsGPU {
     glm::vec4 shafts;         // x = canopy shaft strength (0 = none), y = night share,
                               // z = shade probe radius (yd), w = 1 / reach (yd)
     glm::vec4 wind;           // xyz = the wisps' offset in noise cells, w = their share
+    glm::vec4 lines;          // the shafts as lines: night sky-light share, night and day
+                              // line hold, the held beams' gain (enhanced_shafts::Lines)
 };
 
 constexpr uint32_t kInjectGroup = 4;     // 4x4x4, volumetric_fog_inject.comp.glsl
@@ -514,6 +516,7 @@ void VolumetricFog::record(VkCommandBuffer cmd, uint32_t frame, VkDescriptorSet 
     windOffsets_ = mist_wind::advance(windOffsets_, vel, wind_.churn, in.time, dt);
     p.drift = glm::vec4(windOffsets_.banks, glm::clamp(in.noiseAmount, 0.0f, 1.0f));
     p.wind = glm::vec4(windOffsets_.wisps, glm::clamp(wind_.wisps, 0.0f, 0.5f));
+    p.lines = in.shaftLines;
     const uint32_t seq = (frameCounter_ % 16) + 1;
     p.jitter = glm::vec4(halton(seq, 2), halton(seq, 3), halton(seq, 5), history ? 0.9f : 0.0f);
     // Half the slices are lit afresh each frame, alternating; the other half

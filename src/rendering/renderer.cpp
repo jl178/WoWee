@@ -6915,6 +6915,8 @@ void enhancedShaftInputs(const LightingManager* lightingManager, const Weather* 
     in.shaftNight = night;
     in.shaftProbe = tune.probeYards;
     in.shaftReach = tune.reachYards;
+    const enhanced_shafts::Lines& lines = enhanced_shafts::lines();
+    in.shaftLines = glm::vec4(lines.nightSkyAir, lines.nightHold, lines.dayHold, lines.gain);
 }
 }  // namespace
 
@@ -7085,12 +7087,57 @@ void Renderer::recordSunShafts() {
             }
             in.sunUV = sun.uv;
             in.strength = strength;
-            static double lastShaftLog = 0.0;
-            if (globalTime - lastShaftLog > 5.0) {
-                lastShaftLog = globalTime;
-                LOG_INFO("sunShafts: strength=", strength, " cap=", in.cap, " uv=(", sun.uv.x, ",", sun.uv.y,
-                         ") dayIntensity=", lp.dayIntensity, " sunZ=", sunDir.z);
+        }
+        // The moonbeams (docs/re/enhanced-lighting.md 5c, crisp lines by
+        // night): under the enhanced light the same streaks from the moon
+        // Celestial draws, through whatever stands before it - the
+        // reference's moonlit forest is blue lines radiating from behind
+        // the crowns, where the froxel mist, a yard or more a cell, can
+        // only lay a soft glow. The night sky by the moon is a fifth of the
+        // day's brightness, so the sources start far lower, and the moon is
+        // a point: they reach less far from it. Whichever of the sun and
+        // the moon gives the stronger streaks has the pass.
+        if (enh_.sunHaze) {
+            const enhanced_shafts::MoonRays& mr = enhanced_shafts::moonRays();
+            const glm::vec3 moonDir = Celestial::moonDirection(lightingManager->getVisualTimeOfDayHours());
+            const SunOnScreen moon = sunScreenPosition(camera->getViewMatrix(),
+                                                       camera->getUnjitteredProjectionMatrix(), moonDir);
+            if (moon.inFront && mr.strength > 0.0f) {
+                const float screen = enhanced_shafts::screenScale(enh_.lightShaftStrength);
+                float ms = mr.strength * screen;
+                ms *= glm::smoothstep(0.0f, 0.12f, moonDir.z);
+                ms *= glm::clamp(lp.nightIntensity, 0.0f, 1.0f);
+                ms *= glm::mix(1.0f, glm::clamp(lp.celestialGlowThrough, 0.0f, 1.0f),
+                               glm::clamp(lp.cloudDensity, 0.0f, 1.0f));
+                const glm::vec2 past = glm::max(glm::abs(moon.uv - 0.5f) - 0.5f, glm::vec2(0.0f));
+                ms *= 1.0f - glm::smoothstep(0.0f, 0.5f, std::max(past.x, past.y));
+                if (weather) ms *= 1.0f - 0.8f * glm::clamp(weather->getIntensity(), 0.0f, 1.0f);
+                if (ms > in.strength) {
+                    // The night light's own blue, most of it kept.
+                    const glm::vec3 c = lp.diffuseColor;
+                    const float peak = std::max({c.r, c.g, c.b, 1e-3f});
+                    in.tint = glm::mix(glm::vec3(1.0f), c / peak, 0.75f);
+                    in.cap = kEnhancedShaftCap * std::sqrt(screen);
+                    // And over the night sky round the moon (the pass
+                    // reads it): Ashenvale's is a bright teal, and with
+                    // fixed thresholds all of it was a source and the
+                    // streaks took a tenth of the view to white.
+                    in.sourceLow = mr.sourceLow;
+                    in.sourceHigh = mr.sourceHigh;
+                    in.sourceOverSky = mr.overSky;
+                    in.sourceRadius = mr.sourceRadius;
+                    in.sunUV = moon.uv;
+                    in.strength = ms;
+                }
             }
+        }
+        static double lastShaftLog = 0.0;
+        if (globalTime - lastShaftLog > 5.0) {
+            lastShaftLog = globalTime;
+            LOG_INFO("sunShafts: strength=", in.strength, " cap=", in.cap, " uv=(", in.sunUV.x, ",", in.sunUV.y,
+                     ") dayIntensity=", lp.dayIntensity, " nightIntensity=", lp.nightIntensity,
+                     " source=", in.sourceLow, "/", in.sourceHigh,
+                     " sunZ=", sunDir.z);
         }
     }
     // Called every frame, strength zero included, so the composite knows

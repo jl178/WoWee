@@ -121,6 +121,11 @@ public:
         /// far weather stirs it (0-1: rain, snow or sand at its intensity).
         mist_wind::Wind wind{};
         float storm = 0.0f;
+        /// The shafts as lines (enhanced_shafts::Lines): the share of the
+        /// air's sky light kept by night, how far a beam is held to a thin
+        /// one by night and by day, and the gain the beams left take as far
+        /// as they are held. The identity leaves the mist as it was.
+        glm::vec4 shaftLines{1.0f, 0.0f, 0.0f, 1.0f};
     };
 
     VolumetricFog() = default;

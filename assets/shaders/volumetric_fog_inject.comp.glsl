@@ -77,6 +77,9 @@ layout(set = 1, binding = 0) uniform VolumeParams {
                          // w = 1 / the yards over which they fade out with distance
     vec4 wind;           // xyz = how far the wisps have blown and churned, in their noise cells,
                          // w = their share of the density (mist_wind.hpp)
+    vec4 lines;          // the shafts as lines (enhanced_shafts::Lines): x = the share of the air's
+                         // sky light kept by night, y, z = how far a beam is held to a thin one by
+                         // night and by day, w = the gain the beams left take, as far as held
 } vol;
 
 layout(set = 1, binding = 1) uniform sampler2D uShadowDepth;
@@ -415,7 +418,11 @@ void main() {
     // elsewhere and there is no glow round a sun that is not drawn.
     float evenShare = enhancedSun ? 0.5 : 0.35;
     phase = mix(evenShare, phase, vol.lighting.w);
-    vec3 light = fogColor.rgb * vol.lighting.z;
+    // By night under the shafts, most of that sky light is taken out: the
+    // moonlit air read as a soft blue glow down Goldshire's road, the
+    // moonbeams lost in it (Jered, 046a047). Dark air, and the beams on it.
+    float skyAir = vol.shafts.x > 0.0 ? mix(1.0, vol.lines.x, vol.shafts.y) : 1.0;
+    vec3 light = fogColor.rgb * (vol.lighting.z * skyAir);
     // One tap of the map, shared by the mist's sunlight and the shafts below.
     float lit = (sunUp > 0.0 || vol.shafts.x > 0.0) ? sunVisibility(p) : 0.0;
     if (dawnFar > 0.0) {
@@ -491,6 +498,16 @@ void main() {
                 // ring lit. A hole of a yard or two among the leaves is under
                 // a cell across and only blurs into the veil.
                 gap *= 1.0 - smoothstep(0.7, 1.0, rings.x);
+                // A line rather than a slab: half or more of the inner ring
+                // shaded - a beam a few yards across, not the lit air of a
+                // road or a clearing under a gap as wide, which laid a broad
+                // glow. Held to that by night (vol.lines.y), and by day as
+                // far as vol.lines.z.
+                float lineHold = mix(vol.lines.z, vol.lines.y, vol.shafts.y);
+                gap *= mix(1.0, smoothstep(0.25, 0.6, rings.x), lineHold);
+                // The beams left take the gain (vol.lines.w) as far as
+                // they are held: fewer, and each brighter.
+                gap *= mix(1.0, vol.lines.w, lineHold);
                 // Under the crowns, not in them: the sunlit air among the
                 // leaves high in a canopy is dappled all through, and at
                 // beam strength it laid a pale veil over the crowns looking up

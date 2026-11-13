@@ -36,7 +36,8 @@
 //   WoweeDebug_SunYaw()            the camera yaw (as Camera takes it) that
 //                                  faces the sun, and the sun's height; then
 //                                  the same for where the scene's light
-//                                  comes from (the moonlight at night)
+//                                  comes from (the moonlight at night),
+//                                  then the moon sprite's yaw and height
 //   WoweeDebug_UseObject(name)     right-click the nearest game object of
 //                                  that name (a mailbox, a guild vault)
 //   WoweeDebug_RightClickCorpse()  right-click the targeted corpse (loot,
@@ -74,6 +75,7 @@
 #include "game/opcode_table.hpp"
 #include "network/packet.hpp"
 #include "rendering/camera_controller.hpp"
+#include "rendering/celestial.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "rendering/renderer.hpp"
@@ -319,7 +321,12 @@ int luaDebugSunYaw(lua_State* L) {
     float lyaw = glm::degrees(std::atan2(from.y, from.x)) - cc->getFacingYaw();
     lua_pushnumber(L, std::fmod(lyaw + 720.0f, 360.0f));
     lua_pushnumber(L, glm::degrees(std::asin(glm::clamp(from.z, -1.0f, 1.0f))));
-    return 4;
+    // And the moon Celestial draws (the White Lady), for shooting toward it.
+    const glm::vec3 m = rendering::Celestial::moonDirection(lm->getVisualTimeOfDayHours());
+    float myaw = glm::degrees(std::atan2(m.y, m.x)) - cc->getFacingYaw();
+    lua_pushnumber(L, std::fmod(myaw + 720.0f, 360.0f));
+    lua_pushnumber(L, glm::degrees(std::asin(glm::clamp(m.z, -1.0f, 1.0f))));
+    return 6;
 }
 
 /// WoweeDebug_TimeOfDay(hours) - the light and sky held at an hour, so a test

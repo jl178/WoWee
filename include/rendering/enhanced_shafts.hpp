@@ -75,6 +75,79 @@ inline const Tuning& tuning() {
     return t;
 }
 
+/// The shafts as lines, not a glow (Jered on 046a047: "moonlight feels
+/// hazy, not like strong lines"). By night the air keeps this share of its
+/// sky light, so the beams stand on dark air; a beam is held to a thin one
+/// (half or more of the inner ring shaded) by night and, this far, by day;
+/// and the beams that are left take this gain as far as they are held.
+/// WOWEE_SHAFT_LINES=nightSkyAir[,nightHold,dayHold,gain]; 1,0,0,1 is the
+/// mist before (046a047).
+struct Lines {
+    float nightSkyAir = 0.25f;
+    float nightHold = 1.0f;
+    float dayHold = 0.6f;
+    float gain = 2.2f;
+};
+
+inline const Lines& lines() {
+    static const Lines l = [] {
+        Lines r;
+        const char* e = std::getenv("WOWEE_SHAFT_LINES");
+        if (e && *e) {
+            float v[4] = {r.nightSkyAir, r.nightHold, r.dayHold, r.gain};
+            const char* p = e;
+            for (int i = 0; i < 4 && *p; ++i) {
+                char* end = nullptr;
+                const float x = std::strtof(p, &end);
+                if (end == p) break;
+                v[i] = x;
+                p = (*end == ',') ? end + 1 : end;
+            }
+            r = {v[0], v[1], v[2], v[3]};
+        }
+        return r;
+    }();
+    return l;
+}
+
+/// The moonbeams on the screen (SunShafts toward the moon, Renderer::
+/// recordSunShafts): strength before the Light shaft strength row, and where
+/// the frame starts to and fully counts as sky by the moon (its brightness),
+/// and how far from it, in screen heights, the sources fade out. The night
+/// sky by the moon is about a fifth of the day's, so a source starts low;
+/// the sky away from it is darker still and stays out.
+/// A source must also be overSky times the frame's brightness round the
+/// moon. WOWEE_MOON_SHAFTS=strength[,low,high,radius,overSky] (0 turns them
+/// off).
+struct MoonRays {
+    float strength = 3.0f;
+    float sourceLow = 0.08f;
+    float sourceHigh = 0.30f;
+    float sourceRadius = 0.35f;
+    float overSky = 1.3f;
+};
+
+inline const MoonRays& moonRays() {
+    static const MoonRays m = [] {
+        MoonRays r;
+        const char* e = std::getenv("WOWEE_MOON_SHAFTS");
+        if (e && *e) {
+            float v[5] = {r.strength, r.sourceLow, r.sourceHigh, r.sourceRadius, r.overSky};
+            const char* p = e;
+            for (int i = 0; i < 5 && *p; ++i) {
+                char* end = nullptr;
+                const float x = std::strtof(p, &end);
+                if (end == p) break;
+                v[i] = x;
+                p = (*end == ',') ? end + 1 : end;
+            }
+            r = {v[0], v[1], v[2], v[3], v[4]};
+        }
+        return r;
+    }();
+    return m;
+}
+
 }  // namespace enhanced_shafts
 }  // namespace rendering
 }  // namespace wowee

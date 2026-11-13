@@ -19,7 +19,8 @@ layout(push_constant) uniform Push {
     vec4 sun;   // xy = the sun's place on screen, z = width / height, w = strength
     vec4 tint;  // rgb = the sun's colour, w = the most the rays add (0 = no limit)
     vec4 source;  // x, y = brightness at which the frame starts to and fully counts as sky near
-                  // the sun; z = how far from the sun, in screen heights, sources fade out
+                  // the sun; z = how far from the sun, in screen heights, sources fade out;
+                  // w > 0: and this many times the frame's brightness round the light
 } push;
 
 const int kSamples = 48;
@@ -48,6 +49,22 @@ void main() {
     float dither = fract(52.9829189 * fract(dot(vec2(pixel), vec2(0.06711056, 0.00583715))));
     vec2 at = uv + step * dither;
 
+    // The moonbeams' threshold over the sky round the light (push.source.w):
+    // the mean of eight taps on a ring half the source radius out.
+    float low = push.source.x;
+    float high = push.source.y;
+    if (push.source.w > 0.0) {
+        float ring = 0.0;
+        for (int k = 0; k < 8; ++k) {
+            float a = 0.7853982 * float(k);
+            vec2 q = clamp(push.sun.xy + vec2(cos(a) / push.sun.z, sin(a)) * (0.5 * push.source.z),
+                           vec2(0.0), vec2(1.0));
+            ring += dot(textureLod(uFrame, q, 0.0).rgb, vec3(0.2126, 0.7152, 0.0722));
+        }
+        low = max(low, push.source.w * ring / 8.0);
+        high = max(high, low + (push.source.y - push.source.x));
+    }
+
     vec3 gathered = vec3(0.0);
     float weight = 1.0;
     float total = 0.0;
@@ -55,7 +72,7 @@ void main() {
         total += weight;
         if (at.x >= 0.0 && at.x <= 1.0 && at.y >= 0.0 && at.y <= 1.0) {
             vec3 c = textureLod(uFrame, at, 0.0).rgb;
-            float bright = smoothstep(push.source.x, push.source.y,
+            float bright = smoothstep(low, high,
                                       dot(c, vec3(0.2126, 0.7152, 0.0722)));
             vec2 fromSun = (at - push.sun.xy) * vec2(push.sun.z, 1.0);
             float nearSun = exp(-dot(fromSun, fromSun) / (push.source.z * push.source.z));

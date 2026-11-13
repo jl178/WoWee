@@ -56,6 +56,12 @@ public:
         float sourceLow = 0.55f;
         float sourceHigh = 0.95f;
         float sourceRadius = 0.4f;
+        /// Above 0: a source must also be this many times brighter than
+        /// the frame round the light (a ring half the source radius out,
+        /// read by the pass itself) - the moonbeams, over a night sky that
+        /// is near black in Elwynn and a bright teal in Ashenvale, so only
+        /// the moon and the sky between the leaves before it count.
+        float sourceOverSky = 0.0f;
     };
 
     SunShafts() = default;

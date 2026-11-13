@@ -1243,6 +1243,55 @@ Elwynn evening -5.0%, forest -2.6% against y5; Barrens 0.546; Westfall
 crossroads 0.22%. The inject pass 0.767 -> 0.785 ms in Elwynn's forest
 (one more noise octave).
 
+**Lines, not haze** (Jered on 046a047, Goldshire's road at 1:56:
+"moonlight feels hazy, not like strong lines"). The reference's moonlit
+forest is blue lines radiating from behind the crowns; the Ashenvale
+still, one defined beam. Ours by night was a soft blue glow down the road
+and through the forest, with the moon's tree shadows sharp on the
+cobbles. Three things made the glow, none of them the fog drift or the
+history:
+
+- *The sky light in the air.* Every cell takes the fog colour at half,
+  and under a night sky that is most of what the air shows: a glow that
+  owes nothing to the moon. By night under the shafts the air now keeps a
+  quarter of it (`enhanced_shafts::Lines::nightSkyAir`), so the beams
+  stand on dark air.
+- *Slabs.* A lit cell passed as a beam wherever the air round it, three
+  probe radii out, was shaded - so the whole lit width of a road or a
+  clearing under a gap as wide glowed. A beam is now held to a line: half
+  or more of the inner ring (2.5 yards round) shaded, a few yards across
+  at most (fully by night, 0.6 of the way by day), and the beams left
+  take 2.2 times the light as far as they are held. Fewer, and each
+  brighter, with the edge the detail map gives it.
+- *No moon on the screen.* The screen-space streaks (`SunShafts`) ran only
+  from the sun. Under the enhanced light they now run from the moon
+  Celestial draws as well, whichever is the stronger; the night sky is far
+  darker than the day's, so the sources start at 0.08 rather than 0.55, and
+  must also be 1.3 times the frame round the moon (the pass reads a ring
+  of eight taps half the source radius out) - fixed thresholds over
+  Ashenvale's bright teal night sky took 9.5% of Astranaar's view to white
+  (`enhanced_shafts::MoonRays`, `WOWEE_MOON_SHAFTS`).
+
+The fog drift's wisps change a cell's density by at most a quarter over 8
+yards, so they modulate a beam's brightness along it and cannot widen it;
+the history (0.9 of last frame, reprojected, the sample jittered within
+the cell) averages a beam's edge over one cell, a quarter of a yard at
+twenty. Neither was the haze.
+
+Measured (lab, 1280x540): Elwynn's forest toward the moon at 1:00 shows a
+single crisp diagonal beam where it showed a glow; Astranaar at 1:00 the
+air 10% darker, the broad bright column gone (0.74% white, was 0.95%);
+Goldshire's road the glow down it gone. By day Elwynn's beams at 10:00
+and 15:00 narrower and brighter, lines rather than slabs. Elwynn evening
+-5.0 to -5.6% over three runs, forest -2.3 to -2.6% against y5; Barrens
+0.545; into the sun at the crossroads 0.21%; Westfall 6:18 0.2% white
+(0.2% at Strong). The inject pass, same executable, three alternating
+rounds: 0.749 -> 0.768 ms toward the moon in Elwynn's forest at 1:00,
+0.758 -> 0.771 at 10:00 (a few arithmetic operations a cell, no taps);
+the moon's streaks cost what the sun's do, 0.25 ms, only while the moon is
+in view by night. `WOWEE_SHAFT_LINES=1,0,0,1 WOWEE_MOON_SHAFTS=0` is the mist
+before.
+
 ## 6. Global illumination ("Secondary Lighting")
 
 reference-era shaders with no names in the community listfile
